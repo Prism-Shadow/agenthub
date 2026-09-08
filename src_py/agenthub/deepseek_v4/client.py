@@ -14,6 +14,7 @@
 
 import json
 import os
+import re
 from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
@@ -34,6 +35,13 @@ from ..types import (
     UsageMetadata,
 )
 from ..utils import is_debug_enabled
+
+
+# The DeepSeek ids that read no image: the current V4 Flash and V4 Pro, bare or with a dated
+# snapshot suffix (deepseek-v4-flash-0731). Every other id forwards its images. Matched against
+# the bare id — the part after the last "/", lowercased — so a gateway prefix (deepseek/,
+# deepseek-ai/) and the spelling a platform uses do not change the verdict.
+_TEXT_ONLY_MODELS = re.compile(r"deepseek-v4-(flash|pro)(-\d{4})?")
 
 
 class DeepSeekV4Client(LLMClient):
@@ -142,10 +150,10 @@ class DeepSeekV4Client(LLMClient):
         Returns:
             List of input items for the Responses API
         """
-        # only a vision model reads image parts; every other DeepSeek model answers from a
-        # placeholder instead of failing (llmsdk_docs/deepseek_v4/docs/responses-api.md), so an
-        # image is refused here rather than silently dropped
-        supports_image = "vision" in self._model.lower()
+        # a text-only model answers from a placeholder instead of failing
+        # (llmsdk_docs/deepseek_v4/docs/responses-api.md), so an image is refused here rather
+        # than silently dropped
+        supports_image = not _TEXT_ONLY_MODELS.fullmatch(self._model.lower().rsplit("/", 1)[-1])
         input_list: list[ResponseInputParam] = []
 
         for msg in messages:

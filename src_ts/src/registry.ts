@@ -325,9 +325,10 @@ const SUPPORTED_MODELS: SupportedModel[] = [
     input_modalities: ["Text"],
     output_modalities: ["Text"],
     context_window: 1000000,
-    // official off-peak list price (verified 2026-08-18); peak-hour rates
-    // (Beijing 9:00-12:00, 14:00-18:00) are double
-    pricing: cny(1.5, 4.5, 0.05),
+    // official off-peak list price effective 2026-09-10 (verified 2026-09-08 against
+    // the official adjustment); peak-hour rates (Beijing 9:00-12:00, 14:00-18:00) are
+    // double
+    pricing: cny(1.0, 4.0, 0.02),
   },
   {
     model: "deepseek-v4-flash-vision-exp",
@@ -336,9 +337,10 @@ const SUPPORTED_MODELS: SupportedModel[] = [
     input_modalities: ["Text", "Image"],
     output_modalities: ["Text"],
     context_window: 1000000,
-    // priced as deepseek-v4-flash; official off-peak list price (verified 2026-08-21), and
-    // peak-hour rates (Beijing 9:00-12:00, 14:00-18:00) are double
-    pricing: cny(1.5, 4.5, 0.05),
+    // priced as deepseek-v4-flash; official off-peak list price effective 2026-09-10
+    // (verified 2026-09-08 against the official adjustment), and peak-hour rates
+    // (Beijing 9:00-12:00, 14:00-18:00) are double
+    pricing: cny(1.0, 4.0, 0.02),
   },
   {
     model: "deepseek-v4-pro",
