@@ -3,6 +3,7 @@
 - **Date:** 2026-09-08
 - **Type:** fix
 - **Scope:** `registry`
+- **PR:** [#203](https://github.com/Prism-Shadow/agenthub/pull/203)
 
 [English](2026-09-08-deepseek-flash-pricing.md)
 
