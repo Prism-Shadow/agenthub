@@ -177,6 +177,8 @@ class ImageDetailCase:
     protocol: str
     # whether an image over the patch limit goes out at high detail
     shrinks: bool
+    # whether the model reads no image parts, so the transform refuses them instead of forwarding them
+    refuses_images: bool = False
 
 
 IMAGE_DETAIL_CASES = [
@@ -186,6 +188,14 @@ IMAGE_DETAIL_CASES = [
     ImageDetailCase("OpenaiResponsesClient", "deepseek-v4-flash-vision-exp", "openai-responses", "responses", False),
     ImageDetailCase("OpenaiChatClient", "GPT-5.6-Sol", "openai-chat", "chat", True),
     ImageDetailCase("OpenaiChatClient", "gpt-5.5", "openai-chat", "chat", False),
+    # The DeepSeek client forwards images to every id except the text-only V4 Flash / V4 Pro
+    # (bare, dated snapshot, any gateway prefix, any case).
+    ImageDetailCase("DeepSeekV4Client", "deepseek-v4-flash", None, "responses", False, refuses_images=True),
+    ImageDetailCase(
+        "DeepSeekV4Client", "deepseek-ai/DeepSeek-V4-Flash", "deepseek-v4", "responses", False, refuses_images=True
+    ),
+    ImageDetailCase("DeepSeekV4Client", "deepseek-v4-flash-vision-exp", None, "responses", False),
+    ImageDetailCase("DeepSeekV4Client", "deepseek-v4.1-flash", None, "responses", False),
 ]
 
 OVERSIZED = _data_url(_png(6400, 8608))
@@ -236,9 +246,16 @@ def _details(case: ImageDetailCase, model_input: list[dict[str, Any]]) -> list[s
     IMAGE_DETAIL_CASES,
     ids=[f"{case.model}:{case.client_type or 'auto'}" for case in IMAGE_DETAIL_CASES],
 )
-async def test_image_over_the_patch_limit_goes_out_at_high_detail_on_gpt_5_6(case: ImageDetailCase):
+async def test_image_parts_go_out_at_the_detail_the_client_needs_or_are_refused_where_the_model_reads_none(
+    case: ImageDetailCase,
+):
     client = AutoLLMClient(model=case.model, api_key="test-key", client_type=case.client_type)
     assert client._client.__class__.__name__ == case.expected_client  # noqa: SLF001
+
+    if case.refuses_images:
+        with pytest.raises(ValueError, match="does not support image"):
+            client._client.transform_uni_message_to_model_input(MESSAGES)  # noqa: SLF001
+        return
 
     model_input = client._client.transform_uni_message_to_model_input(MESSAGES)  # noqa: SLF001
     if inspect.isawaitable(model_input):
