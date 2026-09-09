@@ -246,3 +246,5 @@ async def test_image_over_the_patch_limit_goes_out_at_high_detail_on_gpt_5_6(cas
 
     shrunk = "high" if case.shrinks else "absent"
     assert _details(case, model_input) == [shrunk, "absent", shrunk, "absent"]
+    # the list form is what images require
+    assert isinstance(model_input[2]["output" if case.protocol == "responses" else "content"], list)

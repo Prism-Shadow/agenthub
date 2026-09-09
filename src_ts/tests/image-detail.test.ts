@@ -391,6 +391,12 @@ describe.each(IMAGE_DETAIL_CASES)(
           shrunk,
           "absent",
         ]);
+        // the list form is what images require
+        expect(
+          testCase.protocol === "responses"
+            ? Array.isArray(modelInput[2].output)
+            : Array.isArray(modelInput[2].content),
+        ).toBe(true);
       },
     );
   },
