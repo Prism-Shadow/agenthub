@@ -43,7 +43,7 @@ GEMINI_ORDER = ["user:text", "model:thinking,text,function_call", "user:function
 CHAT_ORDER = ["user:text", "assistant:text,tool_calls,thinking", "tool:call_1"]
 
 MESSAGE_ORDER_CASES = [
-    MessageOrderCase("GPT5_6Client", "gpt-5.6", None, "responses", RESPONSES_ORDER),
+    MessageOrderCase("GPT6Client", "gpt-5.6", None, "responses", RESPONSES_ORDER),
     MessageOrderCase("OpenaiResponsesClient", "gpt-5.6", "openai-responses", "responses", RESPONSES_ORDER),
     MessageOrderCase("DeepSeekV4Client", "deepseek-v4", "deepseek-v4", "responses", RESPONSES_ORDER),
     MessageOrderCase("MiniMaxM3Client", "MiniMax-M3", "minimax-m3", "responses", RESPONSES_ORDER),
