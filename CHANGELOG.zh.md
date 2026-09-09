@@ -4,6 +4,8 @@
 
 在这里，我们记录模型的新增与移除时间、主要功能更新、缺陷修复，以及关键版本的发布时间。每个发布版本在此保留一行简述；逐条目的摘要位于 `changelog/<version>/README.md`，且每个条目都会链接到自己的详情文件。
 
+- [2026-09-09] [版本 0.4.11](changelog/0.4.11/README.zh.md)：注册表新增 GPT-6 Astra，共享的 GPT 客户端按其重命名为 `gpt6`，GPT-6 上的 `none` 思考等级收敛为 `low`；DeepSeek V4 Flash 各行改用 2026-09-10 起生效的价格，DeepSeek 图片改由纯文本拒绝名单把关而非 "vision" 子串，并预先登记 `deepseek-v4.1-flash`；通用 OpenAI Chat 与 Responses 客户端将纯文本工具结果作为纯字符串发送。
+
 - [2026-09-04] [版本 0.4.10](changelog/0.4.10/README.zh.md)：注册表新增 Gemini 3.8 Flash 并将共享的 Gemini 客户端按其重命名，移除 Gemini 2 系列支持；注册表只记牌价、不再保留折扣字段；全部 thinking level 与 thinking summary 取值都保证送达；新增 vLLM 适配客户端，按所服务模型自身 chat template 读取的开关映射思考等级。
 
 - [2026-09-02] [版本 0.4.9](changelog/0.4.9/README.zh.md)：GPT-5.6 对超过 30,000 patch 上限的图片改以高细节读取，不再拒收；提示词与工具返回里的图片都适用，GPT-5.6、OpenAI Responses、OpenAI Chat 三个 client 一并生效。
