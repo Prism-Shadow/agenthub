@@ -208,10 +208,23 @@ const SUPPORTED_MODELS: SupportedModel[] = [
     pricing: usd(3.0, 15.0, 0.3),
   },
   {
+    // official list price per 1M tokens: $1 cached input, $10 uncached input, $12.5 cache
+    // writes, $50 output, all doubled above 272K input tokens except output, which is 1.5x.
+    // The prompt bucket carries the cache-write rate: the usage buckets do not separate
+    // cache-written input from plain input.
+    model: "gpt-6-astra",
+    base_url: OPENAI,
+    client: "gpt-6",
+    input_modalities: ["Text", "Image"],
+    output_modalities: ["Text"],
+    context_window: 1050000,
+    pricing: usd(12.5, 50.0, 1.0),
+  },
+  {
     // official standard-tier list price; the bare gpt-5.6 alias also routes here
     model: "gpt-5.6-sol",
     base_url: OPENAI,
-    client: "gpt-5.6",
+    client: "gpt-6",
     input_modalities: ["Text", "Image"],
     output_modalities: ["Text"],
     context_window: 1050000,
@@ -220,7 +233,7 @@ const SUPPORTED_MODELS: SupportedModel[] = [
   {
     model: "gpt-5.6-terra",
     base_url: OPENAI,
-    client: "gpt-5.6",
+    client: "gpt-6",
     input_modalities: ["Text", "Image"],
     output_modalities: ["Text"],
     context_window: 1050000,
@@ -229,7 +242,7 @@ const SUPPORTED_MODELS: SupportedModel[] = [
   {
     model: "gpt-5.6-luna",
     base_url: OPENAI,
-    client: "gpt-5.6",
+    client: "gpt-6",
     input_modalities: ["Text", "Image"],
     output_modalities: ["Text"],
     context_window: 1050000,
@@ -459,6 +472,17 @@ const SUPPORTED_MODELS: SupportedModel[] = [
     output_modalities: ["Text"],
     context_window: 1000000,
     pricing: usd(0.0, 0.0),
+  },
+  {
+    // models API 2026-09-09, default OpenAI endpoint, no discount: $10 input, $50 output,
+    // $1 cache read, $12.5 cache write per 1M tokens
+    model: "openai/gpt-6-astra",
+    base_url: OPENROUTER,
+    client: "openai-responses",
+    input_modalities: ["Text", "Image"],
+    output_modalities: ["Text"],
+    context_window: 1050000,
+    pricing: usd(12.5, 50.0, 1.0),
   },
   {
     model: "openai/gpt-5.6-sol",

@@ -101,7 +101,7 @@ if (process.env.ANTHROPIC_API_KEY) {
 
 if (process.env.OPENAI_API_KEY) {
   AVAILABLE_MODELS.push({
-    name: "gpt-5.6-luna",
+    name: "gpt-6-astra",
     supportTextGeneration: true,
     supportImageUnderstanding: true,
     supportImageGeneration: false,
@@ -294,7 +294,7 @@ if (process.env.MINIMAX_API_KEY && RUN_SLOW_TEST) {
 if (process.env.OPENROUTER_API_KEY && RUN_SLOW_TEST) {
   for (const mode of PROTOCOL_MODES) {
     AVAILABLE_MODELS.push({
-      name: "openai/gpt-5.6-luna",
+      name: "openai/gpt-6-astra",
       supportTextGeneration: true,
       supportImageUnderstanding: true,
       supportImageGeneration: false,

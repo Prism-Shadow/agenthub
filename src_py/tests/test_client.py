@@ -83,7 +83,7 @@ if os.getenv("ANTHROPIC_API_KEY"):
     AVAILABLE_MODELS.append(Model(name="claude-sonnet-5"))
 
 if os.getenv("OPENAI_API_KEY"):
-    AVAILABLE_MODELS.append(Model(name="gpt-5.6-luna"))
+    AVAILABLE_MODELS.append(Model(name="gpt-6-astra"))
     AVAILABLE_MODELS.append(
         Model(
             name="text-embedding-3-large",
@@ -198,7 +198,7 @@ if os.getenv("OPENROUTER_API_KEY") and RUN_SLOW_TEST:
     for mode in _PROTOCOL_MODES:
         AVAILABLE_MODELS.append(
             Model(
-                name="openai/gpt-5.6-luna",
+                name="openai/gpt-6-astra",
                 provider="openrouter",
                 client_type=mode,
                 base_url=_PROTOCOL_BASE_URLS["openrouter"][mode],

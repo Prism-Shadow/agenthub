@@ -180,8 +180,8 @@ class ImageDetailCase:
 
 
 IMAGE_DETAIL_CASES = [
-    ImageDetailCase("GPT5_6Client", "gpt-5.6-terra", None, "responses", True),
-    ImageDetailCase("GPT5_6Client", "gpt-5.5", None, "responses", False),
+    ImageDetailCase("GPT6Client", "gpt-5.6-terra", None, "responses", True),
+    ImageDetailCase("GPT6Client", "gpt-5.5", None, "responses", False),
     ImageDetailCase("OpenaiResponsesClient", "openai/gpt-5.6-terra", "openai-responses", "responses", True),
     ImageDetailCase("OpenaiResponsesClient", "deepseek-v4-flash-vision-exp", "openai-responses", "responses", False),
     ImageDetailCase("OpenaiChatClient", "GPT-5.6-Sol", "openai-chat", "chat", True),

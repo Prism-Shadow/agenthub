@@ -38,14 +38,14 @@ import {
 import { isDebugEnabled, openaiImageDetail } from "../utils";
 
 /**
- * GPT-5.6-specific LLM client implementation (also serves GPT-5.4 and GPT-5.5).
+ * GPT-6-specific LLM client implementation (also serves GPT-5.6, GPT-5.5 and GPT-5.4).
  */
-export class GPT5_6Client extends LLMClient {
+export class GPT6Client extends LLMClient {
   protected _model: string;
   private _client: OpenAI;
 
   /**
-   * Initialize GPT-5.6 client with model and API key.
+   * Initialize GPT-6 client with model and API key.
    */
   constructor(options: {
     model: string;
@@ -69,6 +69,14 @@ export class GPT5_6Client extends LLMClient {
    * Convert ThinkingLevel enum to OpenAI's reasoning effort.
    */
   private _convertThinkingLevelToEffort(thinkingLevel: ThinkingLevel): string {
+    if (thinkingLevel === ThinkingLevel.NONE && this._model.includes("gpt-6")) {
+      // GPT-6 rejects both "none" and "minimal" with a 400 (verified live 2026-09-09:
+      // "Unsupported value: 'none' is not supported with the 'gpt-6-astra' model.
+      // Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'."), so NONE
+      // degrades to the lowest effort the generation accepts.
+      return "low";
+    }
+
     const mapping: { [key: string]: string } = {
       [ThinkingLevel.NONE]: "none",
       [ThinkingLevel.LOW]: "low",
@@ -134,7 +142,7 @@ export class GPT5_6Client extends LLMClient {
       throw new UnsupportedParameterError({
         client: this.constructor.name,
         parameter: "temperature",
-        message: "GPT-5.6 does not support setting temperature.",
+        message: "GPT-6 does not support setting temperature.",
       });
     }
 
@@ -174,7 +182,7 @@ export class GPT5_6Client extends LLMClient {
       throw new UnsupportedParameterError({
         client: this.constructor.name,
         parameter: "prompt_caching",
-        message: "prompt_caching must be ENABLE for GPT-5.6.",
+        message: "prompt_caching must be ENABLE for GPT-6.",
       });
     }
 
@@ -360,7 +368,12 @@ export class GPT5_6Client extends LLMClient {
         // the completed item carries the canonical wire fields to send back on the
         // next turn (identical to the response.completed copy, but adjacent to the
         // thinking deltas so the fidelity lands on the item that carried the text);
-        // record the channel plus the fields the server demands back
+        // record the channel plus the fields the server demands back. This event is the
+        // only source of encrypted_content, because the streaming-events reference says
+        // of response.output_item.added: "For reasoning items, encrypted_content may be
+        // incomplete while the item is in progress. Use the reasoning item from the
+        // corresponding response.output_item.done event when passing it as input to a
+        // subsequent request."
         eventType = "delta";
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const fidelity: any = {};

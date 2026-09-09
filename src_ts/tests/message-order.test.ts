@@ -55,7 +55,7 @@ const CHAT_ORDER = [
 
 const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.6",
     protocol: "responses",
     expected: RESPONSES_ORDER,

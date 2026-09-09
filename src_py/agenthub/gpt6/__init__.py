@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from .client import GPT5_6Client
+from .client import GPT6Client
 
 
-__all__ = ["GPT5_6Client"]
+__all__ = ["GPT6Client"]

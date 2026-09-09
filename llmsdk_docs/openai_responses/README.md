@@ -10,6 +10,11 @@ OpenAI, OpenRouter, DeepSeek, Z.AI, and MiniMax.
   `POST /v1/responses` reference: complete Body Parameters section (input items, reasoning,
   tools, `service_tier`) plus the streaming example; the Response-object schema section is
   omitted (the live captures under `api_captures/openai_responses/` record the streamed shapes)
+- [openai-responses-streaming-events.md](./docs/openai-responses-streaming-events.md) - Labelled
+  excerpt of OpenAI's streaming-events reference: `response.output_item.added` /
+  `response.output_item.done` and the reasoning item they carry, every `response.reasoning_*`
+  event, `response.completed` / `response.incomplete` / `response.failed` / `error`, and the
+  usage object (the full page is ~15.6 MB of generated schema JSON)
 - [openrouter-create-a-response.md](./docs/openrouter-create-a-response.md) - OpenRouter's
   `POST /api/v1/responses` OpenAPI spec (OpenResponses dialect: reasoning items with
   `content`/`signature`/`format`/`encrypted_content`, assistant message `phase`)
@@ -41,6 +46,7 @@ reference; replay-minimality probe results live next to each capture in `probes.
 ## Official sources
 
 - https://developers.openai.com/api/reference/resources/responses/methods/create
+- https://developers.openai.com/api/reference/resources/responses/streaming-events
 - https://openrouter.ai/docs/api/api-reference/responses/create-a-response
 - https://api-docs.deepseek.com/guides/responses_api
 - https://platform.minimax.io/docs/api-reference/responses-create

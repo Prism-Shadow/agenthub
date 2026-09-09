@@ -45,7 +45,7 @@ SERVED_IDS = [
 # A protocol client is named explicitly and speaks for the whole listing; a client deduced from a
 # model id keeps only the ids that deduce back to it.
 SDK_LIST_CASES = [
-    ListCase(expected_client="GPT5_6Client", model="gpt-5.6", client_type="gpt-5.6", expected=["gpt-5.6"]),
+    ListCase(expected_client="GPT6Client", model="gpt-5.6", client_type="gpt-5.6", expected=["gpt-5.6"]),
     ListCase(
         expected_client="Claude5Client",
         model="claude-sonnet-5",

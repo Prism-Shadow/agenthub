@@ -40,7 +40,7 @@ const servedIds = [
 // a model id keeps only the ids that deduce back to it.
 const SDK_LIST_CASES: ListCase[] = [
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.6",
     clientType: "gpt-5.6",
     expected: ["gpt-5.6"],

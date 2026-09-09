@@ -38,7 +38,7 @@ interface StreamCase {
 // Every client that parses the OpenAI Responses SSE shape.
 const RESPONSES_STREAM_CASES: StreamCase[] = [
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.6",
     clientType: "gpt-5.6",
   },

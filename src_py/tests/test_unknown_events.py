@@ -32,7 +32,7 @@ class StreamCase:
 
 # Every client that parses the OpenAI Responses SSE shape.
 RESPONSES_STREAM_CASES = [
-    StreamCase(expected_client="GPT5_6Client", model="gpt-5.6", client_type="gpt-5.6"),
+    StreamCase(expected_client="GPT6Client", model="gpt-5.6", client_type="gpt-5.6"),
     StreamCase(expected_client="OpenaiResponsesClient", model="gpt-5.6", client_type="openai-responses"),
     StreamCase(expected_client="DeepSeekV4Client", model="deepseek-v4", client_type="deepseek-v4"),
     StreamCase(expected_client="MiniMaxM3Client", model="minimax-m3", client_type="minimax-m3"),
