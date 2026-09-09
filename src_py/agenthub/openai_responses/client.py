@@ -55,6 +55,12 @@ class OpenaiResponsesClient(LLMClient):
 
     def _convert_thinking_level_to_effort(self, thinking_level: ThinkingLevel) -> str:
         """Convert ThinkingLevel enum to the Responses API reasoning effort."""
+        if thinking_level == ThinkingLevel.NONE and "gpt-6" in self._model:
+            # a gateway serving GPT-6 forwards the effort to OpenAI, which rejects "none" and
+            # "minimal" with a 400 (verified live 2026-09-09 against api.openai.com), so NONE
+            # degrades to the lowest effort the generation accepts.
+            return "low"
+
         mapping = {
             ThinkingLevel.NONE: "none",
             ThinkingLevel.LOW: "low",
@@ -202,13 +208,20 @@ class OpenaiResponsesClient(LLMClient):
                         raise ValueError("tool_call_id is required for tool result.")
 
                     # NOTE: tool results are input items
-                    tool_result = [{"type": "input_text", "text": item["text"]}]
+                    image_parts = []
                     if "images" in item:
                         for image_url in item["images"]:
-                            tool_result.append(self._convert_image_url(image_url))
+                            image_parts.append(self._convert_image_url(image_url))
+
+                    # a plain string is the form every OpenAI-compatible server accepts for a text
+                    # result; the content-part list is reserved for results carrying images, which
+                    # only servers with multimodal tool messages take
+                    output = (
+                        [{"type": "input_text", "text": item["text"]}, *image_parts] if image_parts else item["text"]
+                    )
 
                     input_list.append(
-                        {"type": "function_call_output", "call_id": item["tool_call_id"], "output": tool_result}
+                        {"type": "function_call_output", "call_id": item["tool_call_id"], "output": output}
                     )
                 else:
                     raise ValueError(f"Unknown item: {item}")

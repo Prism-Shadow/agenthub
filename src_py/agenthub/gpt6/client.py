@@ -36,8 +36,8 @@ from ..types import (
 from ..utils import is_debug_enabled, openai_image_detail
 
 
-class GPT5_6Client(LLMClient):
-    """GPT-5.6-specific LLM client implementation (also serves GPT-5.4 and GPT-5.5)."""
+class GPT6Client(LLMClient):
+    """GPT-6-specific LLM client implementation (also serves GPT-5.6, GPT-5.5 and GPT-5.4)."""
 
     def __init__(
         self,
@@ -46,7 +46,7 @@ class GPT5_6Client(LLMClient):
         base_url: str | None = None,
         default_headers: dict[str, str] | None = None,
     ):
-        """Initialize GPT-5.6 client with model and API key."""
+        """Initialize GPT-6 client with model and API key."""
         self._model = model
         api_key = api_key or os.getenv("OPENAI_API_KEY")
         base_url = base_url or os.getenv("OPENAI_BASE_URL")
@@ -55,6 +55,13 @@ class GPT5_6Client(LLMClient):
 
     def _convert_thinking_level_to_effort(self, thinking_level: ThinkingLevel) -> str:
         """Convert ThinkingLevel enum to OpenAI's reasoning effort."""
+        if thinking_level == ThinkingLevel.NONE and "gpt-6" in self._model:
+            # GPT-6 rejects both "none" and "minimal" with a 400 (verified live 2026-09-09:
+            # "Unsupported value: 'none' is not supported with the 'gpt-6-astra' model.
+            # Supported values are: 'low', 'medium', 'high', 'xhigh', and 'max'."), so NONE
+            # degrades to the lowest effort the generation accepts.
+            return "low"
+
         mapping = {
             ThinkingLevel.NONE: "none",
             ThinkingLevel.LOW: "low",
@@ -101,7 +108,7 @@ class GPT5_6Client(LLMClient):
 
         if config.get("temperature") is not None and config["temperature"] != 1.0:
             raise UnsupportedParameterError(
-                self.__class__.__name__, "temperature", "GPT-5.6 does not support setting temperature."
+                self.__class__.__name__, "temperature", "GPT-6 does not support setting temperature."
             )
 
         if config.get("thinking_level") is not None:
@@ -124,7 +131,7 @@ class GPT5_6Client(LLMClient):
 
         if config.get("prompt_caching") is not None and config["prompt_caching"] != PromptCaching.ENABLE:
             raise UnsupportedParameterError(
-                self.__class__.__name__, "prompt_caching", "prompt_caching must be ENABLE for GPT-5.6."
+                self.__class__.__name__, "prompt_caching", "prompt_caching must be ENABLE for GPT-6."
             )
 
         return openai_config
@@ -306,7 +313,12 @@ class GPT5_6Client(LLMClient):
                 # the completed item carries the canonical wire fields to send back on the
                 # next turn (identical to the response.completed copy, but adjacent to the
                 # thinking deltas so the fidelity lands on the item that carried the text);
-                # record the channel plus the fields the server demands back
+                # record the channel plus the fields the server demands back. This event is the
+                # only source of encrypted_content, because the streaming-events reference says
+                # of response.output_item.added: "For reasoning items, encrypted_content may be
+                # incomplete while the item is in progress. Use the reasoning item from the
+                # corresponding response.output_item.done event when passing it as input to a
+                # subsequent request."
                 event_type = "delta"
                 fidelity = {}
                 if getattr(model_output.item, "summary", None):

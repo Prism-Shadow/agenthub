@@ -155,12 +155,22 @@ describe("glm thinking level mapping", () => {
 });
 
 // What each remaining client puts on the wire for a level, per its vendor's effort
-// vocabulary: OpenAI takes the full set, Claude tops out at max (xhigh only from 4.7),
+// vocabulary: OpenAI takes the full set except on GPT-6, which rejects "none" and
+// "minimal" so NONE degrades to low; Claude tops out at max (xhigh only from 4.7),
 // DeepSeek and Kimi accept low/high/max, DeepSeek turns thinking off with none, and
 // MiniMax has no level above high.
 const THINKING_EFFORT_CASES: Array<
   [string, string | undefined, ThinkingLevel, string | undefined]
 > = [
+  ["gpt-6-astra", undefined, ThinkingLevel.NONE, "low"],
+  ["gpt-6-astra", undefined, ThinkingLevel.LOW, "low"],
+  ["gpt-6-astra", undefined, ThinkingLevel.MAX, "max"],
+  // a gateway serving GPT-6 forwards the effort to OpenAI, so the generic Responses
+  // client degrades NONE the same way
+  ["gpt-6-astra", "openai-responses", ThinkingLevel.NONE, "low"],
+  ["gpt-6-astra", "openai-responses", ThinkingLevel.LOW, "low"],
+  ["gpt-6-astra", "openai-responses", ThinkingLevel.MAX, "max"],
+  ["gpt-5.6", undefined, ThinkingLevel.NONE, "none"],
   ["gpt-5.6", undefined, ThinkingLevel.XHIGH, "xhigh"],
   ["gpt-5.6", undefined, ThinkingLevel.MAX, "max"],
   ["gpt-5.6", "openai-responses", ThinkingLevel.MAX, "max"],

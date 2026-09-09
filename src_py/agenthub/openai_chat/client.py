@@ -173,7 +173,7 @@ class OpenaiChatClient(LLMClient):
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
-                    content = [{"type": "text", "text": item["text"]}]
+                    image_parts = []
 
                     if "images" in item and item["images"]:
                         for image_url in item["images"]:
@@ -182,7 +182,12 @@ class OpenaiChatClient(LLMClient):
                                 # siliconflow does not support image_url in tool result
                                 content_parts.append(part)
                             else:
-                                content.append(part)
+                                image_parts.append(part)
+
+                    # a plain string is the form every OpenAI-compatible server accepts for a text
+                    # result; the content-part list is reserved for results carrying images, which
+                    # only servers with multimodal tool messages take
+                    content = [{"type": "text", "text": item["text"]}, *image_parts] if image_parts else item["text"]
 
                     # Tool results are sent as separate messages
                     openai_messages.append(

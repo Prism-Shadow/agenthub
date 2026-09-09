@@ -23,6 +23,8 @@ interface MessageOrderCase {
   expected: string[];
   // Claude replays the signature as text, Gemini as the bytes it streamed
   thoughtSignature?: string | Buffer;
+  // a text-only tool result goes out as a plain string rather than a one-part list
+  bareTextToolResult?: boolean;
 }
 
 // A turn where the model thought, spoke, and then called a tool. Every protocol that can
@@ -55,7 +57,7 @@ const CHAT_ORDER = [
 
 const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.6",
     protocol: "responses",
     expected: RESPONSES_ORDER,
@@ -66,6 +68,7 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
     clientType: "openai-responses",
     protocol: "responses",
     expected: RESPONSES_ORDER,
+    bareTextToolResult: true,
   },
   {
     expectedClient: "DeepSeekV4Client",
@@ -107,6 +110,7 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
     clientType: "openai-chat",
     protocol: "chat",
     expected: CHAT_ORDER,
+    bareTextToolResult: true,
   },
   {
     expectedClient: "GLM5_3Client",
@@ -222,6 +226,14 @@ describe.each(MESSAGE_ORDER_CASES)(
       );
 
       expect(signature(testCase, modelInput)).toEqual(testCase.expected);
+
+      if (testCase.bareTextToolResult) {
+        expect(
+          testCase.protocol === "responses"
+            ? modelInput[4].output
+            : modelInput[2].content,
+        ).toBe("20 degrees.");
+      }
     });
   },
 );

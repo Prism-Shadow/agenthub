@@ -238,7 +238,7 @@ export class OpenaiChatClient extends LLMClient {
           }
 
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const content: any[] = [{ type: "text", text: item.text }];
+          const imageParts: any[] = [];
 
           if (item.images && item.images.length > 0) {
             for (const imageUrl of item.images) {
@@ -250,10 +250,18 @@ export class OpenaiChatClient extends LLMClient {
               if (this._client.baseURL.includes("siliconflow.cn")) {
                 contentParts.push(part);
               } else {
-                content.push(part);
+                imageParts.push(part);
               }
             }
           }
+
+          // a plain string is the form every OpenAI-compatible server accepts for a text
+          // result; the content-part list is reserved for results carrying images, which
+          // only servers with multimodal tool messages take
+          const content =
+            imageParts.length > 0
+              ? [{ type: "text", text: item.text }, ...imageParts]
+              : item.text;
 
           openaiMessages.push({
             role: "tool",

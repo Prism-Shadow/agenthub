@@ -44,7 +44,7 @@ https://github.com/user-attachments/assets/c49a21a1-5bf9-4768-a76d-f73c9a03ca87
 | -------------- | ----------------------------------- | ---------------------- | ---------------- | ------------------------------ |
 | Gemini 3-3.8   | Official/Google Vertex AI           | `gemini-3.8-flash`     | Text, Image      | Text, Image, Speech, Embedding |
 | Claude 4.6-5   | Official/Amazon Bedrock/UModelVerse | `claude-opus-5`        | Text, Image      | Text                           |
-| GPT-5.4-5.6    | Official/OpenRouter/UModelVerse     | `gpt-5.6-sol`          | Text, Image      | Text, Embedding                |
+| GPT-5.4-6      | Official/OpenRouter/UModelVerse     | `gpt-6-astra`          | Text, Image      | Text, Embedding                |
 | Kimi-K2.5/K2.6/K3 | Official/OpenRouter/SiliconFlow  | `kimi-k3`              | Text, Image      | Text                           |
 | DeepSeek V4    | Official/OpenRouter/SiliconFlow     | `deepseek-v4-pro`      | Text, Image      | Text                           |
 | GLM-5.1-5.3    | Official/OpenRouter/SiliconFlow     | `glm-5.3`              | Text, Image      | Text                           |
@@ -694,7 +694,7 @@ Every client speaks one vendor protocol on the wire, whichever `client_type` rea
 | `gemini-3.8`, `gemini-3.7`, `gemini-3`, `gemini-embedding` | `google-genai`     |
 | `claude-5`, `claude-4-8`, `claude-4-7`, `claude-4-6`       | `ant-messages`     |
 | `ant-messages`                                             | `ant-messages`     |
-| `gpt-5.6`, `gpt-5.5`, `gpt-5.4`                            | `openai-responses` |
+| `gpt-6`, `gpt-5.6`, `gpt-5.5`, `gpt-5.4`                   | `openai-responses` |
 | `deepseek-v4`                                              | `openai-responses` |
 | `minimax-m3`                                               | `openai-responses` |
 | `openai-responses`                                         | `openai-responses` |
