@@ -257,17 +257,20 @@ interface ImageDetailCase {
   protocol: "responses" | "chat";
   // whether an image over the patch limit goes out at high detail
   shrinks: boolean;
+  // whether the model reads no image parts, so the transform refuses them instead of
+  // forwarding them
+  refusesImages?: boolean;
 }
 
 const IMAGE_DETAIL_CASES: ImageDetailCase[] = [
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.6-terra",
     protocol: "responses",
     shrinks: true,
   },
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.5",
     protocol: "responses",
     shrinks: false,
@@ -298,6 +301,35 @@ const IMAGE_DETAIL_CASES: ImageDetailCase[] = [
     model: "gpt-5.5",
     clientType: "openai-chat",
     protocol: "chat",
+    shrinks: false,
+  },
+  // The DeepSeek client forwards images to every id except the text-only V4 Flash / V4 Pro
+  // (bare, dated snapshot, any gateway prefix, any case).
+  {
+    expectedClient: "DeepSeekV4Client",
+    model: "deepseek-v4-flash",
+    protocol: "responses",
+    shrinks: false,
+    refusesImages: true,
+  },
+  {
+    expectedClient: "DeepSeekV4Client",
+    model: "deepseek-ai/DeepSeek-V4-Flash",
+    clientType: "deepseek-v4",
+    protocol: "responses",
+    shrinks: false,
+    refusesImages: true,
+  },
+  {
+    expectedClient: "DeepSeekV4Client",
+    model: "deepseek-v4-flash-vision-exp",
+    protocol: "responses",
+    shrinks: false,
+  },
+  {
+    expectedClient: "DeepSeekV4Client",
+    model: "deepseek-v4.1-flash",
+    protocol: "responses",
     shrinks: false,
   },
 ];
@@ -359,9 +391,7 @@ describe.each(IMAGE_DETAIL_CASES)(
   "Image detail for $expectedClient on $model",
   (testCase) => {
     test(
-      testCase.shrinks
-        ? "sends an image over the patch limit at high detail"
-        : "leaves the detail level to the model",
+      "image parts go out at the detail the client needs, or are refused where the model reads none",
       async () => {
         const client = new AutoLLMClient({
           model: testCase.model,
@@ -380,6 +410,13 @@ describe.each(IMAGE_DETAIL_CASES)(
           }
         )._client;
         expect(routedClient.constructor.name).toBe(testCase.expectedClient);
+
+        if (testCase.refusesImages) {
+          expect(() =>
+            routedClient.transformUniMessageToModelInput(MESSAGES),
+          ).toThrow(/does not support image/);
+          return;
+        }
 
         const modelInput =
           await routedClient.transformUniMessageToModelInput(MESSAGES);

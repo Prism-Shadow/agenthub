@@ -35,6 +35,32 @@ const REASONING_REPLAY_CASES: ReasoningReplayCase[] = [
   { model: "kimi-k2.6", clientType: "kimi-k2.6" },
 ];
 
+interface ResponsesReasoningCase extends ReasoningReplayCase {
+  expectedClient: string;
+}
+
+// The Responses-protocol clients that carry a reasoning item's encrypted_content back on
+// the next turn; DeepSeek and MiniMax rebuild reasoning from text and are covered by the
+// chat table's rules above. The done event is the only source of that ciphertext: the
+// streaming-events reference says "For reasoning items, encrypted_content may be
+// incomplete while the item is in progress. Use the reasoning item from the corresponding
+// response.output_item.done event when passing it as input to a subsequent request.", and
+// the live capture on 2026-09-09 (api_captures/openai_responses/gpt-6-astra/) showed the
+// added and done ciphertexts differ and are not a prefix pair.
+const RESPONSES_REASONING_CASES: ResponsesReasoningCase[] = [
+  { expectedClient: "GPT6Client", model: "gpt-6-astra", clientType: "gpt-6" },
+  {
+    expectedClient: "OpenaiResponsesClient",
+    model: "openai/gpt-6-astra",
+    clientType: "openai-responses",
+  },
+];
+
+const PARTIAL_ENCRYPTED_CONTENT = "gAAAAABpartial";
+const FULL_ENCRYPTED_CONTENT = "gAAAAABcomplete-ciphertext";
+const REASONING_ITEM_ID = "rs_072e343322bd1418016aa1391d844c87";
+const SUMMARY_TEXT = "**Distinguishing Paris and London metro references**";
+
 function streamFromChunks(chunks: unknown[]): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -115,6 +141,7 @@ async function transformHistory(
 async function runTurnAndReplay(client: AutoLLMClient): Promise<{
   historyMessage: UniMessage;
   replayedMessage: Record<string, unknown>;
+  modelInput: Record<string, unknown>[];
 }> {
   const events: UniEvent[] = [];
   for await (const event of client.streamingResponseStateful({
@@ -132,7 +159,7 @@ async function runTurnAndReplay(client: AutoLLMClient): Promise<{
     throw new Error("history or model input is empty");
   }
 
-  return { historyMessage, replayedMessage };
+  return { historyMessage, replayedMessage, modelInput };
 }
 
 function thinkingItems(message: UniMessage): unknown[] {
@@ -229,6 +256,122 @@ describe.each(REASONING_REPLAY_CASES)(
 
       expect(replayedMessage.reasoning_content).toBe("Let me think.");
       expect(replayedMessage.reasoning).toBe("Let me think.");
+    });
+  },
+);
+
+function installFakeResponsesStream(
+  client: AutoLLMClient,
+  events: unknown[],
+): void {
+  const routedClient = (client as unknown as { _client: { _client: unknown } })
+    ._client;
+  routedClient._client = {
+    responses: { create: async () => streamFromChunks(events) },
+  };
+}
+
+function reasoningItemAddedEvent(): unknown {
+  return {
+    type: "response.output_item.added",
+    output_index: 0,
+    item: {
+      id: REASONING_ITEM_ID,
+      type: "reasoning",
+      content: [],
+      encrypted_content: PARTIAL_ENCRYPTED_CONTENT,
+      summary: [],
+    },
+  };
+}
+
+function reasoningSummaryDeltaEvent(text: string): unknown {
+  return {
+    type: "response.reasoning_summary_text.delta",
+    item_id: REASONING_ITEM_ID,
+    summary_index: 0,
+    delta: text,
+  };
+}
+
+function reasoningItemDoneEvent(): unknown {
+  return {
+    type: "response.output_item.done",
+    output_index: 0,
+    item: {
+      id: REASONING_ITEM_ID,
+      type: "reasoning",
+      content: [],
+      encrypted_content: FULL_ENCRYPTED_CONTENT,
+      summary: [{ type: "summary_text", text: SUMMARY_TEXT }],
+    },
+  };
+}
+
+function responsesTextDeltaEvent(text: string): unknown {
+  return { type: "response.output_text.delta", delta: text };
+}
+
+function completedEvent(): unknown {
+  return {
+    type: "response.completed",
+    response: {
+      status: "completed",
+      usage: {
+        input_tokens: 139,
+        output_tokens: 109,
+        input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+        output_tokens_details: { reasoning_tokens: 21 },
+      },
+    },
+  };
+}
+
+describe.each(RESPONSES_REASONING_CASES)(
+  "Responses reasoning replay for $clientType",
+  (testCase) => {
+    test("replay carries the done encrypted_content only", async () => {
+      const client = createAutoClient(testCase);
+      expect(
+        (client as unknown as { _client: object })._client.constructor.name,
+      ).toBe(testCase.expectedClient);
+      installFakeResponsesStream(client, [
+        reasoningItemAddedEvent(),
+        reasoningSummaryDeltaEvent("**Distinguishing Paris"),
+        reasoningSummaryDeltaEvent(" and London metro references**"),
+        reasoningItemDoneEvent(),
+        responsesTextDeltaEvent("Paris."),
+        completedEvent(),
+      ]);
+
+      const { historyMessage, modelInput } = await runTurnAndReplay(client);
+
+      // one thinking item, carrying the streamed summary and the completed item's fields
+      expect(thinkingItems(historyMessage)).toEqual([
+        {
+          type: "thinking",
+          thinking: SUMMARY_TEXT,
+          fidelity: {
+            channel: "summary",
+            encrypted_content: FULL_ENCRYPTED_CONTENT,
+          },
+        },
+      ]);
+
+      const reasoningInput = modelInput.find(
+        (item) => item.type === "reasoning",
+      );
+      expect(reasoningInput).toEqual({
+        type: "reasoning",
+        summary: [{ type: "summary_text", text: SUMMARY_TEXT }],
+        encrypted_content: FULL_ENCRYPTED_CONTENT,
+      });
+      // the in-progress ciphertext never reaches the replay, and the provider's item id
+      // is not replayed either
+      expect(JSON.stringify(modelInput)).not.toContain(
+        PARTIAL_ENCRYPTED_CONTENT,
+      );
+      expect(reasoningInput).not.toHaveProperty("id");
     });
   },
 );

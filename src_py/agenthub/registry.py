@@ -213,10 +213,23 @@ _SUPPORTED_MODELS: list[SupportedModel] = [
         "pricing": _usd(3.0, 15.0, cached=0.3),
     },
     {
+        # official list price per 1M tokens: $1 cached input, $10 uncached input, $12.5 cache
+        # writes, $50 output, all doubled above 272K input tokens except output, which is 1.5x.
+        # The prompt bucket carries the cache-write rate: the usage buckets do not separate
+        # cache-written input from plain input.
+        "model": "gpt-6-astra",
+        "base_url": _OPENAI,
+        "client": "gpt-6",
+        "input_modalities": ["Text", "Image"],
+        "output_modalities": ["Text"],
+        "context_window": 1050000,
+        "pricing": _usd(12.5, 50.0, cached=1.0),
+    },
+    {
         # official standard-tier list price; the bare gpt-5.6 alias also routes here
         "model": "gpt-5.6-sol",
         "base_url": _OPENAI,
-        "client": "gpt-5.6",
+        "client": "gpt-6",
         "input_modalities": ["Text", "Image"],
         "output_modalities": ["Text"],
         "context_window": 1050000,
@@ -225,7 +238,7 @@ _SUPPORTED_MODELS: list[SupportedModel] = [
     {
         "model": "gpt-5.6-terra",
         "base_url": _OPENAI,
-        "client": "gpt-5.6",
+        "client": "gpt-6",
         "input_modalities": ["Text", "Image"],
         "output_modalities": ["Text"],
         "context_window": 1050000,
@@ -234,7 +247,7 @@ _SUPPORTED_MODELS: list[SupportedModel] = [
     {
         "model": "gpt-5.6-luna",
         "base_url": _OPENAI,
-        "client": "gpt-5.6",
+        "client": "gpt-6",
         "input_modalities": ["Text", "Image"],
         "output_modalities": ["Text"],
         "context_window": 1050000,
@@ -324,15 +337,30 @@ _SUPPORTED_MODELS: list[SupportedModel] = [
         "pricing": _cny(6.5, 27.0, cached=1.1),
     },
     {
+        "model": "deepseek-v4.1-flash",
+        "base_url": _DEEPSEEK,
+        "client": "deepseek-v4",
+        # announced by DeepSeek for release after 2026-09-10 and not yet served on
+        # 2026-09-09; multimodal per the announcement
+        "input_modalities": ["Text", "Image"],
+        "output_modalities": ["Text"],
+        # assumed equal to deepseek-v4-flash until the official model page lists it
+        "context_window": 1000000,
+        # priced as the V4 Flash series: official off-peak list price effective 2026-09-10,
+        # and peak-hour rates (Beijing 9:00-12:00, 14:00-18:00) are double
+        "pricing": _cny(1.0, 4.0, cached=0.02),
+    },
+    {
         "model": "deepseek-v4-flash",
         "base_url": _DEEPSEEK,
         "client": "deepseek-v4",
         "input_modalities": ["Text"],
         "output_modalities": ["Text"],
         "context_window": 1000000,
-        # official off-peak list price (verified 2026-08-18); peak-hour rates
-        # (Beijing 9:00-12:00, 14:00-18:00) are double
-        "pricing": _cny(1.5, 4.5, cached=0.05),
+        # official off-peak list price effective 2026-09-10 (verified 2026-09-08 against
+        # the official adjustment); peak-hour rates (Beijing 9:00-12:00, 14:00-18:00) are
+        # double
+        "pricing": _cny(1.0, 4.0, cached=0.02),
     },
     {
         "model": "deepseek-v4-flash-vision-exp",
@@ -341,9 +369,10 @@ _SUPPORTED_MODELS: list[SupportedModel] = [
         "input_modalities": ["Text", "Image"],
         "output_modalities": ["Text"],
         "context_window": 1000000,
-        # priced as deepseek-v4-flash; official off-peak list price (verified 2026-08-21), and
-        # peak-hour rates (Beijing 9:00-12:00, 14:00-18:00) are double
-        "pricing": _cny(1.5, 4.5, cached=0.05),
+        # priced as deepseek-v4-flash; official off-peak list price effective 2026-09-10
+        # (verified 2026-09-08 against the official adjustment), and peak-hour rates
+        # (Beijing 9:00-12:00, 14:00-18:00) are double
+        "pricing": _cny(1.0, 4.0, cached=0.02),
     },
     {
         "model": "deepseek-v4-pro",
@@ -464,6 +493,17 @@ _SUPPORTED_MODELS: list[SupportedModel] = [
         "output_modalities": ["Text"],
         "context_window": 1000000,
         "pricing": _usd(0.0, 0.0),
+    },
+    {
+        # models API 2026-09-09, default OpenAI endpoint, no discount: $10 input, $50 output,
+        # $1 cache read, $12.5 cache write per 1M tokens
+        "model": "openai/gpt-6-astra",
+        "base_url": _OPENROUTER,
+        "client": "openai-responses",
+        "input_modalities": ["Text", "Image"],
+        "output_modalities": ["Text"],
+        "context_window": 1050000,
+        "pricing": _usd(12.5, 50.0, cached=1.0),
     },
     {
         "model": "openai/gpt-5.6-sol",
