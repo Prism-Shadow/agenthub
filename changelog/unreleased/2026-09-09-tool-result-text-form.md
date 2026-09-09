@@ -3,6 +3,7 @@
 - **Date:** 2026-09-09
 - **Type:** fix
 - **Scope:** `openai_chat`, `openai_responses`
+- **PR:** [#205](https://github.com/Prism-Shadow/agenthub/pull/205)
 
 [中文版](2026-09-09-tool-result-text-form.zh.md)
 
