@@ -35,6 +35,15 @@ import {
 import { isDebugEnabled } from "../utils";
 
 /**
+ * The DeepSeek ids that read no image: the current V4 Flash and V4 Pro, bare or with a
+ * dated snapshot suffix (`deepseek-v4-flash-0731`). Every other id forwards its images.
+ * Matched against the bare id — the part after the last `/`, lowercased — so a gateway
+ * prefix (`deepseek/`, `deepseek-ai/`) and the spelling a platform uses do not change the
+ * verdict.
+ */
+const TEXT_ONLY_MODELS = /^deepseek-v4-(flash|pro)(-\d{4})?$/;
+
+/**
  * DeepSeek V4-specific LLM client implementation using the OpenAI-compatible Responses API.
  */
 export class DeepSeekV4Client extends LLMClient {
@@ -183,10 +192,12 @@ export class DeepSeekV4Client extends LLMClient {
     messages: UniMessage[],
     _signal?: AbortSignal,
   ): ResponseInputItem[] {
-    // only a vision model reads image parts; every other DeepSeek model answers from a
-    // placeholder instead of failing (llmsdk_docs/deepseek_v4/docs/responses-api.md), so an
-    // image is refused here rather than silently dropped
-    const supportsImage = this._model.toLowerCase().includes("vision");
+    // a text-only model answers from a placeholder instead of failing
+    // (llmsdk_docs/deepseek_v4/docs/responses-api.md), so an image is refused here rather
+    // than silently dropped
+    const supportsImage = !TEXT_ONLY_MODELS.test(
+      this._model.toLowerCase().replace(/^.*\//, ""),
+    );
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const inputList: any[] = [];
 
