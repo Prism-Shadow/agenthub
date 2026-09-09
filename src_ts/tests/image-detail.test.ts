@@ -264,13 +264,13 @@ interface ImageDetailCase {
 
 const IMAGE_DETAIL_CASES: ImageDetailCase[] = [
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.6-terra",
     protocol: "responses",
     shrinks: true,
   },
   {
-    expectedClient: "GPT5_6Client",
+    expectedClient: "GPT6Client",
     model: "gpt-5.5",
     protocol: "responses",
     shrinks: false,

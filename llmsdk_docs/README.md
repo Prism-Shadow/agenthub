@@ -20,6 +20,7 @@ To use a specific model, please refer to its dedicated README:
 - **[GLM-5.3](./glm5_3/README.md)** - Z.AI's GLM-5.3 API documentation (forced thinking, reasoning_effort restricted to low/high/max)
 - **[GPT-5.5](./gpt5_5/README.md)** - OpenAI's GPT-5.5 API documentation and examples
 - **[GPT-5.6](./gpt5_6/README.md)** - OpenAI's GPT-5.6 generation (sol/terra/luna): reasoning modes, fast mode, and Responses migration
+- **[GPT-6](./gpt6/README.md)** - OpenAI's GPT-6 generation (gpt-6-astra): same Responses wire contract as GPT-5.6, `reasoning.effort` without `none`/`minimal`, cache-write billing
 - **[Kimi K3](./kimi_k3/README.md)** - Moonshot's Kimi K3 API documentation (reasoning_effort, tool calling, vision, caching)
 - **[MiniMax M-series](./minimax_m3/README.md)** - Responses API-compatible documentation for MiniMax M3 and M2.7, plus Token Plan Subscription Key integration
 - **[openai-chat-vllm-adapter model artifacts](./openai_chat_vllm_adapter/README.md)** - Upstream chat templates for the Qwen models served through vLLM, and the encoding module that stands in for one on DeepSeek V4; the source behind the adapter's per-model thinking switch

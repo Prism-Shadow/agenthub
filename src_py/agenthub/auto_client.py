@@ -84,10 +84,12 @@ class AutoLLMClient(LLMClient):
             from .claude5 import Claude5Client
 
             return Claude5Client
-        elif "gpt-5.4" in client_type or "gpt-5.5" in client_type or "gpt-5.6" in client_type:  # e.g., gpt-5.6
-            from .gpt5_6 import GPT5_6Client
+        elif (
+            "gpt-5.4" in client_type or "gpt-5.5" in client_type or "gpt-5.6" in client_type or "gpt-6" in client_type
+        ):  # e.g., gpt-6-astra
+            from .gpt6 import GPT6Client
 
-            return GPT5_6Client
+            return GPT6Client
         elif "glm-5" in client_type:  # the whole GLM series shares the unified client
             from .glm5_3 import GLM5_3Client
 
@@ -144,7 +146,7 @@ class AutoLLMClient(LLMClient):
             raise ValueError(
                 f"{client_type} is not supported. "
                 "Supported client types: minimax-m3, gemini-3.8, gemini-3.7, gemini-3.6, gemini-3, "
-                "claude-5, claude-4-8, claude-4-7, claude-4-6, gpt-5.6, gpt-5.5, gpt-5.4, "
+                "claude-5, claude-4-8, claude-4-7, claude-4-6, gpt-6, gpt-5.6, gpt-5.5, gpt-5.4, "
                 "glm-5.3, glm-5.2, glm-5.1, kimi-k3, kimi-k2.6, kimi-k2.5, deepseek-v4, "
                 "openai-chat-vllm-adapter, openai-embedding, ant-messages, openai-responses, openai-chat."
             )

@@ -4,12 +4,12 @@
 
 **post** `/responses`
 
-Creates a model response. Provide [text](/docs/guides/text) or
-[image](/docs/guides/images) inputs to generate [text](/docs/guides/text)
-or [JSON](/docs/guides/structured-outputs) outputs. Have the model call
-your own [custom code](/docs/guides/function-calling) or use built-in
-[tools](/docs/guides/tools) like [web search](/docs/guides/tools-web-search)
-or [file search](/docs/guides/tools-file-search) to use your own data
+Creates a model response. Provide [text](/api/docs/guides/text) or
+[image](/api/docs/guides/images-vision) inputs to generate [text](/api/docs/guides/text)
+or [JSON](/api/docs/guides/structured-outputs) outputs. Have the model call
+your own [custom code](/api/docs/guides/function-calling) or use built-in
+[tools](/api/docs/guides/tools) like [web search](/api/docs/guides/tools-web-search)
+or [file search](/api/docs/guides/tools-file-search) to use your own data
 as input for the model's response.
 
 ### Body Parameters
@@ -17,7 +17,7 @@ as input for the model's response.
 - `background: optional boolean or null`
 
   Whether to run the model response in the background.
-  [Learn more](/docs/guides/background).
+  [Learn more](/api/docs/guides/background).
 
 - `context_management: optional array of object { type, compact_threshold }  or null`
 
@@ -76,24 +76,24 @@ as input for the model's response.
 
   - `"message.output_text.logprobs"`
 
-- `input: optional string or array of EasyInputMessage or object { content, role, status, type }  or ResponseOutputMessage or 29 more`
+- `input: optional string or array of EasyInputMessage or object { content, role, status, type }  or ResponseOutputMessage or 30 more`
 
   Text, image, or file inputs to the model, used to generate a response.
 
   Learn more:
 
-  - [Text inputs and outputs](/docs/guides/text)
-  - [Image inputs](/docs/guides/images)
-  - [File inputs](/docs/guides/pdf-files)
-  - [Conversation state](/docs/guides/conversation-state)
-  - [Function calling](/docs/guides/function-calling)
+  - [Text inputs and outputs](/api/docs/guides/text)
+  - [Image inputs](/api/docs/guides/images-vision)
+  - [File inputs](/api/docs/guides/file-inputs)
+  - [Conversation state](/api/docs/guides/conversation-state)
+  - [Function calling](/api/docs/guides/function-calling)
 
   - `TextInput = string`
 
     A text input to the model, equivalent to a text input with the
     `user` role.
 
-  - `InputItemList = array of EasyInputMessage or object { content, role, status, type }  or ResponseOutputMessage or 29 more`
+  - `InputItemList = array of EasyInputMessage or object { content, role, status, type }  or ResponseOutputMessage or 30 more`
 
     A list of one or many input items to the model, containing
     different content types.
@@ -146,7 +146,7 @@ as input for the model's response.
 
           - `ResponseInputImage object { detail, type, file_id, 2 more }`
 
-            An image input to the model. Learn about [image inputs](/docs/guides/vision).
+            An image input to the model. Learn about [image inputs](/api/docs/guides/images-vision).
 
             - `detail: ImageDetail`
 
@@ -489,7 +489,7 @@ as input for the model's response.
     - `FileSearchCall object { id, queries, status, 2 more }`
 
       The results of a file search tool call. See the
-      [file search guide](/docs/guides/tools-file-search) for more information.
+      [file search guide](/api/docs/guides/tools-file-search) for more information.
 
       - `id: string`
 
@@ -557,7 +557,7 @@ as input for the model's response.
     - `ComputerCall object { id, call_id, pending_safety_checks, 4 more }`
 
       A tool call to a computer use tool. See the
-      [computer use guide](/docs/guides/tools-computer-use) for more information.
+      [computer use guide](/api/docs/guides/tools-computer-use) for more information.
 
       - `id: string`
 
@@ -902,7 +902,7 @@ as input for the model's response.
     - `WebSearchCall object { id, action, status, type }`
 
       The results of a web search tool call. See the
-      [web search guide](/docs/guides/tools-web-search) for more information.
+      [web search guide](/api/docs/guides/tools-web-search) for more information.
 
       - `id: string`
 
@@ -977,7 +977,7 @@ as input for the model's response.
 
             The URL of the page searched for the pattern.
 
-      - `status: "in_progress" or "searching" or "completed" or "failed"`
+      - `status: "in_progress" or "searching" or "completed" or 2 more`
 
         The status of the web search tool call.
 
@@ -989,16 +989,18 @@ as input for the model's response.
 
         - `"failed"`
 
+        - `"incomplete"`
+
       - `type: "web_search_call"`
 
         The type of the web search tool call. Always `web_search_call`.
 
         - `"web_search_call"`
 
-    - `FunctionCall object { arguments, call_id, name, 5 more }`
+    - `FunctionCall object { arguments, call_id, name, 6 more }`
 
       A tool call to run a function. See the
-      [function calling guide](/docs/guides/function-calling) for more information.
+      [function calling guide](/api/docs/guides/function-calling) for more information.
 
       - `arguments: string`
 
@@ -1021,6 +1023,10 @@ as input for the model's response.
       - `id: optional string`
 
         The unique ID of the function tool call.
+
+      - `async: optional boolean`
+
+        Whether the function tool call runs asynchronously.
 
       - `caller: optional object { type }  or object { caller_id, type }  or null`
 
@@ -1099,7 +1105,7 @@ as input for the model's response.
 
           - `ResponseInputImageContent object { type, detail, file_id, 2 more }`
 
-            An image input to the model. Learn about [image inputs](/docs/guides/vision)
+            An image input to the model. Learn about [image inputs](/api/docs/guides/images-vision)
 
             - `type: "input_image"`
 
@@ -1271,13 +1277,13 @@ as input for the model's response.
 
     - `ToolSearchOutput object { tools, type, id, 3 more }`
 
-      - `tools: array of object { name, parameters, strict, 5 more }  or object { type, vector_store_ids, filters, 2 more }  or object { type }  or 13 more`
+      - `tools: array of object { name, parameters, strict, 6 more }  or object { type, vector_store_ids, filters, 2 more }  or object { type }  or 13 more`
 
         The loaded tool definitions returned by the tool search output.
 
-        - `Function object { name, parameters, strict, 5 more }`
+        - `Function object { name, parameters, strict, 6 more }`
 
-          Defines a function in your own code the model can choose to call. Learn more about [function calling](https://platform.openai.com/docs/guides/function-calling).
+          Defines a function in your own code the model can choose to call. Learn more about [function calling](/api/docs/guides/function-calling).
 
           - `name: string`
 
@@ -1305,6 +1311,8 @@ as input for the model's response.
 
             - `"programmatic"`
 
+          - `async: optional boolean`
+
           - `defer_loading: optional boolean`
 
             Whether this function is deferred and loaded via tool search.
@@ -1319,7 +1327,7 @@ as input for the model's response.
 
         - `FileSearch object { type, vector_store_ids, filters, 2 more }`
 
-          A tool that searches for relevant content from uploaded files. Learn more about the [file search tool](https://platform.openai.com/docs/guides/tools-file-search).
+          A tool that searches for relevant content from uploaded files. Learn more about the [file search tool](/api/docs/guides/tools-file-search).
 
           - `type: "file_search"`
 
@@ -1444,7 +1452,7 @@ as input for the model's response.
 
         - `Computer object { type }`
 
-          A tool that controls a virtual computer. Learn more about the [computer tool](https://platform.openai.com/docs/guides/tools-computer-use).
+          A tool that controls a virtual computer. Learn more about the [computer tool](/api/docs/guides/tools-computer-use).
 
           - `type: "computer"`
 
@@ -1454,7 +1462,7 @@ as input for the model's response.
 
         - `ComputerUsePreview object { display_height, display_width, environment, type }`
 
-          A tool that controls a virtual computer. Learn more about the [computer tool](https://platform.openai.com/docs/guides/tools-computer-use).
+          A tool that controls a virtual computer. Learn more about the [computer tool](/api/docs/guides/tools-computer-use).
 
           - `display_height: number`
 
@@ -1487,7 +1495,7 @@ as input for the model's response.
         - `WebSearch object { type, external_web_access, filters, 2 more }`
 
           Search the Internet for sources related to the prompt. Learn more about the
-          [web search tool](/docs/guides/tools-web-search).
+          [web search tool](/api/docs/guides/tools-web-search).
 
           - `type: "web_search" or "web_search_2025_08_26"`
 
@@ -1551,7 +1559,7 @@ as input for the model's response.
         - `Mcp object { server_label, type, allowed_callers, 9 more }`
 
           Give the model access to additional tools via remote Model Context Protocol
-          (MCP) servers. [Learn more about MCP](/docs/guides/tools-remote-mcp).
+          (MCP) servers. [Learn more about MCP](/api/docs/guides/tools-connectors-mcp).
 
           - `server_label: string`
 
@@ -1603,7 +1611,7 @@ as input for the model's response.
 
             Identifier for service connectors, like those available in ChatGPT. One of
             `server_url`, `connector_id`, or `tunnel_id` must be provided. Learn more
-            about service connectors [here](/docs/guides/tools-remote-mcp#connectors).
+            about service connectors [here](/api/docs/guides/tools-connectors-mcp#connectors).
 
             Currently supported `connector_id` values are:
 
@@ -1827,8 +1835,13 @@ as input for the model's response.
 
           - `background: optional "transparent" or "opaque" or "auto"`
 
-            Background type for the generated image. One of `transparent`,
-            `opaque`, or `auto`. Default: `auto`.
+            Set the background of the generated image. One of `transparent`, `opaque`,
+            or `auto`. `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare`, including
+            their `2026-09-08` snapshots, support `opaque` and `transparent`
+            backgrounds. Transparent backgrounds are available for supported GPT Image
+            models. For `gpt-image-2` and `gpt-image-2-2026-04-21`, this support is in
+            preview. When using `transparent`, set the output format to `png` or `webp`.
+            Default: `auto`.
 
             - `"transparent"`
 
@@ -1857,21 +1870,43 @@ as input for the model's response.
 
               Base64-encoded mask image.
 
-          - `model: optional string or "gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5"`
+          - `model: optional string or "gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5" or 6 more`
 
-            The image generation model to use. Default: `gpt-image-1`.
+            The image generation model to use. One of `gpt-image-1`,
+            `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`,
+            `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`,
+            `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`,
+            `gpt-image-2.5-flare-2026-09-08`, or `chatgpt-image-latest`. Default:
+            `gpt-image-1`.
 
             - `string`
 
-            - `"gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5"`
+            - `"gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5" or 6 more`
 
-              The image generation model to use. Default: `gpt-image-1`.
+              The image generation model to use. One of `gpt-image-1`,
+              `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`,
+              `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`,
+              `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`,
+              `gpt-image-2.5-flare-2026-09-08`, or `chatgpt-image-latest`. Default:
+              `gpt-image-1`.
 
               - `"gpt-image-1"`
 
               - `"gpt-image-1-mini"`
 
               - `"gpt-image-1.5"`
+
+              - `"gpt-image-2"`
+
+              - `"gpt-image-2-2026-04-21"`
+
+              - `"gpt-image-2.5-sunburst"`
+
+              - `"gpt-image-2.5-sunburst-2026-09-08"`
+
+              - `"gpt-image-2.5-flare"`
+
+              - `"gpt-image-2.5-flare-2026-09-08"`
 
           - `moderation: optional "auto" or "low"`
 
@@ -1900,10 +1935,12 @@ as input for the model's response.
 
             Number of partial images to generate in streaming mode, from 0 (default value) to 3.
 
-          - `quality: optional "low" or "medium" or "high" or "auto"`
+          - `quality: optional "low" or "medium" or "high" or 3 more`
 
-            The quality of the generated image. One of `low`, `medium`, `high`,
-            or `auto`. Default: `auto`.
+            The quality of the generated image. The GPT image models support `low`,
+            `medium`, and `high`. `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare`,
+            including their `2026-09-08` snapshots, also support `xhigh` and `max`.
+            Default: `auto`.
 
             - `"low"`
 
@@ -1911,17 +1948,21 @@ as input for the model's response.
 
             - `"high"`
 
+            - `"xhigh"`
+
+            - `"max"`
+
             - `"auto"`
 
           - `size: optional string or "1024x1024" or "1024x1536" or "1536x1024" or "auto"`
 
-            The size of the generated images. For `gpt-image-2` and `gpt-image-2-2026-04-21`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
+            The size of the generated images. For `gpt-image-2`, `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`, and `gpt-image-2.5-flare-2026-09-08`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
 
             - `string`
 
             - `"1024x1024" or "1024x1536" or "1536x1024" or "auto"`
 
-              The size of the generated images. For `gpt-image-2` and `gpt-image-2-2026-04-21`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
+              The size of the generated images. For `gpt-image-2`, `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`, and `gpt-image-2.5-flare-2026-09-08`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
 
               - `"1024x1024"`
 
@@ -2085,9 +2126,9 @@ as input for the model's response.
 
                 - `"container_reference"`
 
-        - `Custom object { name, type, allowed_callers, 3 more }`
+        - `Custom object { name, type, allowed_callers, 4 more }`
 
-          A custom tool that processes input using a specified format. Learn more about   [custom tools](/docs/guides/function-calling#custom-tools)
+          A custom tool that processes input using a specified format. Learn more about   [custom tools](/api/docs/guides/function-calling#custom-tools)
 
           - `name: string`
 
@@ -2106,6 +2147,10 @@ as input for the model's response.
             - `"direct"`
 
             - `"programmatic"`
+
+          - `async: optional boolean`
+
+            Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
           - `defer_loading: optional boolean`
 
@@ -2163,11 +2208,11 @@ as input for the model's response.
 
             The namespace name used in tool calls (for example, `crm`).
 
-          - `tools: array of object { name, type, allowed_callers, 5 more }  or object { name, type, allowed_callers, 3 more }`
+          - `tools: array of object { name, type, allowed_callers, 6 more }  or object { name, type, allowed_callers, 4 more }`
 
             The function/custom tools available inside this namespace.
 
-            - `Function object { name, type, allowed_callers, 5 more }`
+            - `Function object { name, type, allowed_callers, 6 more }`
 
               - `name: string`
 
@@ -2182,6 +2227,10 @@ as input for the model's response.
                 - `"direct"`
 
                 - `"programmatic"`
+
+              - `async: optional boolean`
+
+                Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
               - `defer_loading: optional boolean`
 
@@ -2199,9 +2248,9 @@ as input for the model's response.
 
                 Whether to enforce strict parameter validation. If omitted, Responses attempts to use strict validation when the schema is compatible, and falls back to non-strict validation otherwise.
 
-            - `Custom object { name, type, allowed_callers, 3 more }`
+            - `Custom object { name, type, allowed_callers, 4 more }`
 
-              A custom tool that processes input using a specified format. Learn more about   [custom tools](/docs/guides/function-calling#custom-tools)
+              A custom tool that processes input using a specified format. Learn more about   [custom tools](/api/docs/guides/function-calling#custom-tools)
 
               - `name: string`
 
@@ -2220,6 +2269,10 @@ as input for the model's response.
                 - `"direct"`
 
                 - `"programmatic"`
+
+              - `async: optional boolean`
+
+                Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
               - `defer_loading: optional boolean`
 
@@ -2267,7 +2320,7 @@ as input for the model's response.
 
         - `WebSearchPreview object { type, search_content_types, search_context_size, user_location }`
 
-          This tool searches the web for relevant results to use in a response. Learn more about the [web search tool](https://platform.openai.com/docs/guides/tools-web-search).
+          This tool searches the web for relevant results to use in a response. Learn more about the [web search tool](/api/docs/guides/tools-web-search).
 
           - `type: "web_search_preview" or "web_search_preview_2025_03_11"`
 
@@ -2377,13 +2430,13 @@ as input for the model's response.
 
         - `"developer"`
 
-      - `tools: array of object { name, parameters, strict, 5 more }  or object { type, vector_store_ids, filters, 2 more }  or object { type }  or 13 more`
+      - `tools: array of object { name, parameters, strict, 6 more }  or object { type, vector_store_ids, filters, 2 more }  or object { type }  or 13 more`
 
         A list of additional tools made available at this item.
 
-        - `Function object { name, parameters, strict, 5 more }`
+        - `Function object { name, parameters, strict, 6 more }`
 
-          Defines a function in your own code the model can choose to call. Learn more about [function calling](https://platform.openai.com/docs/guides/function-calling).
+          Defines a function in your own code the model can choose to call. Learn more about [function calling](/api/docs/guides/function-calling).
 
           - `name: string`
 
@@ -2411,6 +2464,8 @@ as input for the model's response.
 
             - `"programmatic"`
 
+          - `async: optional boolean`
+
           - `defer_loading: optional boolean`
 
             Whether this function is deferred and loaded via tool search.
@@ -2425,7 +2480,7 @@ as input for the model's response.
 
         - `FileSearch object { type, vector_store_ids, filters, 2 more }`
 
-          A tool that searches for relevant content from uploaded files. Learn more about the [file search tool](https://platform.openai.com/docs/guides/tools-file-search).
+          A tool that searches for relevant content from uploaded files. Learn more about the [file search tool](/api/docs/guides/tools-file-search).
 
           - `type: "file_search"`
 
@@ -2483,7 +2538,7 @@ as input for the model's response.
 
         - `Computer object { type }`
 
-          A tool that controls a virtual computer. Learn more about the [computer tool](https://platform.openai.com/docs/guides/tools-computer-use).
+          A tool that controls a virtual computer. Learn more about the [computer tool](/api/docs/guides/tools-computer-use).
 
           - `type: "computer"`
 
@@ -2493,7 +2548,7 @@ as input for the model's response.
 
         - `ComputerUsePreview object { display_height, display_width, environment, type }`
 
-          A tool that controls a virtual computer. Learn more about the [computer tool](https://platform.openai.com/docs/guides/tools-computer-use).
+          A tool that controls a virtual computer. Learn more about the [computer tool](/api/docs/guides/tools-computer-use).
 
           - `display_height: number`
 
@@ -2526,7 +2581,7 @@ as input for the model's response.
         - `WebSearch object { type, external_web_access, filters, 2 more }`
 
           Search the Internet for sources related to the prompt. Learn more about the
-          [web search tool](/docs/guides/tools-web-search).
+          [web search tool](/api/docs/guides/tools-web-search).
 
           - `type: "web_search" or "web_search_2025_08_26"`
 
@@ -2590,7 +2645,7 @@ as input for the model's response.
         - `Mcp object { server_label, type, allowed_callers, 9 more }`
 
           Give the model access to additional tools via remote Model Context Protocol
-          (MCP) servers. [Learn more about MCP](/docs/guides/tools-remote-mcp).
+          (MCP) servers. [Learn more about MCP](/api/docs/guides/tools-connectors-mcp).
 
           - `server_label: string`
 
@@ -2642,7 +2697,7 @@ as input for the model's response.
 
             Identifier for service connectors, like those available in ChatGPT. One of
             `server_url`, `connector_id`, or `tunnel_id` must be provided. Learn more
-            about service connectors [here](/docs/guides/tools-remote-mcp#connectors).
+            about service connectors [here](/api/docs/guides/tools-connectors-mcp#connectors).
 
             Currently supported `connector_id` values are:
 
@@ -2834,8 +2889,13 @@ as input for the model's response.
 
           - `background: optional "transparent" or "opaque" or "auto"`
 
-            Background type for the generated image. One of `transparent`,
-            `opaque`, or `auto`. Default: `auto`.
+            Set the background of the generated image. One of `transparent`, `opaque`,
+            or `auto`. `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare`, including
+            their `2026-09-08` snapshots, support `opaque` and `transparent`
+            backgrounds. Transparent backgrounds are available for supported GPT Image
+            models. For `gpt-image-2` and `gpt-image-2-2026-04-21`, this support is in
+            preview. When using `transparent`, set the output format to `png` or `webp`.
+            Default: `auto`.
 
             - `"transparent"`
 
@@ -2864,21 +2924,43 @@ as input for the model's response.
 
               Base64-encoded mask image.
 
-          - `model: optional string or "gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5"`
+          - `model: optional string or "gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5" or 6 more`
 
-            The image generation model to use. Default: `gpt-image-1`.
+            The image generation model to use. One of `gpt-image-1`,
+            `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`,
+            `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`,
+            `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`,
+            `gpt-image-2.5-flare-2026-09-08`, or `chatgpt-image-latest`. Default:
+            `gpt-image-1`.
 
             - `string`
 
-            - `"gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5"`
+            - `"gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5" or 6 more`
 
-              The image generation model to use. Default: `gpt-image-1`.
+              The image generation model to use. One of `gpt-image-1`,
+              `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`,
+              `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`,
+              `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`,
+              `gpt-image-2.5-flare-2026-09-08`, or `chatgpt-image-latest`. Default:
+              `gpt-image-1`.
 
               - `"gpt-image-1"`
 
               - `"gpt-image-1-mini"`
 
               - `"gpt-image-1.5"`
+
+              - `"gpt-image-2"`
+
+              - `"gpt-image-2-2026-04-21"`
+
+              - `"gpt-image-2.5-sunburst"`
+
+              - `"gpt-image-2.5-sunburst-2026-09-08"`
+
+              - `"gpt-image-2.5-flare"`
+
+              - `"gpt-image-2.5-flare-2026-09-08"`
 
           - `moderation: optional "auto" or "low"`
 
@@ -2907,10 +2989,12 @@ as input for the model's response.
 
             Number of partial images to generate in streaming mode, from 0 (default value) to 3.
 
-          - `quality: optional "low" or "medium" or "high" or "auto"`
+          - `quality: optional "low" or "medium" or "high" or 3 more`
 
-            The quality of the generated image. One of `low`, `medium`, `high`,
-            or `auto`. Default: `auto`.
+            The quality of the generated image. The GPT image models support `low`,
+            `medium`, and `high`. `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare`,
+            including their `2026-09-08` snapshots, also support `xhigh` and `max`.
+            Default: `auto`.
 
             - `"low"`
 
@@ -2918,17 +3002,21 @@ as input for the model's response.
 
             - `"high"`
 
+            - `"xhigh"`
+
+            - `"max"`
+
             - `"auto"`
 
           - `size: optional string or "1024x1024" or "1024x1536" or "1536x1024" or "auto"`
 
-            The size of the generated images. For `gpt-image-2` and `gpt-image-2-2026-04-21`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
+            The size of the generated images. For `gpt-image-2`, `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`, and `gpt-image-2.5-flare-2026-09-08`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
 
             - `string`
 
             - `"1024x1024" or "1024x1536" or "1536x1024" or "auto"`
 
-              The size of the generated images. For `gpt-image-2` and `gpt-image-2-2026-04-21`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
+              The size of the generated images. For `gpt-image-2`, `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`, and `gpt-image-2.5-flare-2026-09-08`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
 
               - `"1024x1024"`
 
@@ -2974,9 +3062,9 @@ as input for the model's response.
 
             - `ContainerReference object { container_id, type }`
 
-        - `Custom object { name, type, allowed_callers, 3 more }`
+        - `Custom object { name, type, allowed_callers, 4 more }`
 
-          A custom tool that processes input using a specified format. Learn more about   [custom tools](/docs/guides/function-calling#custom-tools)
+          A custom tool that processes input using a specified format. Learn more about   [custom tools](/api/docs/guides/function-calling#custom-tools)
 
           - `name: string`
 
@@ -2995,6 +3083,10 @@ as input for the model's response.
             - `"direct"`
 
             - `"programmatic"`
+
+          - `async: optional boolean`
+
+            Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
           - `defer_loading: optional boolean`
 
@@ -3020,11 +3112,11 @@ as input for the model's response.
 
             The namespace name used in tool calls (for example, `crm`).
 
-          - `tools: array of object { name, type, allowed_callers, 5 more }  or object { name, type, allowed_callers, 3 more }`
+          - `tools: array of object { name, type, allowed_callers, 6 more }  or object { name, type, allowed_callers, 4 more }`
 
             The function/custom tools available inside this namespace.
 
-            - `Function object { name, type, allowed_callers, 5 more }`
+            - `Function object { name, type, allowed_callers, 6 more }`
 
               - `name: string`
 
@@ -3039,6 +3131,10 @@ as input for the model's response.
                 - `"direct"`
 
                 - `"programmatic"`
+
+              - `async: optional boolean`
+
+                Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
               - `defer_loading: optional boolean`
 
@@ -3056,9 +3152,9 @@ as input for the model's response.
 
                 Whether to enforce strict parameter validation. If omitted, Responses attempts to use strict validation when the schema is compatible, and falls back to non-strict validation otherwise.
 
-            - `Custom object { name, type, allowed_callers, 3 more }`
+            - `Custom object { name, type, allowed_callers, 4 more }`
 
-              A custom tool that processes input using a specified format. Learn more about   [custom tools](/docs/guides/function-calling#custom-tools)
+              A custom tool that processes input using a specified format. Learn more about   [custom tools](/api/docs/guides/function-calling#custom-tools)
 
               - `name: string`
 
@@ -3077,6 +3173,10 @@ as input for the model's response.
                 - `"direct"`
 
                 - `"programmatic"`
+
+              - `async: optional boolean`
+
+                Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
               - `defer_loading: optional boolean`
 
@@ -3124,7 +3224,7 @@ as input for the model's response.
 
         - `WebSearchPreview object { type, search_content_types, search_context_size, user_location }`
 
-          This tool searches the web for relevant results to use in a response. Learn more about the [web search tool](https://platform.openai.com/docs/guides/tools-web-search).
+          This tool searches the web for relevant results to use in a response. Learn more about the [web search tool](/api/docs/guides/tools-web-search).
 
           - `type: "web_search_preview" or "web_search_preview_2025_03_11"`
 
@@ -3204,12 +3304,51 @@ as input for the model's response.
 
         The unique ID of this additional tools item.
 
+    - `ConfigurationUpdate object { type, id, reasoning }`
+
+      An update to the conversation's response configuration. The configuration
+      remains in effect for subsequent responses until it is replaced by another
+      configuration update.
+
+      - `type: "configuration_update"`
+
+        The item type. Always `configuration_update`.
+
+        - `"configuration_update"`
+
+      - `id: optional string or null`
+
+        The unique ID of the configuration update item.
+
+      - `reasoning: optional object { effort }`
+
+        Updates to reasoning configuration. Only effort is supported.
+
+        - `effort: optional ReasoningEffort or null`
+
+          The reasoning effort to use for subsequent responses until another
+          configuration update replaces it.
+
+          - `"none"`
+
+          - `"minimal"`
+
+          - `"low"`
+
+          - `"medium"`
+
+          - `"high"`
+
+          - `"xhigh"`
+
+          - `"max"`
+
     - `Reasoning object { id, summary, type, 3 more }`
 
       A description of the chain of thought used by a reasoning model while generating
       a response. Be sure to include these items in your `input` to the Responses API
       for subsequent turns of a conversation if you are manually
-      [managing context](/docs/guides/conversation-state).
+      [managing context](/api/docs/guides/conversation-state).
 
       - `id: string`
 
@@ -3274,7 +3413,7 @@ as input for the model's response.
 
     - `Compaction object { encrypted_content, type, id }`
 
-      A compaction item generated by the [`v1/responses/compact` API](/docs/api-reference/responses/compact).
+      A compaction item generated by the [`v1/responses/compact` API](/api/reference/resources/responses/methods/compact).
 
       - `encrypted_content: string`
 
@@ -3290,7 +3429,7 @@ as input for the model's response.
 
         The ID of the compaction item.
 
-    - `ImageGenerationCall object { id, result, status, type }`
+    - `ImageGenerationCall object { id, result, status, 3 more }`
 
       An image generation request made by the model.
 
@@ -3319,6 +3458,38 @@ as input for the model's response.
         The type of the image generation call. Always `image_generation_call`.
 
         - `"image_generation_call"`
+
+      - `quality: optional "low" or "medium" or "high" or 3 more or null`
+
+        The quality of the image generated by the image generation tool call. One of `low`, `medium`, `high`, `xhigh`, `max`, or `auto`.
+
+        - `"low"`
+
+        - `"medium"`
+
+        - `"high"`
+
+        - `"xhigh"`
+
+        - `"max"`
+
+        - `"auto"`
+
+      - `size: optional string or "1024x1024" or "1024x1536" or "1536x1024" or null`
+
+        The image dimensions as a `WIDTHxHEIGHT` string, for example `1536x864`.
+
+        - `string`
+
+        - `"1024x1024" or "1024x1536" or "1536x1024"`
+
+          The image dimensions as a `WIDTHxHEIGHT` string, for example `1536x864`.
+
+          - `"1024x1024"`
+
+          - `"1024x1536"`
+
+          - `"1536x1024"`
 
     - `CodeInterpreterCall object { id, code, container_id, 3 more }`
 
@@ -4007,7 +4178,7 @@ as input for the model's response.
 
           - `ResponseInputImage object { detail, type, file_id, 2 more }`
 
-            An image input to the model. Learn about [image inputs](/docs/guides/vision).
+            An image input to the model. Learn about [image inputs](/api/docs/guides/images-vision).
 
           - `ResponseInputFile object { type, detail, file_data, 4 more }`
 
@@ -4047,7 +4218,7 @@ as input for the model's response.
 
             - `"program"`
 
-    - `CustomToolCall object { call_id, input, name, 4 more }`
+    - `CustomToolCall object { call_id, input, name, 5 more }`
 
       A call to a custom tool created by the model.
 
@@ -4073,6 +4244,10 @@ as input for the model's response.
 
         The unique ID of the custom tool call in the OpenAI platform.
 
+      - `async: optional boolean`
+
+        Whether the custom tool call runs asynchronously.
+
       - `caller: optional object { type }  or object { caller_id, type }  or null`
 
         The execution context that produced this tool call.
@@ -4097,7 +4272,7 @@ as input for the model's response.
 
         The namespace of the custom tool being called.
 
-    - `CompactionTrigger object { type }`
+    - `CompactionTrigger object { type, id }`
 
       Compacts the current context. Must be the final input item.
 
@@ -4106,6 +4281,10 @@ as input for the model's response.
         The type of the item. Always `compaction_trigger`.
 
         - `"compaction_trigger"`
+
+      - `id: optional string or null`
+
+        The unique ID of this compaction trigger.
 
     - `ItemReference object { id, type }`
 
@@ -4183,7 +4362,7 @@ as input for the model's response.
 
 - `max_output_tokens: optional number or null`
 
-  An upper bound for the number of tokens that can be generated for a response, including visible output tokens and [reasoning tokens](/docs/guides/reasoning).
+  An upper bound for the number of tokens that can be generated for a response, including visible output tokens and [reasoning tokens](/api/docs/guides/reasoning).
 
 - `max_tool_calls: optional number or null`
 
@@ -4200,14 +4379,16 @@ as input for the model's response.
 
 - `model: optional ResponsesModel`
 
-  Model ID used to generate the response, like `gpt-4o` or `o3`. OpenAI
+  Model ID used to generate the response, like `gpt-6-astra`. OpenAI
   offers a wide range of models with different capabilities, performance
-  characteristics, and price points. Refer to the [model guide](/docs/models)
+  characteristics, and price points. Refer to the [model guide](/api/docs/models)
   to browse and compare available models.
 
   - `string`
 
-  - `"gpt-5.6-sol" or "gpt-5.6-terra" or "gpt-5.6-luna" or 80 more`
+  - `"gpt-6-astra" or "gpt-5.6-sol" or "gpt-5.6-terra" or 81 more`
+
+    - `"gpt-6-astra"`
 
     - `"gpt-5.6-sol"`
 
@@ -4455,12 +4636,12 @@ as input for the model's response.
 
   The unique ID of the previous response to the model. Use this to
   create multi-turn conversations. Learn more about
-  [conversation state](/docs/guides/conversation-state). Cannot be used in conjunction with `conversation`.
+  [conversation state](/api/docs/guides/conversation-state). Cannot be used in conjunction with `conversation`.
 
 - `prompt: optional ResponsePrompt or null`
 
   Reference to a prompt template and its variables.
-  [Learn more](/docs/guides/text?api-mode=responses#reusable-prompts).
+  [Learn more](/api/docs/guides/text?api-mode=responses#version-prompts-in-code).
 
   - `id: string`
 
@@ -4480,7 +4661,7 @@ as input for the model's response.
 
     - `ResponseInputImage object { detail, type, file_id, 2 more }`
 
-      An image input to the model. Learn about [image inputs](/docs/guides/vision).
+      An image input to the model. Learn about [image inputs](/api/docs/guides/images-vision).
 
     - `ResponseInputFile object { type, detail, file_data, 4 more }`
 
@@ -4492,11 +4673,15 @@ as input for the model's response.
 
 - `prompt_cache_key: optional string or null`
 
-  Used by OpenAI to cache responses for similar requests to optimize your cache hit rates. Replaces the `user` field. [Learn more](/docs/guides/prompt-caching).
+  Used by OpenAI to cache responses for similar requests to optimize your cache hit rates. Replaces the `user` field. [Learn more](/api/docs/guides/prompt-caching).
 
-- `prompt_cache_options: optional object { mode, ttl }`
+- `prompt_cache_options: optional object { comparison_response_id, mode, ttl }`
 
-  Options for prompt caching. Supported for `gpt-5.6` and later models. By default, OpenAI automatically chooses one implicit cache breakpoint. You can add explicit breakpoints to content blocks with `prompt_cache_breakpoint`. Each request can write up to four breakpoints. For cache matching, OpenAI considers up to the latest 80 breakpoints in the conversation, without a content-block lookback limit. Set `mode` to `explicit` to disable the implicit breakpoint. The `ttl` defaults to `30m`, which is currently the only supported value. See the [prompt caching guide](/docs/guides/prompt-caching) for current details.
+  Options for prompt caching. Supported for `gpt-5.6` and later models. By default, OpenAI automatically chooses one implicit cache breakpoint. You can add explicit breakpoints to content blocks with `prompt_cache_breakpoint`. Each request can write up to four breakpoints. For cache matching, OpenAI considers up to the latest 80 breakpoints in the conversation, without a content-block lookback limit. Set `mode` to `explicit` to disable the implicit breakpoint. The `ttl` defaults to `30m`, which is currently the only supported value. See the [prompt caching guide](/api/docs/guides/prompt-caching) for current details.
+
+  - `comparison_response_id: optional string or null`
+
+    The ID of a response to compare when diagnosing prompt cache reuse. Supplying this field requests prompt cache diagnostics when the feature is enabled.
 
   - `mode: optional "implicit" or "explicit"`
 
@@ -4516,7 +4701,7 @@ as input for the model's response.
 
   Deprecated. Use `prompt_cache_options.ttl` instead.
 
-  The retention policy for the prompt cache. Set to `24h` to enable extended prompt caching, which keeps cached prefixes active for longer, up to a maximum of 24 hours. [Learn more](/docs/guides/prompt-caching#prompt-cache-retention).
+  The retention policy for the prompt cache. Set to `24h` to enable extended prompt caching, which keeps cached prefixes active for longer, up to a maximum of 24 hours. [Learn more](/api/docs/guides/prompt-caching#prompt-cache-retention).
   This field expresses a maximum retention policy, while
   `prompt_cache_options.ttl` expresses a minimum cache lifetime. The two
   fields are independent and do not interact.
@@ -4533,10 +4718,8 @@ as input for the model's response.
 
 - `reasoning: optional Reasoning or null`
 
-  **gpt-5 and o-series models only**
-
   Configuration options for
-  [reasoning models](https://platform.openai.com/docs/guides/reasoning).
+  [reasoning models](/api/docs/guides/reasoning).
 
   - `context: optional "auto" or "current_turn" or "all_turns" or null`
 
@@ -4561,22 +4744,8 @@ as input for the model's response.
     Reducing reasoning effort can result in faster responses and fewer tokens
     used on reasoning in a response. Not all reasoning models support every
     value. See the
-    [reasoning guide](https://platform.openai.com/docs/guides/reasoning)
+    [reasoning guide](/api/docs/guides/reasoning)
     for model-specific support.
-
-    - `"none"`
-
-    - `"minimal"`
-
-    - `"low"`
-
-    - `"medium"`
-
-    - `"high"`
-
-    - `"xhigh"`
-
-    - `"max"`
 
   - `generate_summary: optional "auto" or "concise" or "detailed" or null`
 
@@ -4627,7 +4796,7 @@ as input for the model's response.
 - `safety_identifier: optional string or null`
 
   A stable identifier used to help detect users of your application that may be violating OpenAI's usage policies.
-  The IDs should be a string that uniquely identifies each user, with a maximum length of 64 characters. We recommend hashing their username or email address, in order to avoid sending us any identifying information. [Learn more](/docs/guides/safety-best-practices#safety-identifiers).
+  The IDs should be a string that uniquely identifies each user, with a maximum length of 64 characters. We recommend hashing their username or email address, in order to avoid sending us any identifying information. [Learn more](/api/docs/guides/safety-best-practices#implement-safety-identifiers).
 
 - `service_tier: optional ServiceTier or null`
 
@@ -4635,7 +4804,7 @@ as input for the model's response.
 
   - If set to 'auto', then the request will be processed with the service tier configured in the Project settings. Unless otherwise configured, the Project will use 'default'.
   - If set to 'default', then the request will be processed with the standard pricing and performance for the selected model.
-  - If set to '[flex](/docs/guides/flex-processing)', then the request will be processed with the Flex Processing service tier.
+  - If set to '[flex](/api/docs/guides/flex-processing)', then the request will be processed with the Flex Processing service tier.
   - To opt-in to [Fast mode](/api/docs/guides/fast-mode) at the request level, include the `service_tier=fast` or `service_tier=priority` parameter for Responses or Chat Completions. The response will show `service_tier=priority` regardless of if you specify `service_tier=fast` or `priority` in your request.
   - If set to 'ultrafast', then the request will be processed with the access-controlled Ultrafast Processing service tier. This tier is currently available for `gpt-5.6-sol`; a response served through it will show `service_tier=ultrafast`.
   - When not set, the default behavior is 'auto'.
@@ -4660,12 +4829,14 @@ as input for the model's response.
 
   Whether to store the generated model response for later retrieval via
   API.
+  Defaults to true when omitted.
+  If set to true, response data will be stored for at least 30 days, subject to the [data retention exceptions](/api/docs/guides/your-data#v1responses).
 
 - `stream: optional boolean or null`
 
   If set to true, the model response data will be streamed to the client
   as it is generated using [server-sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events#Event_stream_format).
-  See the [Streaming section below](/docs/api-reference/responses-streaming)
+  See the [Streaming section below](/api/reference/resources/responses/streaming-events)
   for more information.
 
 - `stream_options: optional object { include_obfuscation }  or null`
@@ -4692,8 +4863,8 @@ as input for the model's response.
   Configuration options for a text response from the model. Can be plain
   text or structured JSON data. Learn more:
 
-  - [Text inputs and outputs](/docs/guides/text)
-  - [Structured Outputs](/docs/guides/structured-outputs)
+  - [Text inputs and outputs](/api/docs/guides/text)
+  - [Structured Outputs](/api/docs/guides/structured-outputs)
 
   - `format: optional ResponseFormatTextConfig`
 
@@ -4701,7 +4872,7 @@ as input for the model's response.
 
     Configuring `{ "type": "json_schema" }` enables Structured Outputs,
     which ensures the model will match your supplied JSON schema. Learn more in the
-    [Structured Outputs guide](/docs/guides/structured-outputs).
+    [Structured Outputs guide](/api/docs/guides/structured-outputs).
 
     The default format is `{ "type": "text" }` with no additional options.
 
@@ -4724,7 +4895,7 @@ as input for the model's response.
     - `ResponseFormatTextJSONSchemaConfig object { name, schema, type, 2 more }`
 
       JSON Schema response format. Used to generate structured JSON responses.
-      Learn more about [Structured Outputs](/docs/guides/structured-outputs).
+      Learn more about [Structured Outputs](/api/docs/guides/structured-outputs).
 
       - `name: string`
 
@@ -4753,7 +4924,7 @@ as input for the model's response.
         If set to true, the model will always follow the exact schema defined
         in the `schema` field. Only a subset of JSON Schema is supported when
         `strict` is `true`. To learn more, read the [Structured Outputs
-        guide](/docs/guides/structured-outputs).
+        guide](/api/docs/guides/structured-outputs).
 
     - `ResponseFormatJSONObject object { type }`
 
@@ -4844,12 +5015,12 @@ as input for the model's response.
   - `ToolChoiceTypes object { type }`
 
     Indicates that the model should use a built-in tool to generate a response.
-    [Learn more about built-in tools](/docs/guides/tools).
+    [Learn more about built-in tools](/api/docs/guides/tools).
 
     - `type: "file_search" or "web_search_preview" or "computer" or 5 more`
 
       The type of hosted tool the model should to use. Learn more about
-      [built-in tools](/docs/guides/tools).
+      [built-in tools](/api/docs/guides/tools).
 
       Allowed values are:
 
@@ -4951,7 +5122,7 @@ as input for the model's response.
 
       - `"shell"`
 
-- `tools: optional array of object { name, parameters, strict, 5 more }  or object { type, vector_store_ids, filters, 2 more }  or object { type }  or 13 more`
+- `tools: optional array of object { name, parameters, strict, 6 more }  or object { type, vector_store_ids, filters, 2 more }  or object { type }  or 13 more`
 
   An array of tools the model may call while generating a response. You
   can specify which tool to use by setting the `tool_choice` parameter.
@@ -4959,21 +5130,21 @@ as input for the model's response.
   We support the following categories of tools:
 
   - **Built-in tools**: Tools that are provided by OpenAI that extend the
-    model's capabilities, like [web search](/docs/guides/tools-web-search)
-    or [file search](/docs/guides/tools-file-search). Learn more about
-    [built-in tools](/docs/guides/tools).
+    model's capabilities, like [web search](/api/docs/guides/tools-web-search)
+    or [file search](/api/docs/guides/tools-file-search). Learn more about
+    [built-in tools](/api/docs/guides/tools).
   - **MCP Tools**: Integrations with third-party systems via custom MCP servers
     or predefined connectors such as Google Drive and SharePoint. Learn more about
-    [MCP Tools](/docs/guides/tools-connectors-mcp).
+    [MCP Tools](/api/docs/guides/tools-connectors-mcp).
   - **Function calls (custom tools)**: Functions that are defined by you,
     enabling the model to call your own code with strongly typed arguments
     and outputs. Learn more about
-    [function calling](/docs/guides/function-calling). You can also use
+    [function calling](/api/docs/guides/function-calling). You can also use
     custom tools to call your own code.
 
-  - `Function object { name, parameters, strict, 5 more }`
+  - `Function object { name, parameters, strict, 6 more }`
 
-    Defines a function in your own code the model can choose to call. Learn more about [function calling](https://platform.openai.com/docs/guides/function-calling).
+    Defines a function in your own code the model can choose to call. Learn more about [function calling](/api/docs/guides/function-calling).
 
     - `name: string`
 
@@ -5001,6 +5172,8 @@ as input for the model's response.
 
       - `"programmatic"`
 
+    - `async: optional boolean`
+
     - `defer_loading: optional boolean`
 
       Whether this function is deferred and loaded via tool search.
@@ -5015,7 +5188,7 @@ as input for the model's response.
 
   - `FileSearch object { type, vector_store_ids, filters, 2 more }`
 
-    A tool that searches for relevant content from uploaded files. Learn more about the [file search tool](https://platform.openai.com/docs/guides/tools-file-search).
+    A tool that searches for relevant content from uploaded files. Learn more about the [file search tool](/api/docs/guides/tools-file-search).
 
     - `type: "file_search"`
 
@@ -5073,7 +5246,7 @@ as input for the model's response.
 
   - `Computer object { type }`
 
-    A tool that controls a virtual computer. Learn more about the [computer tool](https://platform.openai.com/docs/guides/tools-computer-use).
+    A tool that controls a virtual computer. Learn more about the [computer tool](/api/docs/guides/tools-computer-use).
 
     - `type: "computer"`
 
@@ -5083,7 +5256,7 @@ as input for the model's response.
 
   - `ComputerUsePreview object { display_height, display_width, environment, type }`
 
-    A tool that controls a virtual computer. Learn more about the [computer tool](https://platform.openai.com/docs/guides/tools-computer-use).
+    A tool that controls a virtual computer. Learn more about the [computer tool](/api/docs/guides/tools-computer-use).
 
     - `display_height: number`
 
@@ -5116,7 +5289,7 @@ as input for the model's response.
   - `WebSearch object { type, external_web_access, filters, 2 more }`
 
     Search the Internet for sources related to the prompt. Learn more about the
-    [web search tool](/docs/guides/tools-web-search).
+    [web search tool](/api/docs/guides/tools-web-search).
 
     - `type: "web_search" or "web_search_2025_08_26"`
 
@@ -5180,7 +5353,7 @@ as input for the model's response.
   - `Mcp object { server_label, type, allowed_callers, 9 more }`
 
     Give the model access to additional tools via remote Model Context Protocol
-    (MCP) servers. [Learn more about MCP](/docs/guides/tools-remote-mcp).
+    (MCP) servers. [Learn more about MCP](/api/docs/guides/tools-connectors-mcp).
 
     - `server_label: string`
 
@@ -5232,7 +5405,7 @@ as input for the model's response.
 
       Identifier for service connectors, like those available in ChatGPT. One of
       `server_url`, `connector_id`, or `tunnel_id` must be provided. Learn more
-      about service connectors [here](/docs/guides/tools-remote-mcp#connectors).
+      about service connectors [here](/api/docs/guides/tools-connectors-mcp#connectors).
 
       Currently supported `connector_id` values are:
 
@@ -5424,8 +5597,13 @@ as input for the model's response.
 
     - `background: optional "transparent" or "opaque" or "auto"`
 
-      Background type for the generated image. One of `transparent`,
-      `opaque`, or `auto`. Default: `auto`.
+      Set the background of the generated image. One of `transparent`, `opaque`,
+      or `auto`. `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare`, including
+      their `2026-09-08` snapshots, support `opaque` and `transparent`
+      backgrounds. Transparent backgrounds are available for supported GPT Image
+      models. For `gpt-image-2` and `gpt-image-2-2026-04-21`, this support is in
+      preview. When using `transparent`, set the output format to `png` or `webp`.
+      Default: `auto`.
 
       - `"transparent"`
 
@@ -5454,21 +5632,43 @@ as input for the model's response.
 
         Base64-encoded mask image.
 
-    - `model: optional string or "gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5"`
+    - `model: optional string or "gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5" or 6 more`
 
-      The image generation model to use. Default: `gpt-image-1`.
+      The image generation model to use. One of `gpt-image-1`,
+      `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`,
+      `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`,
+      `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`,
+      `gpt-image-2.5-flare-2026-09-08`, or `chatgpt-image-latest`. Default:
+      `gpt-image-1`.
 
       - `string`
 
-      - `"gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5"`
+      - `"gpt-image-1" or "gpt-image-1-mini" or "gpt-image-1.5" or 6 more`
 
-        The image generation model to use. Default: `gpt-image-1`.
+        The image generation model to use. One of `gpt-image-1`,
+        `gpt-image-1-mini`, `gpt-image-1.5`, `gpt-image-2`,
+        `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`,
+        `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`,
+        `gpt-image-2.5-flare-2026-09-08`, or `chatgpt-image-latest`. Default:
+        `gpt-image-1`.
 
         - `"gpt-image-1"`
 
         - `"gpt-image-1-mini"`
 
         - `"gpt-image-1.5"`
+
+        - `"gpt-image-2"`
+
+        - `"gpt-image-2-2026-04-21"`
+
+        - `"gpt-image-2.5-sunburst"`
+
+        - `"gpt-image-2.5-sunburst-2026-09-08"`
+
+        - `"gpt-image-2.5-flare"`
+
+        - `"gpt-image-2.5-flare-2026-09-08"`
 
     - `moderation: optional "auto" or "low"`
 
@@ -5497,10 +5697,12 @@ as input for the model's response.
 
       Number of partial images to generate in streaming mode, from 0 (default value) to 3.
 
-    - `quality: optional "low" or "medium" or "high" or "auto"`
+    - `quality: optional "low" or "medium" or "high" or 3 more`
 
-      The quality of the generated image. One of `low`, `medium`, `high`,
-      or `auto`. Default: `auto`.
+      The quality of the generated image. The GPT image models support `low`,
+      `medium`, and `high`. `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare`,
+      including their `2026-09-08` snapshots, also support `xhigh` and `max`.
+      Default: `auto`.
 
       - `"low"`
 
@@ -5508,17 +5710,21 @@ as input for the model's response.
 
       - `"high"`
 
+      - `"xhigh"`
+
+      - `"max"`
+
       - `"auto"`
 
     - `size: optional string or "1024x1024" or "1024x1536" or "1536x1024" or "auto"`
 
-      The size of the generated images. For `gpt-image-2` and `gpt-image-2-2026-04-21`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
+      The size of the generated images. For `gpt-image-2`, `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`, and `gpt-image-2.5-flare-2026-09-08`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
 
       - `string`
 
       - `"1024x1024" or "1024x1536" or "1536x1024" or "auto"`
 
-        The size of the generated images. For `gpt-image-2` and `gpt-image-2-2026-04-21`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
+        The size of the generated images. For `gpt-image-2`, `gpt-image-2-2026-04-21`, `gpt-image-2.5-sunburst`, `gpt-image-2.5-sunburst-2026-09-08`, `gpt-image-2.5-flare`, and `gpt-image-2.5-flare-2026-09-08`, arbitrary resolutions are supported as `WIDTHxHEIGHT` strings, for example `1536x864`. Width and height must both be divisible by 16 and the requested aspect ratio must be between 1:3 and 3:1. Resolutions above `2560x1440` are experimental, and the maximum supported resolution is `3840x2160`. The requested size must also satisfy the model's current pixel and edge limits. The standard sizes `1024x1024`, `1536x1024`, and `1024x1536` are supported by the GPT image models; `auto` is supported for models that allow automatic sizing. For `dall-e-2`, use one of `256x256`, `512x512`, or `1024x1024`. For `dall-e-3`, use one of `1024x1024`, `1792x1024`, or `1024x1792`.
 
         - `"1024x1024"`
 
@@ -5564,9 +5770,9 @@ as input for the model's response.
 
       - `ContainerReference object { container_id, type }`
 
-  - `Custom object { name, type, allowed_callers, 3 more }`
+  - `Custom object { name, type, allowed_callers, 4 more }`
 
-    A custom tool that processes input using a specified format. Learn more about   [custom tools](/docs/guides/function-calling#custom-tools)
+    A custom tool that processes input using a specified format. Learn more about   [custom tools](/api/docs/guides/function-calling#custom-tools)
 
     - `name: string`
 
@@ -5585,6 +5791,10 @@ as input for the model's response.
       - `"direct"`
 
       - `"programmatic"`
+
+    - `async: optional boolean`
+
+      Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
     - `defer_loading: optional boolean`
 
@@ -5610,11 +5820,11 @@ as input for the model's response.
 
       The namespace name used in tool calls (for example, `crm`).
 
-    - `tools: array of object { name, type, allowed_callers, 5 more }  or object { name, type, allowed_callers, 3 more }`
+    - `tools: array of object { name, type, allowed_callers, 6 more }  or object { name, type, allowed_callers, 4 more }`
 
       The function/custom tools available inside this namespace.
 
-      - `Function object { name, type, allowed_callers, 5 more }`
+      - `Function object { name, type, allowed_callers, 6 more }`
 
         - `name: string`
 
@@ -5629,6 +5839,10 @@ as input for the model's response.
           - `"direct"`
 
           - `"programmatic"`
+
+        - `async: optional boolean`
+
+          Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
         - `defer_loading: optional boolean`
 
@@ -5646,9 +5860,9 @@ as input for the model's response.
 
           Whether to enforce strict parameter validation. If omitted, Responses attempts to use strict validation when the schema is compatible, and falls back to non-strict validation otherwise.
 
-      - `Custom object { name, type, allowed_callers, 3 more }`
+      - `Custom object { name, type, allowed_callers, 4 more }`
 
-        A custom tool that processes input using a specified format. Learn more about   [custom tools](/docs/guides/function-calling#custom-tools)
+        A custom tool that processes input using a specified format. Learn more about   [custom tools](/api/docs/guides/function-calling#custom-tools)
 
         - `name: string`
 
@@ -5667,6 +5881,10 @@ as input for the model's response.
           - `"direct"`
 
           - `"programmatic"`
+
+        - `async: optional boolean`
+
+          Whether the tool response can be returned asynchronously versus immediately returned on next response creation.
 
         - `defer_loading: optional boolean`
 
@@ -5714,7 +5932,7 @@ as input for the model's response.
 
   - `WebSearchPreview object { type, search_content_types, search_context_size, user_location }`
 
-    This tool searches the web for relevant results to use in a response. Learn more about the [web search tool](https://platform.openai.com/docs/guides/tools-web-search).
+    This tool searches the web for relevant results to use in a response. Learn more about the [web search tool](/api/docs/guides/tools-web-search).
 
     - `type: "web_search_preview" or "web_search_preview_2025_03_11"`
 
@@ -5818,7 +6036,7 @@ as input for the model's response.
 
   This field is being replaced by `safety_identifier` and `prompt_cache_key`. Use `prompt_cache_key` instead to maintain caching optimizations.
   A stable identifier for your end-users.
-  Used to boost cache hit rates by better bucketing similar requests and  to help OpenAI detect and prevent abuse. [Learn more](/docs/guides/safety-best-practices#safety-identifiers).
+  Used to boost cache hit rates by better bucketing similar requests and  to help OpenAI detect and prevent abuse. [Learn more](/api/docs/guides/safety-best-practices#implement-safety-identifiers).
 
 
 ### Streaming
@@ -5828,7 +6046,7 @@ curl https://api.openai.com/v1/responses \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
-    "model": "gpt-5.4",
+    "model": "gpt-6-astra",
     "instructions": "You are a helpful assistant.",
     "input": "Hello!",
     "stream": true
@@ -5839,10 +6057,10 @@ curl https://api.openai.com/v1/responses \
 
 ```json
 event: response.created
-data: {"type":"response.created","response":{"id":"resp_67c9fdcecf488190bdd9a0409de3a1ec07b8b0ad4e5eb654","object":"response","created_at":1741290958,"status":"in_progress","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-5.4","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}
+data: {"type":"response.created","response":{"id":"resp_67c9fdcecf488190bdd9a0409de3a1ec07b8b0ad4e5eb654","object":"response","created_at":1741290958,"status":"in_progress","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-6-astra","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}
 
 event: response.in_progress
-data: {"type":"response.in_progress","response":{"id":"resp_67c9fdcecf488190bdd9a0409de3a1ec07b8b0ad4e5eb654","object":"response","created_at":1741290958,"status":"in_progress","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-5.4","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}
+data: {"type":"response.in_progress","response":{"id":"resp_67c9fdcecf488190bdd9a0409de3a1ec07b8b0ad4e5eb654","object":"response","created_at":1741290958,"status":"in_progress","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-6-astra","output":[],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":null,"user":null,"metadata":{}}}
 
 event: response.output_item.added
 data: {"type":"response.output_item.added","output_index":0,"item":{"id":"msg_67c9fdcf37fc8190ba82116e33fb28c507b8b0ad4e5eb654","type":"message","status":"in_progress","role":"assistant","content":[]}}
@@ -5865,7 +6083,7 @@ event: response.output_item.done
 data: {"type":"response.output_item.done","output_index":0,"item":{"id":"msg_67c9fdcf37fc8190ba82116e33fb28c507b8b0ad4e5eb654","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi there! How can I assist you today?","annotations":[]}]}}
 
 event: response.completed
-data: {"type":"response.completed","response":{"id":"resp_67c9fdcecf488190bdd9a0409de3a1ec07b8b0ad4e5eb654","object":"response","created_at":1741290958,"status":"completed","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-5.4","output":[{"id":"msg_67c9fdcf37fc8190ba82116e33fb28c507b8b0ad4e5eb654","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi there! How can I assist you today?","annotations":[]}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":37,"output_tokens":11,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":48},"user":null,"metadata":{}}}
+data: {"type":"response.completed","response":{"id":"resp_67c9fdcecf488190bdd9a0409de3a1ec07b8b0ad4e5eb654","object":"response","created_at":1741290958,"status":"completed","error":null,"incomplete_details":null,"instructions":"You are a helpful assistant.","max_output_tokens":null,"model":"gpt-6-astra","output":[{"id":"msg_67c9fdcf37fc8190ba82116e33fb28c507b8b0ad4e5eb654","type":"message","status":"completed","role":"assistant","content":[{"type":"output_text","text":"Hi there! How can I assist you today?","annotations":[]}]}],"parallel_tool_calls":true,"previous_response_id":null,"reasoning":{"effort":null,"summary":null},"store":true,"temperature":1.0,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":1.0,"truncation":"disabled","usage":{"input_tokens":37,"output_tokens":11,"output_tokens_details":{"reasoning_tokens":0},"total_tokens":48},"user":null,"metadata":{}}}
 ```
 
 

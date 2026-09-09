@@ -15,7 +15,7 @@
 import { LLMClient } from "./baseClient";
 import { Gemini3_8Client } from "./gemini3_8";
 import { Claude5Client } from "./claude5";
-import { GPT5_6Client } from "./gpt5_6";
+import { GPT6Client } from "./gpt6";
 import { GLM5_3Client } from "./glm5_3";
 import { KimiK3Client } from "./kimi_k3";
 import { OpenaiChatClient } from "./openai_chat";
@@ -111,9 +111,10 @@ export class AutoLLMClient extends LLMClient {
     } else if (
       clientType.includes("gpt-5.4") ||
       clientType.includes("gpt-5.5") ||
-      clientType.includes("gpt-5.6")
+      clientType.includes("gpt-5.6") ||
+      clientType.includes("gpt-6")
     ) {
-      return GPT5_6Client;
+      return GPT6Client;
     } else if (clientType.includes("glm-5")) {
       // the whole GLM series shares the unified client
       return GLM5_3Client;
@@ -165,7 +166,7 @@ export class AutoLLMClient extends LLMClient {
         `${clientType} is not supported. ` +
           "Supported client types: minimax-m3, gemini-3.8, gemini-3.7, gemini-3.6, gemini-3, " +
           "claude-5, claude-4-8, claude-4-7, " +
-          "claude-4-6, gpt-5.6, gpt-5.5, gpt-5.4, glm-5.3, glm-5.2, glm-5.1, kimi-k3, kimi-k2.6, kimi-k2.5, " +
+          "claude-4-6, gpt-6, gpt-5.6, gpt-5.5, gpt-5.4, glm-5.3, glm-5.2, glm-5.1, kimi-k3, kimi-k2.6, kimi-k2.5, " +
           "deepseek-v4, openai-chat-vllm-adapter, openai-embedding, ant-messages, openai-responses, openai-chat.",
       );
     }

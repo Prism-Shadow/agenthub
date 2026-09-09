@@ -23,6 +23,8 @@ Use exact model IDs. If a model ID is not listed, ask the user to confirm the ex
 | GPT 5.5 | Official / ModelVerse | `gpt-5.5` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | GPT 5.6 | Official | `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | GPT 5.6 | OpenRouter | `openai/gpt-5.6-sol`, `openai/gpt-5.6-terra`, `openai/gpt-5.6-luna` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| GPT 6 | Official | `gpt-6-astra` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
+| GPT 6 | OpenRouter | `openai/gpt-6-astra` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | OpenAI Embedding | Official | `text-embedding-3-small`, `text-embedding-3-large` | `OPENAI_API_KEY` | `OPENAI_BASE_URL` |
 | Kimi-K2.6 | Official | `kimi-k2.6` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` |
 | Kimi-K2.6 | OpenRouter | `moonshotai/kimi-k2.6` | `MOONSHOT_API_KEY` | `MOONSHOT_BASE_URL` |
