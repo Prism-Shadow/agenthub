@@ -263,3 +263,5 @@ async def test_image_parts_go_out_at_the_detail_the_client_needs_or_are_refused_
 
     shrunk = "high" if case.shrinks else "absent"
     assert _details(case, model_input) == [shrunk, "absent", shrunk, "absent"]
+    # the list form is what images require
+    assert isinstance(model_input[2]["output" if case.protocol == "responses" else "content"], list)

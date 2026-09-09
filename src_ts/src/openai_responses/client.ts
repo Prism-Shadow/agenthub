@@ -282,18 +282,26 @@ export class OpenaiResponsesClient extends LLMClient {
 
           // NOTE: tool results are input items
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const toolResult: any[] = [{ type: "input_text", text: item.text }];
+          const imageParts: any[] = [];
 
           if (item.images) {
             for (const imageUrl of item.images) {
-              toolResult.push(this._convertImageUrl(imageUrl));
+              imageParts.push(this._convertImageUrl(imageUrl));
             }
           }
+
+          // a plain string is the form every OpenAI-compatible server accepts for a text
+          // result; the content-part list is reserved for results carrying images, which
+          // only servers with multimodal tool messages take
+          const output =
+            imageParts.length > 0
+              ? [{ type: "input_text", text: item.text }, ...imageParts]
+              : item.text;
 
           inputList.push({
             type: "function_call_output",
             call_id: item.tool_call_id,
-            output: toolResult,
+            output,
           });
         } else {
           throw new Error(`Unknown item: ${JSON.stringify(item)}`);
