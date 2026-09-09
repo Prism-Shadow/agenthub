@@ -4,6 +4,8 @@
 
 Here, we record the addition and removal times of models, major functional updates, bug fixes, and release times of key versions. Each release keeps one brief line here; the per-entry summaries live in `changelog/<version>/README.md`, and every entry links its detail file.
 
+- [2026-09-09] [Version 0.4.11](changelog/0.4.11/README.md): GPT-6 Astra joins the registry and the shared GPT client is renamed `gpt6` for it, with `none` thinking clamping to `low` on GPT-6; the DeepSeek V4 Flash rows move to the price effective 2026-09-10, DeepSeek images are gated by a text-only deny-list instead of the "vision" substring, and `deepseek-v4.1-flash` is pre-registered; and the generic OpenAI Chat and Responses clients send a text-only tool result as a plain string.
+
 - [2026-09-04] [Version 0.4.10](changelog/0.4.10/README.md): Gemini 3.8 Flash joins the registry and the shared Gemini client is renamed for it, the Gemini 2 series is dropped, registry rows record the list price with no discount field, every thinking level and thinking summary value stays on the wire, and a vLLM adapter client maps the thinking level onto whatever switch each served model's own chat template reads.
 
 - [2026-09-02] [Version 0.4.9](changelog/0.4.9/README.md): GPT-5.6 reads an image over the 30,000-patch limit at high detail instead of rejecting it, in a prompt and in a tool result, on the GPT-5.6, OpenAI Responses and OpenAI Chat clients.
