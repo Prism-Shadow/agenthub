@@ -16,7 +16,8 @@
   消息不接受图片。因此形态由实际落入 tool 消息的内容决定：在该端点上，带图片的工具结果同样以
   纯字符串发送，图片部件一如既往留在 user 消息中。
 - `openai-chat-vllm-adapter` 继承 `openai-chat` 的消息转换，因而遵循同一规则。
-- 第一方的 `gpt5_6`、`deepseek_v4` 与 `minimax_m3` client 未作改动，保持其实况抓包所记录的列表形态。
+- 第一方 client 均未改动：`gpt5_6`、`deepseek_v4`、`minimax_m3` 与 `kimi_k3` 保持其实况抓包所记录的
+  列表形态；`glm5_3` 本就以纯字符串发送纯文本工具结果。
 
 ## 线上形状
 

@@ -19,8 +19,9 @@
   plain string, with its image parts in the user message as before.
 - `openai-chat-vllm-adapter` inherits the message transform from `openai-chat` and followed
   the same rule.
-- The first-party `gpt5_6`, `deepseek_v4` and `minimax_m3` clients were left untouched, on
-  the list form their live captures record.
+- The first-party clients were left untouched: `gpt5_6`, `deepseek_v4`, `minimax_m3` and
+  `kimi_k3` on the list form their live captures record, and `glm5_3`, which already sent a
+  text-only tool result as a plain string.
 
 ## Wire shapes
 
