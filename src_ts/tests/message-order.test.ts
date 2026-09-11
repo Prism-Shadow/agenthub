@@ -117,12 +117,14 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
     model: "glm-5.3",
     protocol: "chat",
     expected: CHAT_ORDER,
+    bareTextToolResult: true,
   },
   {
     expectedClient: "KimiK3Client",
     model: "kimi-k3",
     protocol: "chat",
     expected: CHAT_ORDER,
+    bareTextToolResult: true,
   },
 ];
 

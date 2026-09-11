@@ -203,23 +203,24 @@ class GLM5_3Client(LLMClient):
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
-                    # a tool result without images stays a plain string, the only content shape
-                    # the Chat Completion schema documents for a tool message
-                    content = item["text"]
+                    # Chat Completions lets a tool message carry text only, and a server that
+                    # validates the schema rejects the whole request over an image part in one.
+                    # The images ride in the user message that follows the turn's tool messages,
+                    # the one place every OpenAI-compatible server reads them.
                     if "images" in item and item["images"]:
                         if not supports_image:
                             raise ValueError(f"GLM {self._model} does not support images in tool results.")
 
-                        content = [{"type": "text", "text": item["text"]}]
                         for image_url in item["images"]:
-                            content.append({"type": "image_url", "image_url": {"url": image_url}})
+                            content_parts.append({"type": "image_url", "image_url": {"url": image_url}})
 
-                    # Tool results are sent as separate messages
+                    # the plain string is the only content shape the Chat Completion schema
+                    # documents for a tool message
                     openai_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": item["tool_call_id"],
-                            "content": content,
+                            "content": item["text"],
                         }
                     )
                 else:
