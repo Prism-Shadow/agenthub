@@ -14,7 +14,6 @@
 
 import base64
 import inspect
-import json
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -274,6 +273,6 @@ async def test_image_parts_go_out_at_the_detail_the_client_needs_or_are_refused_
         # the tool message carries the text alone, and the images follow it in a user message
         assert len(model_input) == 4
         assert model_input[2]["role"] == "tool"
-        assert "image_url" not in json.dumps(model_input[2])
+        assert isinstance(model_input[2]["content"], str)
         assert model_input[3]["role"] == "user"
         assert [part["type"] for part in model_input[3]["content"]] == ["image_url", "image_url"]

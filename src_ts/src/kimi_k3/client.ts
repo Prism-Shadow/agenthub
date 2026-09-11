@@ -318,10 +318,12 @@ export class KimiK3Client extends LLMClient {
             }
           }
 
+          // the plain string is the form Moonshot's own tool-call examples send and every
+          // OpenAI-compatible server accepts
           openaiMessages.push({
             role: "tool",
             tool_call_id: item.tool_call_id,
-            content: [{ type: "text", text: item.text }],
+            content: item.text,
           });
         } else {
           throw new Error(

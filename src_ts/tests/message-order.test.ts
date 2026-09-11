@@ -123,6 +123,7 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
     model: "kimi-k3",
     protocol: "chat",
     expected: CHAT_ORDER,
+    bareTextToolResult: true,
   },
 ];
 

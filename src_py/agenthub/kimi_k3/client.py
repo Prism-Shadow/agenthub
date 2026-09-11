@@ -223,12 +223,13 @@ class KimiK3Client(LLMClient):
                             base64_image = await self._convert_image_url_to_base64(image_url)
                             content_parts.append({"type": "image_url", "image_url": {"url": base64_image}})
 
-                    # Tool results are sent as separate messages
+                    # the plain string is the form Moonshot's own tool-call examples send and every
+                    # OpenAI-compatible server accepts
                     openai_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": item["tool_call_id"],
-                            "content": [{"type": "text", "text": item["text"]}],
+                            "content": item["text"],
                         }
                     )
                 else:

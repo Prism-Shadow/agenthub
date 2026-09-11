@@ -444,7 +444,7 @@ describe.each(IMAGE_DETAIL_CASES)(
           // message
           expect(modelInput).toHaveLength(4);
           expect(modelInput[2].role).toBe("tool");
-          expect(JSON.stringify(modelInput[2])).not.toContain("image_url");
+          expect(typeof modelInput[2].content).toBe("string");
           expect(modelInput[3].role).toBe("user");
           expect(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any

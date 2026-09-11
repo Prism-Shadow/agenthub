@@ -16,9 +16,9 @@
   经此类网关用工具读图会直接终止该轮。
 - 两个 client 现在在所有端点上都把图片部件放进本轮 tool 消息之后的 user 消息。SiliconFlow 此前
   已作为特例采用这一位置，该特例随之移除。
-- 因此 `openai-chat` 的每条工具结果都以纯字符串发送，即
-  [0.4.11 引入](../0.4.11/2026-09-09-tool-result-text-form.zh.md)的纯文本形态；`kimi-k3` 保持其
-  单部件文本列表。
+- 因此两个 client 的每条工具结果都以纯字符串发送：`openai-chat` 沿用
+  [0.4.11 引入](../0.4.11/2026-09-09-tool-result-text-form.zh.md)的纯文本形态，`kimi-k3` 则放弃
+  单部件文本列表，改为 Moonshot 官方示例所用的字符串。
 - `openai-chat-vllm-adapter` 继承该消息转换，遵循同一规则。
 - 离线的 image-detail 测试改从末尾的 user 消息读取工具结果的图片，并在 `openai-chat` 之外覆盖
   `kimi-k3`。
