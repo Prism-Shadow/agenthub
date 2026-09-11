@@ -18,8 +18,7 @@
 // normally; replaying it without a chain of thought is then rejected with "the
 // reasoning_content in the thinking mode must be passed back to the API". DeepSeek waives
 // that only for tool_call ids it recognises as its own, which it cannot once a relay has
-// reissued them. Chat Completions carries an empty reasoning field on the turn; the
-// Responses-shaped DeepSeek client inserts a reasoning item ahead of the call.
+// reissued them. The turn therefore carries the reasoning field empty.
 
 import { expect, test } from "@jest/globals";
 import {
@@ -33,12 +32,6 @@ const THINKING = "I should call the tool.";
 
 type ModelInputItem = Record<string, unknown>;
 
-interface ReasoningInputItem {
-  type: string;
-  summary: unknown[];
-  content: Array<{ type: string; text: string }>;
-}
-
 /** The Chat Completions client; GLM and Kimi keep transforms of their own. */
 function chatClient(): AutoLLMClient {
   const client = new AutoLLMClient({
@@ -49,18 +42,6 @@ function chatClient(): AutoLLMClient {
   expect(
     (client as unknown as { _client: object })._client.constructor.name,
   ).toBe("OpenaiChatClient");
-  return client;
-}
-
-function deepseekClient(): AutoLLMClient {
-  const client = new AutoLLMClient({
-    model: "deepseek-v4",
-    apiKey: "test-key",
-    clientType: "deepseek-v4",
-  });
-  expect(
-    (client as unknown as { _client: object })._client.constructor.name,
-  ).toBe("DeepSeekV4Client");
   return client;
 }
 
@@ -115,15 +96,6 @@ function toolResults(...toolCallIds: string[]): UniMessage {
 
 function assistantMessages(modelInput: ModelInputItem[]): ModelInputItem[] {
   return modelInput.filter((message) => message.role === "assistant");
-}
-
-/** The Responses input as a flat list of item kinds. */
-function inputItemTypes(modelInput: ModelInputItem[]): string[] {
-  return modelInput.map((item) =>
-    item.type === undefined
-      ? `message:${item.role as string}`
-      : (item.type as string),
-  );
 }
 
 function toolCallIds(message: ModelInputItem): string[] {
@@ -241,87 +213,4 @@ test("replay keeps each message on its own reasoning field", async () => {
   // the request as a whole produced both spellings, so the turn without thinking sends both
   expect(third.reasoning_content).toBe("");
   expect(third.reasoning).toBe("");
-});
-
-test("DeepSeek keeps the real reasoning item before the function call", async () => {
-  const client = deepseekClient();
-  const history: UniMessage[] = [
-    userText(),
-    assistant(thinkingItem(THINKING), toolCallItem("call_1")),
-    toolResults("call_1"),
-  ];
-
-  const modelInput = await transformHistory(client, history);
-  expect(inputItemTypes(modelInput)).toEqual([
-    "message:user",
-    "reasoning",
-    "function_call",
-    "function_call_output",
-  ]);
-  expect(modelInput[1]).toEqual({
-    type: "reasoning",
-    summary: [],
-    content: [{ type: "reasoning_text", text: THINKING }],
-  });
-});
-
-test("DeepSeek adds a reasoning item before a function call without thinking", async () => {
-  const client = deepseekClient();
-  const history: UniMessage[] = [
-    userText(),
-    assistant(toolCallItem("call_1")),
-    toolResults("call_1"),
-  ];
-
-  const modelInput = await transformHistory(client, history);
-  expect(inputItemTypes(modelInput)).toEqual([
-    "message:user",
-    "reasoning",
-    "function_call",
-    "function_call_output",
-  ]);
-  const placeholder = modelInput[1] as unknown as ReasoningInputItem;
-  expect(placeholder.summary).toEqual([]);
-  expect(placeholder.content[0].type).toBe("reasoning_text");
-  // an empty reasoning_text is refused the same way the missing item is
-  expect(placeholder.content[0].text).not.toBe("");
-});
-
-test("DeepSeek fills an empty thinking item with replayable text", async () => {
-  // A thinking item whose text never arrived still has to reach the wire with text.
-  const client = deepseekClient();
-  const history: UniMessage[] = [
-    userText(),
-    assistant(thinkingItem(""), toolCallItem("call_1")),
-    toolResults("call_1"),
-  ];
-
-  const modelInput = await transformHistory(client, history);
-  expect(inputItemTypes(modelInput)).toEqual([
-    "message:user",
-    "reasoning",
-    "function_call",
-    "function_call_output",
-  ]);
-  const reasoning = modelInput[1] as unknown as ReasoningInputItem;
-  expect(reasoning.content[0].text).not.toBe("");
-});
-
-test("DeepSeek adds one reasoning item for two function calls without thinking", async () => {
-  const client = deepseekClient();
-  const history: UniMessage[] = [
-    userText(),
-    assistant(toolCallItem("call_1"), toolCallItem("call_2")),
-    toolResults("call_1", "call_2"),
-  ];
-
-  const modelInput = await transformHistory(client, history);
-  expect(inputItemTypes(modelInput)).toEqual([
-    "message:user",
-    "reasoning",
-    "function_call",
-    "function_call",
-    "function_call_output",
-    "function_call_output",
-  ]);
 });

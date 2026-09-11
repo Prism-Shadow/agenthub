@@ -383,16 +383,6 @@ const MESSAGES: UniMessage[] = [
   },
 ];
 
-// The tool result item, found by kind: a turn's reasoning item shifts the positions.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function functionCallOutput(modelInput: any[]): any {
-  const outputs = modelInput.filter(
-    (item) => item.type === "function_call_output",
-  );
-  expect(outputs).toHaveLength(1);
-  return outputs[0];
-}
-
 // The detail of each image part, in order: the prompt's two images, then the tool result's two.
 // An absent key and an explicit undefined differ on the wire, so the key itself is reported.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -401,10 +391,7 @@ function details(testCase: ImageDetailCase, modelInput: any[]): string[] {
   // in a user message of their own.
   const parts =
     testCase.protocol === "responses"
-      ? [
-          ...modelInput[0].content.slice(1),
-          ...functionCallOutput(modelInput).output.slice(1),
-        ]
+      ? [...modelInput[0].content.slice(1), ...modelInput[2].output.slice(1)]
       : [
           ...modelInput[0].content.slice(1),
           ...modelInput[3].content,
@@ -457,9 +444,7 @@ describe.each(IMAGE_DETAIL_CASES)(
         ]);
         if (testCase.protocol === "responses") {
           // the list form is what images require
-          expect(Array.isArray(functionCallOutput(modelInput).output)).toBe(
-            true,
-          );
+          expect(Array.isArray(modelInput[2].output)).toBe(true);
         } else {
           // the tool message carries the text alone, and the images follow it in a user
           // message

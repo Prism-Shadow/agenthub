@@ -38,21 +38,6 @@ from ..types import (
 from ..utils import fix_openrouter_usage_metadata, openai_image_detail
 
 
-def _reasoning_fields(fields: set[str | None]) -> list[str]:
-    """The message field(s) a piece of thinking rides back through.
-
-    Chosen from the wire field the upstream produced (recorded in each thinking item's
-    fidelity): servers may reject the spelling they did not emit. vLLM and siliconflow use
-    `reasoning_content`, openrouter uses `reasoning`; an ambiguous or unrecorded origin sends
-    both.
-    """
-    if fields == {"reasoning_content"}:
-        return ["reasoning_content"]
-    if fields == {"reasoning"}:
-        return ["reasoning"]
-    return ["reasoning_content", "reasoning"]
-
-
 class OpenaiChatClient(LLMClient):
     """OpenAI Chat Completions-compatible client implementation."""
 
@@ -158,20 +143,14 @@ class OpenaiChatClient(LLMClient):
             List of OpenAI Chat Completions message dictionaries
         """
         openai_messages = []
-        # Whole-request pass first: which reasoning field has this upstream produced, anywhere
-        # in the conversation? A turn the model answered without thinking still has to carry
-        # that field, empty, when it made tool calls — DeepSeek stops thinking part-way through
-        # a long tool chain, and then rejects the replay of that turn with "the
-        # reasoning_content in the thinking mode must be passed back to the API". It waives that
-        # only for tool_call ids it recognises as its own, which it cannot once a relay has
-        # reissued them. An empty field is what the API accepts; inventing thinking text is not
-        # this layer's to do. Scoped to conversations that produced a reasoning field at all, so
-        # a server that never emits one never starts receiving one.
+        # The reasoning field this upstream has produced so far, if any. A turn the model
+        # answered without thinking still has to carry that field, empty, when it made tool
+        # calls: DeepSeek stops thinking part-way through a long tool chain, and then rejects
+        # the replay of that turn with "the reasoning_content in the thinking mode must be
+        # passed back to the API". It waives that only for tool_call ids it issued itself,
+        # which a relay that reissues ids takes away. A conversation that never produced a
+        # reasoning field never receives one.
         replay_fields: set[str | None] = set()
-        for msg in messages:
-            for item in msg["content_items"]:
-                if item["type"] == "thinking" and item["thinking"]:
-                    replay_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
 
         for msg in messages:
             content_parts = []  # may be empty for tool results
@@ -187,6 +166,8 @@ class OpenaiChatClient(LLMClient):
                 elif item["type"] == "thinking":
                     thinking += item["thinking"]
                     thinking_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
+                    if item["thinking"]:
+                        replay_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
                 elif item["type"] == "tool_call":
                     tool_calls.append(
                         {
@@ -230,14 +211,19 @@ class OpenaiChatClient(LLMClient):
             if tool_calls:
                 message["tool_calls"] = tool_calls
 
-            if thinking:
-                for field in _reasoning_fields(thinking_fields):
-                    message[field] = thinking
-            elif tool_calls and replay_fields:
-                # A tool-calling turn the model thought nothing on: the field rides back empty,
-                # so the turn stays replayable (see the pre-pass above).
-                for field in _reasoning_fields(replay_fields):
-                    message[field] = ""
+            # This turn's own fidelity when it thought; otherwise the field the upstream has
+            # produced, with `thinking` still "" — the empty value keeps the turn replayable.
+            fields = thinking_fields if thinking else replay_fields
+            if thinking or (tool_calls and replay_fields):
+                # send thinking back through the exact field the upstream produced (recorded
+                # in the item fidelity); servers may reject the spelling they did not emit
+                if fields == {"reasoning_content"}:
+                    message["reasoning_content"] = thinking
+                elif fields == {"reasoning"}:
+                    message["reasoning"] = thinking
+                else:
+                    message["reasoning_content"] = thinking  # vLLM & siliconflow compatibility
+                    message["reasoning"] = thinking  # openrouter compatibility
 
             # message may be empty for tool results
             if len(message.keys()) > 1:

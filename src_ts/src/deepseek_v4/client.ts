@@ -44,20 +44,6 @@ import { isDebugEnabled } from "../utils";
 const TEXT_ONLY_MODELS = /^deepseek-v4-(flash|pro)(-\d{4})?$/;
 
 /**
- * A `reasoning` input item carrying `text`. The item must carry SOME text: the Responses API
- * refuses an empty `reasoning_text` exactly as it refuses a tool-calling turn with no reasoning
- * item at all (verified live 2026-09-11), so a turn with nothing to replay gets the least this
- * layer can invent.
- */
-function reasoningItem(text: string): Record<string, unknown> {
-  return {
-    type: "reasoning",
-    summary: [],
-    content: [{ type: "reasoning_text", text: text || " " }],
-  };
-}
-
-/**
  * DeepSeek V4-specific LLM client implementation using the OpenAI-compatible Responses API.
  */
 export class DeepSeekV4Client extends LLMClient {
@@ -218,9 +204,6 @@ export class DeepSeekV4Client extends LLMClient {
     for (const msg of messages) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const contentItems: any[] = [];
-      // Whether this turn has already put its chain of thought on the wire (see the
-      // placeholder pushed with the first function call below).
-      let carriedReasoning = false;
 
       for (const item of msg.content_items) {
         // anything that is not message content becomes an input item of its own, so the
@@ -254,19 +237,16 @@ export class DeepSeekV4Client extends LLMClient {
         } else if (item.type === "thinking") {
           // DeepSeek carries the chain of thought as plain reasoning_text and ignores the
           // summary and encrypted_content channels, so the item is rebuilt from the text
-          inputList.push(reasoningItem(item.thinking));
-          carriedReasoning = true;
-        } else if (item.type === "tool_call") {
-          if (!carriedReasoning) {
-            // A tool-calling turn the model thought nothing on — DeepSeek stops thinking
-            // part-way through a long tool chain. Replaying that turn without its chain of
-            // thought is rejected with "the reasoning_text in the thinking mode must be passed
-            // back to the API"; DeepSeek waives that only for call_ids it recognises as its
-            // own, which it cannot once a relay has reissued them.
-            inputList.push(reasoningItem(""));
-            carriedReasoning = true;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const reasoning: any = { type: "reasoning", summary: [] };
+          if (item.thinking) {
+            reasoning.content = [
+              { type: "reasoning_text", text: item.thinking },
+            ];
           }
 
+          inputList.push(reasoning);
+        } else if (item.type === "tool_call") {
           inputList.push({
             type: "function_call",
             call_id: item.tool_call_id,

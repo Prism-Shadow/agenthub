@@ -228,12 +228,6 @@ MESSAGES: list[dict[str, Any]] = [
 ]
 
 
-def _function_call_output(model_input: list[dict[str, Any]]) -> dict[str, Any]:
-    """The tool result item, found by kind: a turn's reasoning item shifts the positions."""
-    (output,) = [item for item in model_input if item.get("type") == "function_call_output"]
-    return output
-
-
 def _details(case: ImageDetailCase, model_input: list[dict[str, Any]]) -> list[str]:
     """
     The detail of each image part, in order: the prompt's two images, then the tool result's two.
@@ -241,7 +235,7 @@ def _details(case: ImageDetailCase, model_input: list[dict[str, Any]]) -> list[s
     An absent key and an explicit None differ on the wire, so the key itself is reported.
     """
     if case.protocol == "responses":
-        parts = model_input[0]["content"][1:] + _function_call_output(model_input)["output"][1:]
+        parts = model_input[0]["content"][1:] + model_input[2]["output"][1:]
     else:
         # Chat Completions takes no image in a tool message: the tool result's images follow it
         # in a user message of their own.
@@ -275,7 +269,7 @@ async def test_image_parts_go_out_at_the_detail_the_client_needs_or_are_refused_
     assert _details(case, model_input) == [shrunk, "absent", shrunk, "absent"]
     if case.protocol == "responses":
         # the list form is what images require
-        assert isinstance(_function_call_output(model_input)["output"], list)
+        assert isinstance(model_input[2]["output"], list)
     else:
         # the tool message carries the text alone, and the images follow it in a user message
         assert len(model_input) == 4
