@@ -237,36 +237,25 @@ export class OpenaiChatClient extends LLMClient {
             throw new Error("tool_call_id is required for tool result.");
           }
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const imageParts: any[] = [];
-
+          // Chat Completions lets a tool message carry text only, and a server that
+          // validates the schema rejects the whole request over an image part in one.
+          // The images ride in the user message that follows the turn's tool messages,
+          // the one place every OpenAI-compatible server reads them.
           if (item.images && item.images.length > 0) {
             for (const imageUrl of item.images) {
               const base64Image = await this._convertImageUrlToBase64(
                 imageUrl,
                 signal,
               );
-              const part = this._convertImageUrl(base64Image);
-              if (this._client.baseURL.includes("siliconflow.cn")) {
-                contentParts.push(part);
-              } else {
-                imageParts.push(part);
-              }
+              contentParts.push(this._convertImageUrl(base64Image));
             }
           }
 
-          // a plain string is the form every OpenAI-compatible server accepts for a text
-          // result; the content-part list is reserved for results carrying images, which
-          // only servers with multimodal tool messages take
-          const content =
-            imageParts.length > 0
-              ? [{ type: "text", text: item.text }, ...imageParts]
-              : item.text;
-
+          // the plain string is the form every OpenAI-compatible server accepts
           openaiMessages.push({
             role: "tool",
             tool_call_id: item.tool_call_id,
-            content,
+            content: item.text,
           });
         } else {
           throw new Error(

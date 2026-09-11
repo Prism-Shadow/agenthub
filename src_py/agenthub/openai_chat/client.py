@@ -173,28 +173,22 @@ class OpenaiChatClient(LLMClient):
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
-                    image_parts = []
-
+                    # Chat Completions lets a tool message carry text only, and a server that
+                    # validates the schema rejects the whole request over an image part in one.
+                    # The images ride in the user message that follows the turn's tool messages,
+                    # the one place every OpenAI-compatible server reads them.
                     if "images" in item and item["images"]:
                         for image_url in item["images"]:
-                            part = self._convert_image_url(await self._convert_image_url_to_base64(image_url))
-                            if "siliconflow.cn" in str(self._client.base_url):
-                                # siliconflow does not support image_url in tool result
-                                content_parts.append(part)
-                            else:
-                                image_parts.append(part)
+                            content_parts.append(
+                                self._convert_image_url(await self._convert_image_url_to_base64(image_url))
+                            )
 
-                    # a plain string is the form every OpenAI-compatible server accepts for a text
-                    # result; the content-part list is reserved for results carrying images, which
-                    # only servers with multimodal tool messages take
-                    content = [{"type": "text", "text": item["text"]}, *image_parts] if image_parts else item["text"]
-
-                    # Tool results are sent as separate messages
+                    # the plain string is the form every OpenAI-compatible server accepts
                     openai_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": item["tool_call_id"],
-                            "content": content,
+                            "content": item["text"],
                         }
                     )
                 else:

@@ -301,34 +301,27 @@ export class KimiK3Client extends LLMClient {
             throw new Error("tool_call_id is required for tool result.");
           }
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const content: any[] = [{ type: "text", text: item.text }];
-
+          // Chat Completions lets a tool message carry text only, and a server that
+          // validates the schema rejects the whole request over an image part in one.
+          // The images ride in the user message that follows the turn's tool messages,
+          // the one place every OpenAI-compatible server reads them.
           if (item.images && item.images.length > 0) {
             for (const imageUrl of item.images) {
               const base64Image = await this._convertImageUrlToBase64(
                 imageUrl,
                 signal,
               );
-              if (this._client.baseURL.includes("siliconflow.cn")) {
-                // siliconflow does not support image_url in tool result
-                contentParts.push({
-                  type: "image_url",
-                  image_url: { url: base64Image },
-                });
-              } else {
-                content.push({
-                  type: "image_url",
-                  image_url: { url: base64Image },
-                });
-              }
+              contentParts.push({
+                type: "image_url",
+                image_url: { url: base64Image },
+              });
             }
           }
 
           openaiMessages.push({
             role: "tool",
             tool_call_id: item.tool_call_id,
-            content,
+            content: [{ type: "text", text: item.text }],
           });
         } else {
           throw new Error(

@@ -14,6 +14,7 @@
 
 import base64
 import inspect
+import json
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -188,6 +189,7 @@ IMAGE_DETAIL_CASES = [
     ImageDetailCase("OpenaiResponsesClient", "deepseek-v4-flash-vision-exp", "openai-responses", "responses", False),
     ImageDetailCase("OpenaiChatClient", "GPT-5.6-Sol", "openai-chat", "chat", True),
     ImageDetailCase("OpenaiChatClient", "gpt-5.5", "openai-chat", "chat", False),
+    ImageDetailCase("KimiK3Client", "kimi-k3", None, "chat", False),
     # The DeepSeek client forwards images to every id except the text-only V4 Flash / V4 Pro
     # (bare, dated snapshot, any gateway prefix, any case).
     ImageDetailCase("DeepSeekV4Client", "deepseek-v4-flash", None, "responses", False, refuses_images=True),
@@ -235,7 +237,9 @@ def _details(case: ImageDetailCase, model_input: list[dict[str, Any]]) -> list[s
     if case.protocol == "responses":
         parts = model_input[0]["content"][1:] + model_input[2]["output"][1:]
     else:
-        parts = [part["image_url"] for part in model_input[0]["content"][1:] + model_input[2]["content"][1:]]
+        # Chat Completions takes no image in a tool message: the tool result's images follow it
+        # in a user message of their own.
+        parts = [part["image_url"] for part in model_input[0]["content"][1:] + model_input[3]["content"]]
 
     return [part.get("detail", "absent") for part in parts]
 
@@ -263,5 +267,13 @@ async def test_image_parts_go_out_at_the_detail_the_client_needs_or_are_refused_
 
     shrunk = "high" if case.shrinks else "absent"
     assert _details(case, model_input) == [shrunk, "absent", shrunk, "absent"]
-    # the list form is what images require
-    assert isinstance(model_input[2]["output" if case.protocol == "responses" else "content"], list)
+    if case.protocol == "responses":
+        # the list form is what images require
+        assert isinstance(model_input[2]["output"], list)
+    else:
+        # the tool message carries the text alone, and the images follow it in a user message
+        assert len(model_input) == 4
+        assert model_input[2]["role"] == "tool"
+        assert "image_url" not in json.dumps(model_input[2])
+        assert model_input[3]["role"] == "user"
+        assert [part["type"] for part in model_input[3]["content"]] == ["image_url", "image_url"]
