@@ -3,6 +3,7 @@
 - **Date:** 2026-09-11
 - **Type:** fix
 - **Scope:** `openai_chat`, `deepseek_v4`
+- **PR:** [#212](https://github.com/Prism-Shadow/agenthub/pull/212)
 
 [中文版](2026-09-11-replay-reasoning-gap.zh.md)
 
