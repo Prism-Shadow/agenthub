@@ -38,6 +38,18 @@ import {
 import { fixOpenrouterUsageMetadata, openaiImageDetail } from "../utils";
 
 /**
+ * The message field(s) a piece of thinking rides back through, chosen from the wire field the
+ * upstream produced (recorded in each thinking item's fidelity): servers may reject the
+ * spelling they did not emit. vLLM and siliconflow use `reasoning_content`, openrouter uses
+ * `reasoning`; an ambiguous or unrecorded origin sends both.
+ */
+function reasoningFields(fields: Set<string | undefined>): string[] {
+  if (fields.size === 1 && fields.has("reasoning_content")) return ["reasoning_content"];
+  if (fields.size === 1 && fields.has("reasoning")) return ["reasoning"];
+  return ["reasoning_content", "reasoning"];
+}
+
+/**
  * OpenAI Chat Completions-compatible client implementation.
  */
 export class OpenaiChatClient extends LLMClient {
@@ -199,6 +211,23 @@ export class OpenaiChatClient extends LLMClient {
     signal?: AbortSignal,
   ): Promise<ChatCompletionMessageParam[]> {
     const openaiMessages: ChatCompletionMessageParam[] = [];
+    // Whole-request pass first: which reasoning field has this upstream produced, anywhere in
+    // the conversation? A turn the model answered without thinking still has to carry that
+    // field, empty, when it made tool calls — DeepSeek stops thinking part-way through a long
+    // tool chain, and then rejects the replay of that turn with "the reasoning_content in the
+    // thinking mode must be passed back to the API". It waives that only for tool_call ids it
+    // recognises as its own, which it cannot once a relay has reissued them. An empty field is
+    // what the API accepts; inventing thinking text is not this layer's to do. Scoped to
+    // conversations that produced a reasoning field at all, so a server that never emits one
+    // never starts receiving one.
+    const replayFields = new Set<string | undefined>();
+    for (const msg of messages) {
+      for (const item of msg.content_items) {
+        if (item.type === "thinking" && item.thinking) {
+          replayFields.add(item.fidelity?.reasoning_field);
+        }
+      }
+    }
 
     for (const msg of messages) {
       const contentParts: Array<{
@@ -275,21 +304,14 @@ export class OpenaiChatClient extends LLMClient {
       }
 
       if (thinking) {
-        // send thinking back through the exact field the upstream produced (recorded
-        // in the item fidelity); servers may reject the spelling they did not emit
-        if (
-          thinkingFields.size === 1 &&
-          thinkingFields.has("reasoning_content")
-        ) {
-          message.reasoning_content = thinking;
-        } else if (
-          thinkingFields.size === 1 &&
-          thinkingFields.has("reasoning")
-        ) {
-          message.reasoning = thinking;
-        } else {
-          message.reasoning_content = thinking; // vLLM & siliconflow compatibility
-          message.reasoning = thinking; // openrouter compatibility
+        for (const field of reasoningFields(thinkingFields)) {
+          message[field] = thinking;
+        }
+      } else if (toolCalls.length > 0 && replayFields.size > 0) {
+        // A tool-calling turn the model thought nothing on: the field rides back empty, so the
+        // turn stays replayable (see the pre-pass above).
+        for (const field of reasoningFields(replayFields)) {
+          message[field] = "";
         }
       }
 
