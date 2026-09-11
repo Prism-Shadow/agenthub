@@ -271,11 +271,10 @@ export class GLM5_3Client extends LLMClient {
             throw new Error("tool_call_id is required for tool result.");
           }
 
-          // a tool result without images stays a plain string, the only content shape
-          // the Chat Completion schema documents for a tool message
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          let content: any = item.text;
-
+          // Chat Completions lets a tool message carry text only, and a server that
+          // validates the schema rejects the whole request over an image part in one.
+          // The images ride in the user message that follows the turn's tool messages,
+          // the one place every OpenAI-compatible server reads them.
           if (item.images && item.images.length > 0) {
             if (!supportsImage) {
               throw new Error(
@@ -283,19 +282,20 @@ export class GLM5_3Client extends LLMClient {
               );
             }
 
-            content = [{ type: "text", text: item.text }];
             for (const imageUrl of item.images) {
-              content.push({
+              contentParts.push({
                 type: "image_url",
                 image_url: { url: imageUrl },
               });
             }
           }
 
+          // the plain string is the only content shape the Chat Completion schema
+          // documents for a tool message
           openaiMessages.push({
             role: "tool",
             tool_call_id: item.tool_call_id,
-            content,
+            content: item.text,
           });
         } else {
           throw new Error(

@@ -189,6 +189,7 @@ IMAGE_DETAIL_CASES = [
     ImageDetailCase("OpenaiChatClient", "GPT-5.6-Sol", "openai-chat", "chat", True),
     ImageDetailCase("OpenaiChatClient", "gpt-5.5", "openai-chat", "chat", False),
     ImageDetailCase("KimiK3Client", "kimi-k3", None, "chat", False),
+    ImageDetailCase("GLM5_3Client", "glm-5.3-flash", None, "chat", False),
     # The DeepSeek client forwards images to every id except the text-only V4 Flash / V4 Pro
     # (bare, dated snapshot, any gateway prefix, any case).
     ImageDetailCase("DeepSeekV4Client", "deepseek-v4-flash", None, "responses", False, refuses_images=True),

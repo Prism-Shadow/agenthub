@@ -309,6 +309,12 @@ const IMAGE_DETAIL_CASES: ImageDetailCase[] = [
     protocol: "chat",
     shrinks: false,
   },
+  {
+    expectedClient: "GLM5_3Client",
+    model: "glm-5.3-flash",
+    protocol: "chat",
+    shrinks: false,
+  },
   // The DeepSeek client forwards images to every id except the text-only V4 Flash / V4 Pro
   // (bare, dated snapshot, any gateway prefix, any case).
   {
