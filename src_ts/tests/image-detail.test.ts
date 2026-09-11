@@ -303,6 +303,18 @@ const IMAGE_DETAIL_CASES: ImageDetailCase[] = [
     protocol: "chat",
     shrinks: false,
   },
+  {
+    expectedClient: "KimiK3Client",
+    model: "kimi-k3",
+    protocol: "chat",
+    shrinks: false,
+  },
+  {
+    expectedClient: "GLM5_3Client",
+    model: "glm-5.3-flash",
+    protocol: "chat",
+    shrinks: false,
+  },
   // The DeepSeek client forwards images to every id except the text-only V4 Flash / V4 Pro
   // (bare, dated snapshot, any gateway prefix, any case).
   {
@@ -375,12 +387,14 @@ const MESSAGES: UniMessage[] = [
 // An absent key and an explicit undefined differ on the wire, so the key itself is reported.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function details(testCase: ImageDetailCase, modelInput: any[]): string[] {
+  // Chat Completions takes no image in a tool message: the tool result's images follow it
+  // in a user message of their own.
   const parts =
     testCase.protocol === "responses"
       ? [...modelInput[0].content.slice(1), ...modelInput[2].output.slice(1)]
       : [
           ...modelInput[0].content.slice(1),
-          ...modelInput[2].content.slice(1),
+          ...modelInput[3].content,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         ].map((part: any) => part.image_url);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -428,12 +442,21 @@ describe.each(IMAGE_DETAIL_CASES)(
           shrunk,
           "absent",
         ]);
-        // the list form is what images require
-        expect(
-          testCase.protocol === "responses"
-            ? Array.isArray(modelInput[2].output)
-            : Array.isArray(modelInput[2].content),
-        ).toBe(true);
+        if (testCase.protocol === "responses") {
+          // the list form is what images require
+          expect(Array.isArray(modelInput[2].output)).toBe(true);
+        } else {
+          // the tool message carries the text alone, and the images follow it in a user
+          // message
+          expect(modelInput).toHaveLength(4);
+          expect(modelInput[2].role).toBe("tool");
+          expect(typeof modelInput[2].content).toBe("string");
+          expect(modelInput[3].role).toBe("user");
+          expect(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            modelInput[3].content.map((part: any) => part.type),
+          ).toEqual(["image_url", "image_url"]);
+        }
       },
     );
   },

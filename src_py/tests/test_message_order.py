@@ -60,8 +60,8 @@ MESSAGE_ORDER_CASES = [
     MessageOrderCase("AntMessagesClient", "claude-sonnet-5", "ant-messages", "messages", MESSAGES_ORDER),
     MessageOrderCase("Gemini3_8Client", "gemini-3.8-flash", None, "gemini", GEMINI_ORDER, b"sig-1"),
     MessageOrderCase("OpenaiChatClient", "gpt-5.6", "openai-chat", "chat", CHAT_ORDER, bare_text_tool_result=True),
-    MessageOrderCase("GLM5_3Client", "glm-5.3", None, "chat", CHAT_ORDER),
-    MessageOrderCase("KimiK3Client", "kimi-k3", None, "chat", CHAT_ORDER),
+    MessageOrderCase("GLM5_3Client", "glm-5.3", None, "chat", CHAT_ORDER, bare_text_tool_result=True),
+    MessageOrderCase("KimiK3Client", "kimi-k3", None, "chat", CHAT_ORDER, bare_text_tool_result=True),
 ]
 
 

@@ -214,23 +214,22 @@ class KimiK3Client(LLMClient):
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
-                    content = [{"type": "text", "text": item["text"]}]
-
+                    # Chat Completions lets a tool message carry text only, and a server that
+                    # validates the schema rejects the whole request over an image part in one.
+                    # The images ride in the user message that follows the turn's tool messages,
+                    # the one place every OpenAI-compatible server reads them.
                     if "images" in item and item["images"]:
                         for image_url in item["images"]:
                             base64_image = await self._convert_image_url_to_base64(image_url)
-                            if "siliconflow.cn" in str(self._client.base_url):
-                                # siliconflow does not support image_url in tool result
-                                content_parts.append({"type": "image_url", "image_url": {"url": base64_image}})
-                            else:
-                                content.append({"type": "image_url", "image_url": {"url": base64_image}})
+                            content_parts.append({"type": "image_url", "image_url": {"url": base64_image}})
 
-                    # Tool results are sent as separate messages
+                    # the plain string is the form Moonshot's own tool-call examples send and every
+                    # OpenAI-compatible server accepts
                     openai_messages.append(
                         {
                             "role": "tool",
                             "tool_call_id": item["tool_call_id"],
-                            "content": content,
+                            "content": item["text"],
                         }
                     )
                 else:
