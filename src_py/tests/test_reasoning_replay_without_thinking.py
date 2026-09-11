@@ -81,6 +81,10 @@ def _assistant_messages(model_input: list[dict[str, Any]]) -> list[dict[str, Any
     return [message for message in model_input if message["role"] == "assistant"]
 
 
+def _tool_call_ids(message: dict[str, Any]) -> list[str]:
+    return [tool_call["id"] for tool_call in message["tool_calls"]]
+
+
 @pytest.mark.asyncio
 async def test_replay_sends_empty_reasoning_content_for_a_tool_call_without_thinking():
     client = _chat_client()
@@ -95,7 +99,7 @@ async def test_replay_sends_empty_reasoning_content_for_a_tool_call_without_thin
     thought, unthought = _assistant_messages(await _transform_history(client, history))
     assert thought["reasoning_content"] == THINKING
     assert "reasoning" not in thought
-    assert unthought["tool_calls"][0]["id"] == "call_2"
+    assert _tool_call_ids(unthought) == ["call_2"]
     assert unthought["reasoning_content"] == ""
     assert "reasoning" not in unthought
 
@@ -114,7 +118,7 @@ async def test_replay_sends_empty_reasoning_for_a_tool_call_without_thinking():
     thought, unthought = _assistant_messages(await _transform_history(client, history))
     assert thought["reasoning"] == THINKING
     assert "reasoning_content" not in thought
-    assert unthought["tool_calls"][0]["id"] == "call_2"
+    assert _tool_call_ids(unthought) == ["call_2"]
     assert unthought["reasoning"] == ""
     assert "reasoning_content" not in unthought
 
@@ -130,7 +134,7 @@ async def test_replay_sends_no_reasoning_field_when_no_message_ever_thought():
     ]
 
     (message,) = _assistant_messages(await _transform_history(client, history))
-    assert message["tool_calls"][0]["id"] == "call_1"
+    assert _tool_call_ids(message) == ["call_1"]
     assert "reasoning_content" not in message
     assert "reasoning" not in message
 

@@ -115,9 +115,9 @@ test("replay sends an empty reasoning_content for a tool call without thinking",
     toolResults("call_2"),
   ];
 
-  const [thought, unthought] = assistantMessages(
-    await transformHistory(client, history),
-  );
+  const messages = assistantMessages(await transformHistory(client, history));
+  expect(messages).toHaveLength(2);
+  const [thought, unthought] = messages;
   expect(thought.reasoning_content).toBe(THINKING);
   expect(thought).not.toHaveProperty("reasoning");
   expect(toolCallIds(unthought)).toEqual(["call_2"]);
@@ -135,9 +135,9 @@ test("replay sends an empty reasoning for a tool call without thinking", async (
     toolResults("call_2"),
   ];
 
-  const [thought, unthought] = assistantMessages(
-    await transformHistory(client, history),
-  );
+  const messages = assistantMessages(await transformHistory(client, history));
+  expect(messages).toHaveLength(2);
+  const [thought, unthought] = messages;
   expect(thought.reasoning).toBe(THINKING);
   expect(thought).not.toHaveProperty("reasoning_content");
   expect(toolCallIds(unthought)).toEqual(["call_2"]);
@@ -157,7 +157,9 @@ test("replay sends no reasoning field when no message ever thought", async () =>
     toolResults("call_1"),
   ];
 
-  const [message] = assistantMessages(await transformHistory(client, history));
+  const messages = assistantMessages(await transformHistory(client, history));
+  expect(messages).toHaveLength(1);
+  const [message] = messages;
   expect(toolCallIds(message)).toEqual(["call_1"]);
   expect(message).not.toHaveProperty("reasoning_content");
   expect(message).not.toHaveProperty("reasoning");
@@ -176,7 +178,9 @@ test("replay sends no reasoning field for a message without tool calls", async (
     assistant({ type: "text", text: "It is 20 degrees in Paris." }),
   ];
 
-  const [, answer] = assistantMessages(await transformHistory(client, history));
+  const messages = assistantMessages(await transformHistory(client, history));
+  expect(messages).toHaveLength(2);
+  const [, answer] = messages;
   expect(answer.content).toEqual([
     { type: "text", text: "It is 20 degrees in Paris." },
   ]);
@@ -202,9 +206,9 @@ test("replay keeps each message on its own reasoning field", async () => {
     toolResults("call_3"),
   ];
 
-  const [first, second, third] = assistantMessages(
-    await transformHistory(client, history),
-  );
+  const messages = assistantMessages(await transformHistory(client, history));
+  expect(messages).toHaveLength(3);
+  const [first, second, third] = messages;
   // a message that thought still replays through the field its own item recorded
   expect(first.reasoning).toBe("First Paris.");
   expect(first).not.toHaveProperty("reasoning_content");
