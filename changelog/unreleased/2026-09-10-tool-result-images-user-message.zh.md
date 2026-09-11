@@ -3,6 +3,7 @@
 - **Date:** 2026-09-10
 - **Type:** fix
 - **Scope:** `openai_chat`, `kimi_k3`
+- **PR:** [#209](https://github.com/Prism-Shadow/agenthub/pull/209)
 
 [English](2026-09-10-tool-result-images-user-message.md)
 
