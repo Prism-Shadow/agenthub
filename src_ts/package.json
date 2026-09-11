@@ -1,6 +1,6 @@
 {
   "name": "@prismshadow/agenthub",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "AgentHub is the LLM API Hub for the Agent era, built for high-precision autonomous agents.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
