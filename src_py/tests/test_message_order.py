@@ -30,8 +30,6 @@ class MessageOrderCase:
     expected: list[str]
     # Claude replays the signature as text, Gemini as the bytes it streamed
     thought_signature: str | bytes = "sig-1"
-    # a text-only tool result goes out as a plain string rather than a one-part list
-    bare_text_tool_result: bool = False
 
 
 # A turn where the model thought, spoke, and then called a tool. Every protocol that can
@@ -46,22 +44,15 @@ CHAT_ORDER = ["user:text", "assistant:text,tool_calls,thinking", "tool:call_1"]
 
 MESSAGE_ORDER_CASES = [
     MessageOrderCase("GPT6Client", "gpt-5.6", None, "responses", RESPONSES_ORDER),
-    MessageOrderCase(
-        "OpenaiResponsesClient",
-        "gpt-5.6",
-        "openai-responses",
-        "responses",
-        RESPONSES_ORDER,
-        bare_text_tool_result=True,
-    ),
+    MessageOrderCase("OpenaiResponsesClient", "gpt-5.6", "openai-responses", "responses", RESPONSES_ORDER),
     MessageOrderCase("DeepSeekV4Client", "deepseek-v4", "deepseek-v4", "responses", RESPONSES_ORDER),
     MessageOrderCase("MiniMaxM3Client", "MiniMax-M3", "minimax-m3", "responses", RESPONSES_ORDER),
     MessageOrderCase("Claude5Client", "claude-sonnet-5", None, "messages", MESSAGES_ORDER),
     MessageOrderCase("AntMessagesClient", "claude-sonnet-5", "ant-messages", "messages", MESSAGES_ORDER),
     MessageOrderCase("Gemini3_8Client", "gemini-3.8-flash", None, "gemini", GEMINI_ORDER, b"sig-1"),
-    MessageOrderCase("OpenaiChatClient", "gpt-5.6", "openai-chat", "chat", CHAT_ORDER, bare_text_tool_result=True),
-    MessageOrderCase("GLM5_3Client", "glm-5.3", None, "chat", CHAT_ORDER, bare_text_tool_result=True),
-    MessageOrderCase("KimiK3Client", "kimi-k3", None, "chat", CHAT_ORDER, bare_text_tool_result=True),
+    MessageOrderCase("OpenaiChatClient", "gpt-5.6", "openai-chat", "chat", CHAT_ORDER),
+    MessageOrderCase("GLM5_3Client", "glm-5.3", None, "chat", CHAT_ORDER),
+    MessageOrderCase("KimiK3Client", "kimi-k3", None, "chat", CHAT_ORDER),
 ]
 
 
@@ -163,6 +154,9 @@ async def test_message_transform_keeps_content_item_order(case: MessageOrderCase
 
     assert _SIGNATURES[case.protocol](model_input) == case.expected
 
-    if case.bare_text_tool_result:
+    # every Responses and Chat Completions client sends a text-only tool result as a plain
+    # string rather than a one-part content list; the messages and gemini protocols have no
+    # such position
+    if case.protocol in ("responses", "chat"):
         tool_result = model_input[4]["output"] if case.protocol == "responses" else model_input[2]["content"]
         assert tool_result == "20 degrees."
