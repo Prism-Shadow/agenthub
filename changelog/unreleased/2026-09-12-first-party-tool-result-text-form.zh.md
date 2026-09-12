@@ -3,6 +3,7 @@
 - **Date:** 2026-09-12
 - **Type:** fix
 - **Scope:** `deepseek_v4`, `gpt6`
+- **PR:** [#215](https://github.com/Prism-Shadow/agenthub/pull/215)
 - **Issue:** penguin-harness [#404](https://github.com/Prism-Shadow/penguin-harness/issues/404)
 
 [English](2026-09-12-first-party-tool-result-text-form.md)
