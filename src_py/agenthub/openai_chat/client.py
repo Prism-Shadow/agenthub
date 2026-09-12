@@ -143,6 +143,14 @@ class OpenaiChatClient(LLMClient):
             List of OpenAI Chat Completions message dictionaries
         """
         openai_messages = []
+        # The reasoning field this upstream has produced so far, if any. A turn the model
+        # answered without thinking still has to carry that field, empty, when it made tool
+        # calls: DeepSeek stops thinking part-way through a long tool chain, and then rejects
+        # the replay of that turn with "the reasoning_content in the thinking mode must be
+        # passed back to the API". It waives that only for tool_call ids it issued itself,
+        # which a relay that reissues ids takes away. A conversation that never produced a
+        # reasoning field never receives one.
+        replay_fields: set[str | None] = set()
 
         for msg in messages:
             content_parts = []  # may be empty for tool results
@@ -158,6 +166,8 @@ class OpenaiChatClient(LLMClient):
                 elif item["type"] == "thinking":
                     thinking += item["thinking"]
                     thinking_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
+                    if item["thinking"]:
+                        replay_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
                 elif item["type"] == "tool_call":
                     tool_calls.append(
                         {
@@ -201,12 +211,15 @@ class OpenaiChatClient(LLMClient):
             if tool_calls:
                 message["tool_calls"] = tool_calls
 
-            if thinking:
+            # This turn's own fidelity when it thought; otherwise the field the upstream has
+            # produced, with `thinking` still "" — the empty value keeps the turn replayable.
+            fields = thinking_fields if thinking else replay_fields
+            if thinking or (tool_calls and replay_fields):
                 # send thinking back through the exact field the upstream produced (recorded
                 # in the item fidelity); servers may reject the spelling they did not emit
-                if thinking_fields == {"reasoning_content"}:
+                if fields == {"reasoning_content"}:
                     message["reasoning_content"] = thinking
-                elif thinking_fields == {"reasoning"}:
+                elif fields == {"reasoning"}:
                     message["reasoning"] = thinking
                 else:
                     message["reasoning_content"] = thinking  # vLLM & siliconflow compatibility

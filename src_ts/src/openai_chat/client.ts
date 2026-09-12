@@ -199,6 +199,13 @@ export class OpenaiChatClient extends LLMClient {
     signal?: AbortSignal,
   ): Promise<ChatCompletionMessageParam[]> {
     const openaiMessages: ChatCompletionMessageParam[] = [];
+    // The reasoning field this upstream has produced so far, if any. A turn the model answered
+    // without thinking still has to carry that field, empty, when it made tool calls: DeepSeek
+    // stops thinking part-way through a long tool chain, and then rejects the replay of that
+    // turn with "the reasoning_content in the thinking mode must be passed back to the API".
+    // It waives that only for tool_call ids it issued itself, which a relay that reissues ids
+    // takes away. A conversation that never produced a reasoning field never receives one.
+    const replayFields = new Set<string | undefined>();
 
     for (const msg of messages) {
       const contentParts: Array<{
@@ -223,6 +230,7 @@ export class OpenaiChatClient extends LLMClient {
         } else if (item.type === "thinking") {
           thinking += item.thinking;
           thinkingFields.add(item.fidelity?.reasoning_field);
+          if (item.thinking) replayFields.add(item.fidelity?.reasoning_field);
         } else if (item.type === "tool_call") {
           toolCalls.push({
             id: item.tool_call_id,
@@ -274,18 +282,15 @@ export class OpenaiChatClient extends LLMClient {
         message.tool_calls = toolCalls;
       }
 
-      if (thinking) {
+      // This turn's own fidelity when it thought; otherwise the field the upstream has
+      // produced, with `thinking` still "" — the empty value is what keeps the turn replayable.
+      const fields = thinking ? thinkingFields : replayFields;
+      if (thinking || (toolCalls.length > 0 && replayFields.size > 0)) {
         // send thinking back through the exact field the upstream produced (recorded
         // in the item fidelity); servers may reject the spelling they did not emit
-        if (
-          thinkingFields.size === 1 &&
-          thinkingFields.has("reasoning_content")
-        ) {
+        if (fields.size === 1 && fields.has("reasoning_content")) {
           message.reasoning_content = thinking;
-        } else if (
-          thinkingFields.size === 1 &&
-          thinkingFields.has("reasoning")
-        ) {
+        } else if (fields.size === 1 && fields.has("reasoning")) {
           message.reasoning = thinking;
         } else {
           message.reasoning_content = thinking; // vLLM & siliconflow compatibility
