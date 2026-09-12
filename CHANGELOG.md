@@ -4,6 +4,8 @@
 
 Here, we record the addition and removal times of models, major functional updates, bug fixes, and release times of key versions. Each release keeps one brief line here; the per-entry summaries live in `changelog/<version>/README.md`, and every entry links its detail file.
 
+- [2026-09-12] [Version 0.4.14](changelog/0.4.14/README.md): the first-party DeepSeek V4 and GPT Responses clients send a text-only tool result as a plain string, so a strictly validating DeepSeek Responses endpoint no longer rejects every request after a tool call with `400 invalid_json`.
+
 - [2026-09-12] [Version 0.4.13](changelog/0.4.13/README.md): the OpenAI Chat client replays a tool-calling assistant turn with its reasoning field present even when the model produced no chain of thought, so a DeepSeek tool chain reached through an endpoint that reissues tool_call ids is no longer rejected part-way through.
 
 - [2026-09-11] [Version 0.4.12](changelog/0.4.12/README.md): the OpenAI Chat, Kimi K3 and GLM clients send a tool result's images in the user message that follows the tool messages, so an image read by a tool works behind a gateway that validates the Chat Completions schema, and every tool result on those clients goes out as a plain string.
