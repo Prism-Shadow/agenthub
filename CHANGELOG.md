@@ -4,6 +4,8 @@
 
 Here, we record the addition and removal times of models, major functional updates, bug fixes, and release times of key versions. Each release keeps one brief line here; the per-entry summaries live in `changelog/<version>/README.md`, and every entry links its detail file.
 
+- [2026-09-12] [Version 0.4.13](changelog/0.4.13/README.md): the OpenAI Chat client replays a tool-calling assistant turn with its reasoning field present even when the model produced no chain of thought, so a DeepSeek tool chain reached through an endpoint that reissues tool_call ids is no longer rejected part-way through.
+
 - [2026-09-11] [Version 0.4.12](changelog/0.4.12/README.md): the OpenAI Chat, Kimi K3 and GLM clients send a tool result's images in the user message that follows the tool messages, so an image read by a tool works behind a gateway that validates the Chat Completions schema, and every tool result on those clients goes out as a plain string.
 
 - [2026-09-09] [Version 0.4.11](changelog/0.4.11/README.md): GPT-6 Astra joins the registry and the shared GPT client is renamed `gpt6` for it, with `none` thinking clamping to `low` on GPT-6; the DeepSeek V4 Flash rows move to the price effective 2026-09-10, DeepSeek images are gated by a text-only deny-list instead of the "vision" substring, and `deepseek-v4.1-flash` is pre-registered; and the generic OpenAI Chat and Responses clients send a text-only tool result as a plain string.

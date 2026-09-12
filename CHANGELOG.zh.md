@@ -4,6 +4,8 @@
 
 在这里，我们记录模型的新增与移除时间、主要功能更新、缺陷修复，以及关键版本的发布时间。每个发布版本在此保留一行简述；逐条目的摘要位于 `changelog/<version>/README.md`，且每个条目都会链接到自己的详情文件。
 
+- [2026-09-12] [版本 0.4.13](changelog/0.4.13/README.zh.md)：OpenAI Chat 客户端在回放「带工具调用、但模型没产出思考内容」的 assistant 轮时仍带上 reasoning 字段，因此经由会重签 tool_call id 的端点访问 DeepSeek 时，工具链不再跑到一半被拒。
+
 - [2026-09-11] [版本 0.4.12](changelog/0.4.12/README.zh.md)：OpenAI Chat、Kimi K3 与 GLM 客户端把工具结果的图片放进 tool 消息之后的 user 消息发送，工具读到的图片能穿过校验 Chat Completions schema 的网关；这些客户端的每条工具结果都以纯字符串发出。
 
 - [2026-09-09] [版本 0.4.11](changelog/0.4.11/README.zh.md)：注册表新增 GPT-6 Astra，共享的 GPT 客户端按其重命名为 `gpt6`，GPT-6 上的 `none` 思考等级收敛为 `low`；DeepSeek V4 Flash 各行改用 2026-09-10 起生效的价格，DeepSeek 图片改由纯文本拒绝名单把关而非 "vision" 子串，并预先登记 `deepseek-v4.1-flash`；通用 OpenAI Chat 与 Responses 客户端将纯文本工具结果作为纯字符串发送。
