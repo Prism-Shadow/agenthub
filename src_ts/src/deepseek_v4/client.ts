@@ -260,7 +260,7 @@ export class DeepSeekV4Client extends LLMClient {
 
           // NOTE: tool results are input items
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const toolResult: any[] = [{ type: "input_text", text: item.text }];
+          const imageParts: any[] = [];
 
           if (item.images) {
             if (!supportsImage) {
@@ -270,14 +270,22 @@ export class DeepSeekV4Client extends LLMClient {
             }
 
             for (const imageUrl of item.images) {
-              toolResult.push({ type: "input_image", image_url: imageUrl });
+              imageParts.push({ type: "input_image", image_url: imageUrl });
             }
           }
+
+          // a plain string is the form the Responses API documents for a text
+          // result and the one every endpoint fronting this model accepts; the
+          // content-part list is reserved for results carrying images
+          const output =
+            imageParts.length > 0
+              ? [{ type: "input_text", text: item.text }, ...imageParts]
+              : item.text;
 
           inputList.push({
             type: "function_call_output",
             call_id: item.tool_call_id,
-            output: toolResult,
+            output,
           });
         } else {
           throw new Error(`Unknown item: ${JSON.stringify(item)}`);

@@ -290,18 +290,26 @@ export class GPT6Client extends LLMClient {
 
           // Tool results are input items
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const toolResult: any[] = [{ type: "input_text", text: item.text }];
+          const imageParts: any[] = [];
 
           if (item.images) {
             for (const imageUrl of item.images) {
-              toolResult.push(this._convertImageUrl(imageUrl));
+              imageParts.push(this._convertImageUrl(imageUrl));
             }
           }
+
+          // a plain string is the form the Responses API documents for a text
+          // result and the one every endpoint fronting this model accepts; the
+          // content-part list is reserved for results carrying images
+          const output =
+            imageParts.length > 0
+              ? [{ type: "input_text", text: item.text }, ...imageParts]
+              : item.text;
 
           inputList.push({
             type: "function_call_output",
             call_id: item.tool_call_id,
-            output: toolResult,
+            output,
           });
         } else {
           throw new Error(`Unknown item: ${JSON.stringify(item)}`);
