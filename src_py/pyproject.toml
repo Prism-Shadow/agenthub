@@ -1,6 +1,6 @@
 [project]
 name = "agenthub-python"
-version = "0.4.12"
+version = "0.4.13"
 description = "AgentHub is the LLM API Hub for the Agent era, built for high-precision autonomous agents."
 keywords = ["agent", "llm", "gemini", "claude", "gpt"]
 readme = "README.md"
