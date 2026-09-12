@@ -201,16 +201,23 @@ class DeepSeekV4Client(LLMClient):
                         raise ValueError("tool_call_id is required for tool result.")
 
                     # NOTE: tool results are input items
-                    tool_result = [{"type": "input_text", "text": item["text"]}]
+                    image_parts = []
                     if "images" in item:
                         if not supports_image:
                             raise ValueError(f"DeepSeek {self._model} does not support images in tool results.")
 
                         for image_url in item["images"]:
-                            tool_result.append({"type": "input_image", "image_url": image_url})
+                            image_parts.append({"type": "input_image", "image_url": image_url})
+
+                    # a plain string is the form the Responses API documents for a text result and the
+                    # one every endpoint that fronts this model accepts; the content-part list is
+                    # reserved for results carrying images
+                    output = (
+                        [{"type": "input_text", "text": item["text"]}, *image_parts] if image_parts else item["text"]
+                    )
 
                     input_list.append(
-                        {"type": "function_call_output", "call_id": item["tool_call_id"], "output": tool_result}
+                        {"type": "function_call_output", "call_id": item["tool_call_id"], "output": output}
                     )
                 else:
                     raise ValueError(f"Unknown item: {item}")

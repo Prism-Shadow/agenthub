@@ -23,8 +23,6 @@ interface MessageOrderCase {
   expected: string[];
   // Claude replays the signature as text, Gemini as the bytes it streamed
   thoughtSignature?: string | Buffer;
-  // a text-only tool result goes out as a plain string rather than a one-part list
-  bareTextToolResult?: boolean;
 }
 
 // A turn where the model thought, spoke, and then called a tool. Every protocol that can
@@ -68,7 +66,6 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
     clientType: "openai-responses",
     protocol: "responses",
     expected: RESPONSES_ORDER,
-    bareTextToolResult: true,
   },
   {
     expectedClient: "DeepSeekV4Client",
@@ -110,21 +107,18 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
     clientType: "openai-chat",
     protocol: "chat",
     expected: CHAT_ORDER,
-    bareTextToolResult: true,
   },
   {
     expectedClient: "GLM5_3Client",
     model: "glm-5.3",
     protocol: "chat",
     expected: CHAT_ORDER,
-    bareTextToolResult: true,
   },
   {
     expectedClient: "KimiK3Client",
     model: "kimi-k3",
     protocol: "chat",
     expected: CHAT_ORDER,
-    bareTextToolResult: true,
   },
 ];
 
@@ -229,7 +223,10 @@ describe.each(MESSAGE_ORDER_CASES)(
 
       expect(signature(testCase, modelInput)).toEqual(testCase.expected);
 
-      if (testCase.bareTextToolResult) {
+      // every Responses and Chat Completions client sends a text-only tool result as
+      // a plain string rather than a one-part content list; the messages and gemini
+      // protocols have no such position
+      if (testCase.protocol === "responses" || testCase.protocol === "chat") {
         expect(
           testCase.protocol === "responses"
             ? modelInput[4].output
