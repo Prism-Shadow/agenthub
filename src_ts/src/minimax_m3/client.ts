@@ -23,9 +23,9 @@ import {
   EventType,
   FinishReason,
   PartialContentItem,
-  PartialToolCallContentItem,
   PromptCaching,
   ThinkingLevel,
+  ToolCallContentItem,
   ToolChoice,
   UniConfig,
   UniEvent,
@@ -42,9 +42,14 @@ type MiniMaxReasoningEffort = "none" | "low" | "medium" | "high";
 export class MiniMaxM3Client extends LLMClient {
   protected _model: string;
   private _client: OpenAI;
-  // call ids of the function calls in flight, by output item id: the argument events name
-  // only the item, and a gateway may stream several calls at once
-  private _itemCallIds = new Map<string, string>();
+  // Function calls of the response in flight, keyed by output item id (the call id when a
+  // server sends none): the argument events name a call only by that id, and a gateway may
+  // open several calls before closing any of them.
+  private _openToolCalls = new Map<
+    string,
+    { name: string; tool_call_id: string; arguments: string }
+  >();
+  private _lastOpenedToolCall = "";
 
   constructor(options: {
     model: string;
@@ -238,6 +243,37 @@ export class MiniMaxM3Client extends LLMClient {
     return inputList;
   }
 
+  /** The open call an argument event belongs to: the one it names, else the one opened last. */
+  private _toolCallKey(itemId?: string): string {
+    return itemId && this._openToolCalls.has(itemId)
+      ? itemId
+      : this._lastOpenedToolCall;
+  }
+
+  /** Pop the named calls and return them as complete tool_call items. */
+  private _closeToolCalls(keys: string[]): ToolCallContentItem[] {
+    const items: ToolCallContentItem[] = [];
+    for (const key of keys) {
+      const toolCall = this._openToolCalls.get(key);
+      if (!toolCall) {
+        continue;
+      }
+      this._openToolCalls.delete(key);
+      items.push({
+        type: "tool_call",
+        name: toolCall.name,
+        arguments: parseToolCallArguments(
+          toolCall.arguments,
+          this.constructor.name,
+          toolCall.name,
+          toolCall.tool_call_id,
+        ),
+        tool_call_id: toolCall.tool_call_id,
+      });
+    }
+    return items;
+  }
+
   /**
    * Transform a MiniMax streaming event to AgentHub's universal event format.
    */
@@ -256,9 +292,13 @@ export class MiniMaxM3Client extends LLMClient {
       contentItems.push({ type: "thinking", thinking: modelOutput.delta });
     } else if (minimaxEventType === "response.output_item.added") {
       if (modelOutput.item.type === "function_call") {
-        if (modelOutput.item.id) {
-          this._itemCallIds.set(modelOutput.item.id, modelOutput.item.call_id);
-        }
+        this._lastOpenedToolCall =
+          modelOutput.item.id || modelOutput.item.call_id;
+        this._openToolCalls.set(this._lastOpenedToolCall, {
+          name: modelOutput.item.name,
+          tool_call_id: modelOutput.item.call_id,
+          arguments: "",
+        });
         eventType = "start";
         contentItems.push({
           type: "partial_tool_call",
@@ -268,28 +308,34 @@ export class MiniMaxM3Client extends LLMClient {
         });
       }
     } else if (minimaxEventType === "response.function_call_arguments.delta") {
+      const toolCall = this._openToolCalls.get(
+        this._toolCallKey(modelOutput.item_id),
+      );
+      if (toolCall) {
+        toolCall.arguments += modelOutput.delta;
+      }
       eventType = "delta";
       contentItems.push({
         type: "partial_tool_call",
         name: "",
         arguments: modelOutput.delta,
-        tool_call_id: this._itemCallIds.get(modelOutput.item_id) ?? "",
+        tool_call_id: "",
       });
     } else if (minimaxEventType === "response.function_call_arguments.done") {
-      // a stop naming the call closes it; the streaming loop yields the complete tool_call
-      eventType = "stop";
-      contentItems.push({
-        type: "partial_tool_call",
-        name: "",
-        arguments: "",
-        tool_call_id: this._itemCallIds.get(modelOutput.item_id) ?? "",
-      });
-      this._itemCallIds.delete(modelOutput.item_id);
+      // the call is complete: emit it whole
+      contentItems.push(
+        ...this._closeToolCalls([this._toolCallKey(modelOutput.item_id)]),
+      );
+      eventType = contentItems.length > 0 ? "delta" : "unused";
     } else if (
       minimaxEventType === "response.completed" ||
       minimaxEventType === "response.incomplete"
     ) {
       eventType = "stop";
+      // a gateway may end the response without closing every call
+      contentItems.push(
+        ...this._closeToolCalls([...this._openToolCalls.keys()]),
+      );
       const response = modelOutput.response;
       const finishReasonMapping: { [key: string]: FinishReason } = {
         completed: "stop",
@@ -347,16 +393,6 @@ export class MiniMaxM3Client extends LLMClient {
     const minimaxConfig = this.transformUniConfigToModelConfig(options.config);
     const inputList = this.transformUniMessageToModelInput(options.messages);
 
-    // Calls still streaming, keyed by tool call id: a gateway may open several before closing
-    // any of them. A fragment without an id belongs to the call opened last.
-    const openToolCalls = new Map<
-      string,
-      { name: string; arguments: string }
-    >();
-    let lastOpened = "";
-    const keyOf = (toolCallId: string) =>
-      openToolCalls.has(toolCallId) ? toolCallId : lastOpened;
-
     // MiniMax accepts output_text assistant inputs and function tools without OpenAI's required
     // strict field, so narrow the compatibility cast to this boundary.
     const params = {
@@ -370,61 +406,8 @@ export class MiniMaxM3Client extends LLMClient {
     });
     for await (const event of stream) {
       const uniEvent = this.transformModelOutputToUniEvent(event);
-      const fragments = uniEvent.content_items.filter(
-        (item): item is PartialToolCallContentItem =>
-          item.type === "partial_tool_call",
-      );
-      if (uniEvent.event_type === "start") {
-        for (const item of fragments) {
-          lastOpened = item.tool_call_id;
-          openToolCalls.set(lastOpened, { name: item.name, arguments: "" });
-        }
+      if (uniEvent.event_type !== "unused") {
         yield uniEvent;
-      } else if (uniEvent.event_type === "delta") {
-        for (const item of fragments) {
-          const toolCall = openToolCalls.get(keyOf(item.tool_call_id));
-          if (toolCall) {
-            toolCall.arguments += item.arguments;
-          }
-        }
-        yield uniEvent;
-      } else if (uniEvent.event_type === "stop") {
-        // a stop that names calls closes them; the end of the response closes whatever a
-        // gateway never closed on its own
-        const closing =
-          fragments.length > 0
-            ? fragments.map((item) => keyOf(item.tool_call_id))
-            : [...openToolCalls.keys()];
-        for (const toolCallId of closing) {
-          const toolCall = openToolCalls.get(toolCallId);
-          if (!toolCall) {
-            continue;
-          }
-          openToolCalls.delete(toolCallId);
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "tool_call",
-                name: toolCall.name,
-                arguments: parseToolCallArguments(
-                  toolCall.arguments,
-                  this.constructor.name,
-                  toolCall.name,
-                  toolCallId,
-                ),
-                tool_call_id: toolCallId,
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
-        }
-
-        if (uniEvent.finish_reason || uniEvent.usage_metadata) {
-          yield uniEvent;
-        }
       }
     }
   }
