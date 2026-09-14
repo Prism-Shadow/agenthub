@@ -130,6 +130,8 @@ The final `arguments` value must parse to a JSON object. If the streamed JSON is
 
 For consecutive or parallel tool calls, each new call restarts at step 1 with its own `name` and `tool_call_id`, so one call's arguments never bleed into the next. Send each tool result back with the exact `tool_call_id` from its `tool_call`.
 
+`minimax-m3` reads each tool call from the server's completed output item rather than from the argument deltas: it announces the call with a single fragment carrying the whole arguments string (as the Gemini clients do), then delivers the complete `tool_call`, so step 2 is that one fragment and the stream and the complete call are one and the same. The `tool_call` item and the `ToolCallArgumentParseError` rule above apply unchanged.
+
 ## Errors
 
 Errors thrown by AgentHub inherit `AgentHubError`, an `Error` subclass:

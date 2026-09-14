@@ -23,7 +23,6 @@ import {
   EventType,
   FinishReason,
   PartialContentItem,
-  PartialToolCallContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
@@ -251,36 +250,25 @@ export class MiniMaxM3Client extends LLMClient {
     } else if (minimaxEventType === "response.reasoning_text.delta") {
       eventType = "delta";
       contentItems.push({ type: "thinking", thinking: modelOutput.delta });
-    } else if (minimaxEventType === "response.output_item.added") {
+    } else if (minimaxEventType === "response.output_item.done") {
+      // MiniMax's tool calls are read from the completed item alone: the argument deltas are
+      // left unread rather than reconciled against this item, and the streaming loop announces
+      // the call with one fragment carrying the whole arguments, so what a consumer streams
+      // and the call it is handed are one and the same.
       if (modelOutput.item.type === "function_call") {
-        eventType = "start";
+        eventType = "delta";
         contentItems.push({
-          type: "partial_tool_call",
+          type: "tool_call",
           name: modelOutput.item.name,
-          arguments: "",
+          arguments: parseToolCallArguments(
+            modelOutput.item.arguments,
+            this.constructor.name,
+            modelOutput.item.name,
+            modelOutput.item.call_id,
+          ),
           tool_call_id: modelOutput.item.call_id,
-          item_id: modelOutput.item.id,
         });
       }
-    } else if (minimaxEventType === "response.function_call_arguments.delta") {
-      eventType = "delta";
-      contentItems.push({
-        type: "partial_tool_call",
-        name: "",
-        arguments: modelOutput.delta,
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
-      });
-    } else if (minimaxEventType === "response.function_call_arguments.done") {
-      // a stop naming the item closes that call
-      eventType = "stop";
-      contentItems.push({
-        type: "partial_tool_call",
-        name: "",
-        arguments: "",
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
-      });
     } else if (
       minimaxEventType === "response.completed" ||
       minimaxEventType === "response.incomplete"
@@ -310,9 +298,11 @@ export class MiniMaxM3Client extends LLMClient {
       ![
         "response.created",
         "response.in_progress",
+        "response.output_item.added",
         "response.output_text.done",
         "response.reasoning_text.done",
-        "response.output_item.done",
+        "response.function_call_arguments.delta",
+        "response.function_call_arguments.done",
         "response.content_part.added",
         "response.content_part.done",
         // gateway heartbeat on long generations; carries no content
@@ -343,16 +333,6 @@ export class MiniMaxM3Client extends LLMClient {
     const minimaxConfig = this.transformUniConfigToModelConfig(options.config);
     const inputList = this.transformUniMessageToModelInput(options.messages);
 
-    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
-    // server sends none): a gateway may open several before closing any of them.
-    const openToolCalls = new Map<
-      string,
-      { name: string; tool_call_id: string; arguments: string }
-    >();
-    let lastOpened = "";
-    const keyOf = (itemId?: string) =>
-      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
-
     // MiniMax accepts output_text assistant inputs and function tools without OpenAI's required
     // strict field, so narrow the compatibility cast to this boundary.
     const params = {
@@ -366,66 +346,32 @@ export class MiniMaxM3Client extends LLMClient {
     });
     for await (const event of stream) {
       const uniEvent = this.transformModelOutputToUniEvent(event);
-      const fragments = uniEvent.content_items.filter(
-        (item): item is PartialToolCallContentItem =>
-          item.type === "partial_tool_call",
-      );
-      if (uniEvent.event_type === "start") {
-        for (const item of fragments) {
-          lastOpened = item.item_id || item.tool_call_id;
-          openToolCalls.set(lastOpened, {
-            name: item.name,
-            tool_call_id: item.tool_call_id,
-            arguments: "",
-          });
-        }
-        yield uniEvent;
-      } else if (uniEvent.event_type === "delta") {
-        for (const item of fragments) {
-          const toolCall = openToolCalls.get(keyOf(item.item_id));
-          if (toolCall) {
-            toolCall.arguments += item.arguments;
-          }
-        }
-        yield uniEvent;
-      } else if (uniEvent.event_type === "stop") {
-        // a stop that names calls closes them; the end of the response closes whatever a
-        // gateway never closed on its own
-        const closing =
-          fragments.length > 0
-            ? fragments.map((item) => keyOf(item.item_id))
-            : [...openToolCalls.keys()];
-        for (const key of closing) {
-          const toolCall = openToolCalls.get(key);
-          if (!toolCall) {
-            continue;
-          }
-          openToolCalls.delete(key);
+      if (uniEvent.event_type === "unused") {
+        continue;
+      }
+
+      for (const item of uniEvent.content_items) {
+        if (item.type === "tool_call") {
+          // the argument deltas are not streamed, so announce the call the way the Gemini
+          // client does: one fragment carrying the whole arguments, then the complete call
           yield {
             role: "assistant",
             event_type: "delta",
             content_items: [
               {
-                type: "tool_call",
-                name: toolCall.name,
-                arguments: parseToolCallArguments(
-                  toolCall.arguments,
-                  this.constructor.name,
-                  toolCall.name,
-                  toolCall.tool_call_id,
-                ),
-                tool_call_id: toolCall.tool_call_id,
+                type: "partial_tool_call",
+                name: item.name,
+                arguments: JSON.stringify(item.arguments),
+                tool_call_id: item.tool_call_id,
               },
             ],
             usage_metadata: null,
             finish_reason: null,
           };
         }
-
-        if (uniEvent.finish_reason || uniEvent.usage_metadata) {
-          yield uniEvent;
-        }
       }
+
+      yield uniEvent;
     }
   }
 

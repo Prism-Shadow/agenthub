@@ -208,43 +208,26 @@ class MiniMaxM3Client(LLMClient):
             event_type = "delta"
             content_items.append({"type": "thinking", "thinking": model_output.delta})
 
-        elif minimax_event_type == "response.output_item.added":
+        elif minimax_event_type == "response.output_item.done":
+            # MiniMax's tool calls are read from the completed item alone: the argument deltas are
+            # left unread rather than reconciled against this item, and the streaming loop announces
+            # the call with one fragment carrying the whole arguments, so what a consumer streams
+            # and the call it is handed are one and the same.
             if model_output.item.type == "function_call":
-                event_type = "start"
+                event_type = "delta"
                 content_items.append(
                     {
-                        "type": "partial_tool_call",
+                        "type": "tool_call",
                         "name": model_output.item.name,
-                        "arguments": "",
+                        "arguments": parse_tool_call_arguments(
+                            model_output.item.arguments,
+                            self.__class__.__name__,
+                            model_output.item.name,
+                            model_output.item.call_id,
+                        ),
                         "tool_call_id": model_output.item.call_id,
-                        "item_id": model_output.item.id,
                     }
                 )
-
-        elif minimax_event_type == "response.function_call_arguments.delta":
-            event_type = "delta"
-            content_items.append(
-                {
-                    "type": "partial_tool_call",
-                    "name": "",
-                    "arguments": model_output.delta,
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
-                }
-            )
-
-        elif minimax_event_type == "response.function_call_arguments.done":
-            # a stop naming the item closes that call
-            event_type = "stop"
-            content_items.append(
-                {
-                    "type": "partial_tool_call",
-                    "name": "",
-                    "arguments": "",
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
-                }
-            )
 
         elif minimax_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
@@ -270,9 +253,11 @@ class MiniMaxM3Client(LLMClient):
             not in (
                 "response.created",
                 "response.in_progress",
+                "response.output_item.added",
                 "response.output_text.done",
                 "response.reasoning_text.done",
-                "response.output_item.done",
+                "response.function_call_arguments.delta",
+                "response.function_call_arguments.done",
                 "response.content_part.added",
                 "response.content_part.done",
                 "keepalive",  # gateway heartbeat on long generations; carries no content
@@ -296,63 +281,33 @@ class MiniMaxM3Client(LLMClient):
         minimax_config = self.transform_uni_config_to_model_config(config)
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
-        # server sends none): a gateway may open several before closing any of them.
-        open_tool_calls: dict[str, dict] = {}
-        last_opened = ""
-
-        def key_of(item_id: str | None) -> str:
-            return item_id if item_id in open_tool_calls else last_opened
-
         stream = await self._client.responses.create(**minimax_config, input=input_list, stream=True)
         async for model_event in stream:
             event = self.transform_model_output_to_uni_event(model_event)
-            fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
-            if event["event_type"] == "start":
-                for item in fragments:
-                    last_opened = item.get("item_id") or item["tool_call_id"]
-                    open_tool_calls[last_opened] = {
-                        "name": item["name"],
-                        "tool_call_id": item["tool_call_id"],
-                        "arguments": "",
-                    }
-                yield event
-            elif event["event_type"] == "delta":
-                for item in fragments:
-                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
-                    if tool_call is not None:
-                        tool_call["arguments"] += item["arguments"]
-                yield event
-            elif event["event_type"] == "stop":
-                # a stop that names calls closes them; the end of the response closes whatever
-                # a gateway never closed on its own
-                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
-                for key in closing:
-                    tool_call = open_tool_calls.pop(key, None)
-                    if tool_call is None:
-                        continue
+            if event["event_type"] == "unused":
+                continue
+
+            for item in event["content_items"]:
+                if item["type"] == "tool_call":
+                    # the argument deltas are not streamed, so announce the call the way the
+                    # Gemini client does: one fragment carrying the whole arguments, then the
+                    # complete call
                     yield {
                         "role": "assistant",
                         "event_type": "delta",
                         "content_items": [
                             {
-                                "type": "tool_call",
-                                "name": tool_call["name"],
-                                "arguments": parse_tool_call_arguments(
-                                    tool_call["arguments"],
-                                    self.__class__.__name__,
-                                    tool_call["name"],
-                                    tool_call["tool_call_id"],
-                                ),
-                                "tool_call_id": tool_call["tool_call_id"],
+                                "type": "partial_tool_call",
+                                "name": item["name"],
+                                "arguments": json.dumps(item["arguments"], ensure_ascii=False),
+                                "tool_call_id": item["tool_call_id"],
                             }
                         ],
                         "usage_metadata": None,
                         "finish_reason": None,
                     }
 
-                if event["finish_reason"] or event["usage_metadata"]:
-                    yield event
+            yield event
 
     async def list_models(self) -> list[str]:
         """
