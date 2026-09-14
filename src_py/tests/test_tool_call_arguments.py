@@ -57,6 +57,12 @@ OPENAI_COMPATIBLE_TOOL_STREAM_CASES = [
         client_type="deepseek-v4",
         protocol="responses",
     ),
+    OpenAICompatibleToolStreamCase(
+        expected_client="MiniMaxM3Client",
+        model="MiniMax-M3",
+        client_type="minimax-m3",
+        protocol="responses",
+    ),
 ]
 
 
@@ -123,6 +129,21 @@ def _tool_stop_chunk() -> object:
     )
 
 
+def _function_call_item_done(tool_call_id: str, name: str, arguments: str, item_id: str | None = None) -> object:
+    """The completed function-call item a Responses server sends once its arguments are done."""
+    return SimpleNamespace(
+        type="response.output_item.done",
+        item=SimpleNamespace(
+            type="function_call",
+            id=item_id,
+            call_id=tool_call_id,
+            name=name,
+            arguments=arguments,
+            status="completed",
+        ),
+    )
+
+
 def _tool_stream(case: OpenAICompatibleToolStreamCase, tool_call_id: str, name: str, *fragments: str) -> list[object]:
     """Build a streamed tool call in the wire shape the case's client parses."""
     if case.protocol == "responses":
@@ -137,6 +158,7 @@ def _tool_stream(case: OpenAICompatibleToolStreamCase, tool_call_id: str, name: 
             for fragment in fragments
         ]
         events.append(SimpleNamespace(type="response.function_call_arguments.done", item_id=None))
+        events.append(_function_call_item_done(tool_call_id, name, "".join(fragments)))
         events.append(
             SimpleNamespace(
                 type="response.completed",
@@ -284,6 +306,9 @@ def _interleaved_parallel_call_stream() -> list[object]:
                 ),
             ],
             "done": SimpleNamespace(type="response.function_call_arguments.done", item_id=f"fc_{suffix}"),
+            "item_done": _function_call_item_done(
+                f"call_{suffix}", f"tool_{suffix}", '{"city":"Paris"}', f"fc_{suffix}"
+            ),
         }
 
     first = open_call("first")
@@ -295,7 +320,9 @@ def _interleaved_parallel_call_stream() -> list[object]:
         second["added"],
         *second["deltas"],
         first["done"],
+        first["item_done"],
         second["done"],
+        second["item_done"],
         _COMPLETED_EVENT,
     ]
 

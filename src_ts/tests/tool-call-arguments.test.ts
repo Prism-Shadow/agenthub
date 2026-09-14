@@ -75,6 +75,12 @@ const OPENAI_COMPATIBLE_TOOL_STREAM_CASES: OpenAICompatibleToolStreamCase[] = [
     clientType: "deepseek-v4",
     protocol: "responses",
   },
+  {
+    expectedClient: "MiniMaxM3Client",
+    model: "MiniMax-M3",
+    clientType: "minimax-m3",
+    protocol: "responses",
+  },
 ];
 
 const messages: UniMessage[] = [
@@ -160,6 +166,26 @@ function toolStopChunk(): unknown {
   };
 }
 
+/** The completed function-call item a Responses server sends once its arguments are done. */
+function functionCallItemDone(
+  toolCallId: string,
+  name: string,
+  args: string,
+  itemId?: string,
+): unknown {
+  return {
+    type: "response.output_item.done",
+    item: {
+      type: "function_call",
+      id: itemId,
+      call_id: toolCallId,
+      name,
+      arguments: args,
+      status: "completed",
+    },
+  };
+}
+
 /** Build a streamed tool call in the wire shape the case's client parses. */
 function toolStream(
   testCase: OpenAICompatibleToolStreamCase,
@@ -182,6 +208,7 @@ function toolStream(
     }
 
     events.push({ type: "response.function_call_arguments.done" });
+    events.push(functionCallItemDone(toolCallId, name, fragments.join("")));
     events.push({
       type: "response.completed",
       response: {
@@ -364,6 +391,12 @@ function interleavedParallelCallStream(): unknown[] {
       type: "response.function_call_arguments.done",
       item_id: `fc_${suffix}`,
     },
+    itemDone: functionCallItemDone(
+      `call_${suffix}`,
+      `tool_${suffix}`,
+      '{"city":"Paris"}',
+      `fc_${suffix}`,
+    ),
   });
   const first = open("first");
   const second = open("second");
@@ -374,7 +407,9 @@ function interleavedParallelCallStream(): unknown[] {
     second.added,
     ...second.deltas,
     first.done,
+    first.itemDone,
     second.done,
+    second.itemDone,
     COMPLETED_EVENT,
   ];
 }
