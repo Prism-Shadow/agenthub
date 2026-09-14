@@ -41,6 +41,9 @@ import { isDebugEnabled, openaiImageDetail } from "../utils";
 export class OpenaiResponsesClient extends LLMClient {
   protected _model: string;
   private _client: OpenAI;
+  // call ids of the function calls in flight, by output item id: the argument events name
+  // only the item, and a gateway may stream several calls at once
+  private _itemCallIds = new Map<string, string>();
 
   /**
    * Initialize OpenAI Responses-compatible client with model, API key, and base URL.
@@ -345,13 +348,15 @@ export class OpenaiResponsesClient extends LLMClient {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const phase = (item as any).phase as string | undefined;
       if (item.type === "function_call") {
+        if (item.id) {
+          this._itemCallIds.set(item.id, item.call_id);
+        }
         eventType = "start";
         contentItems.push({
           type: "partial_tool_call",
           name: item.name,
           arguments: "",
           tool_call_id: item.call_id,
-          item_id: item.id,
         });
       } else if (item.type === "message" && phase) {
         eventType = "delta";
@@ -388,19 +393,18 @@ export class OpenaiResponsesClient extends LLMClient {
         type: "partial_tool_call",
         name: "",
         arguments: modelOutput.delta,
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
+        tool_call_id: this._itemCallIds.get(modelOutput.item_id) ?? "",
       });
     } else if (openaiEventType === "response.function_call_arguments.done") {
-      // a stop naming the item closes that call
+      // a stop naming the call closes it; the streaming loop yields the complete tool_call
       eventType = "stop";
       contentItems.push({
         type: "partial_tool_call",
         name: "",
         arguments: "",
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
+        tool_call_id: this._itemCallIds.get(modelOutput.item_id) ?? "",
       });
+      this._itemCallIds.delete(modelOutput.item_id);
     } else if (
       openaiEventType === "response.completed" ||
       openaiEventType === "response.incomplete"
@@ -475,15 +479,15 @@ export class OpenaiResponsesClient extends LLMClient {
       options.signal,
     );
 
-    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
-    // server sends none): a gateway may open several before closing any of them.
+    // Calls still streaming, keyed by tool call id: a gateway may open several before closing
+    // any of them. A fragment without an id belongs to the call opened last.
     const openToolCalls = new Map<
       string,
-      { name: string; tool_call_id: string; arguments: string }
+      { name: string; arguments: string }
     >();
     let lastOpened = "";
-    const keyOf = (itemId?: string) =>
-      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
+    const keyOf = (toolCallId: string) =>
+      openToolCalls.has(toolCallId) ? toolCallId : lastOpened;
 
     const params: ResponseCreateParamsStreaming = {
       ...openaiConfig,
@@ -502,17 +506,13 @@ export class OpenaiResponsesClient extends LLMClient {
       );
       if (uniEvent.event_type === "start") {
         for (const item of fragments) {
-          lastOpened = item.item_id || item.tool_call_id;
-          openToolCalls.set(lastOpened, {
-            name: item.name,
-            tool_call_id: item.tool_call_id,
-            arguments: "",
-          });
+          lastOpened = item.tool_call_id;
+          openToolCalls.set(lastOpened, { name: item.name, arguments: "" });
         }
         yield uniEvent;
       } else if (uniEvent.event_type === "delta") {
         for (const item of fragments) {
-          const toolCall = openToolCalls.get(keyOf(item.item_id));
+          const toolCall = openToolCalls.get(keyOf(item.tool_call_id));
           if (toolCall) {
             toolCall.arguments += item.arguments;
           }
@@ -523,14 +523,14 @@ export class OpenaiResponsesClient extends LLMClient {
         // gateway never closed on its own
         const closing =
           fragments.length > 0
-            ? fragments.map((item) => keyOf(item.item_id))
+            ? fragments.map((item) => keyOf(item.tool_call_id))
             : [...openToolCalls.keys()];
-        for (const key of closing) {
-          const toolCall = openToolCalls.get(key);
+        for (const toolCallId of closing) {
+          const toolCall = openToolCalls.get(toolCallId);
           if (!toolCall) {
             continue;
           }
-          openToolCalls.delete(key);
+          openToolCalls.delete(toolCallId);
           yield {
             role: "assistant",
             event_type: "delta",
@@ -542,9 +542,9 @@ export class OpenaiResponsesClient extends LLMClient {
                   toolCall.arguments,
                   this.constructor.name,
                   toolCall.name,
-                  toolCall.tool_call_id,
+                  toolCallId,
                 ),
-                tool_call_id: toolCall.tool_call_id,
+                tool_call_id: toolCallId,
               },
             ],
             usage_metadata: null,

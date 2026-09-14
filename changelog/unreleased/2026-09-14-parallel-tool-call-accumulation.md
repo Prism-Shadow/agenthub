@@ -19,11 +19,11 @@
   Console Go rejected the orphan with `400 ... No function call found for
   function_call_output with call_id 'call_...'` — the whole turn was lost. Every harness
   turn that ran two tools in parallel hit it.
-- `partial_tool_call` items gain an optional `item_id`: the Responses clients fill it from the
-  item id the `output_item.added`, `function_call_arguments.delta` and
-  `function_call_arguments.done` events carry, and the streaming loop keys its open calls by it,
-  falling back to the call announced last for servers that send none. A call closes when its
-  own `function_call_arguments.done` arrives, and the end of the response closes whatever a
-  gateway never closed on its own.
+- The Responses transforms remember each streaming function call's output item id → call id,
+  so every `partial_tool_call` fragment they emit carries the `tool_call_id` of its call —
+  argument deltas included — and the `stop` that `function_call_arguments.done` produces names
+  the call it closes. The streaming loop keys its open calls by that id, falling back to the
+  call announced last for servers that send no item ids, and the end of the response closes
+  whatever a gateway never closed on its own.
 - Both languages changed together, and the parallel-call suite covers both Responses rows of
   the tool-call-arguments tests.

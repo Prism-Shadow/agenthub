@@ -16,8 +16,8 @@
 - 丢失要到下一个请求才暴露：assistant 消息只回放出 B，而两个调用的工具结果都作为 user 项回放，
   Console Go 于是以 `400 ... No function call found for function_call_output with call_id
   'call_...'` 拒绝这个孤儿项，整轮作废。凡是并行跑两个工具的轮次都会命中。
-- `partial_tool_call` 项新增可选的 `item_id`：Responses 客户端从 `output_item.added`、
-  `function_call_arguments.delta`、`function_call_arguments.done` 三种事件携带的 item id 填入，流式循环据此
-  区分未收尾的调用，对不发 id 的服务端则回退到最后宣告的那个。调用在自己的 `function_call_arguments.done`
-  到达时收尾，响应结束时再收掉网关始终没有收尾的调用。
+- Responses 客户端的 transform 记住每个流式函数调用的 output item id → call id，于是它产出的每个
+  `partial_tool_call` 片段（包括参数 delta）都带着所属调用的 `tool_call_id`，`function_call_arguments.done`
+  产出的 `stop` 也点名它收尾的调用。流式循环按这个 id 区分未收尾的调用，对不发 item id 的服务端则回退到最后宣告的
+  那个，响应结束时再收掉网关始终没有收尾的调用。
 - 两种语言同步修改；并行调用用例覆盖 tool-call-arguments 测试中的两个 Responses 用例行。

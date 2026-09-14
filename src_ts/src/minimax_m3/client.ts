@@ -42,6 +42,9 @@ type MiniMaxReasoningEffort = "none" | "low" | "medium" | "high";
 export class MiniMaxM3Client extends LLMClient {
   protected _model: string;
   private _client: OpenAI;
+  // call ids of the function calls in flight, by output item id: the argument events name
+  // only the item, and a gateway may stream several calls at once
+  private _itemCallIds = new Map<string, string>();
 
   constructor(options: {
     model: string;
@@ -253,13 +256,15 @@ export class MiniMaxM3Client extends LLMClient {
       contentItems.push({ type: "thinking", thinking: modelOutput.delta });
     } else if (minimaxEventType === "response.output_item.added") {
       if (modelOutput.item.type === "function_call") {
+        if (modelOutput.item.id) {
+          this._itemCallIds.set(modelOutput.item.id, modelOutput.item.call_id);
+        }
         eventType = "start";
         contentItems.push({
           type: "partial_tool_call",
           name: modelOutput.item.name,
           arguments: "",
           tool_call_id: modelOutput.item.call_id,
-          item_id: modelOutput.item.id,
         });
       }
     } else if (minimaxEventType === "response.function_call_arguments.delta") {
@@ -268,19 +273,18 @@ export class MiniMaxM3Client extends LLMClient {
         type: "partial_tool_call",
         name: "",
         arguments: modelOutput.delta,
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
+        tool_call_id: this._itemCallIds.get(modelOutput.item_id) ?? "",
       });
     } else if (minimaxEventType === "response.function_call_arguments.done") {
-      // a stop naming the item closes that call
+      // a stop naming the call closes it; the streaming loop yields the complete tool_call
       eventType = "stop";
       contentItems.push({
         type: "partial_tool_call",
         name: "",
         arguments: "",
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
+        tool_call_id: this._itemCallIds.get(modelOutput.item_id) ?? "",
       });
+      this._itemCallIds.delete(modelOutput.item_id);
     } else if (
       minimaxEventType === "response.completed" ||
       minimaxEventType === "response.incomplete"
@@ -343,15 +347,15 @@ export class MiniMaxM3Client extends LLMClient {
     const minimaxConfig = this.transformUniConfigToModelConfig(options.config);
     const inputList = this.transformUniMessageToModelInput(options.messages);
 
-    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
-    // server sends none): a gateway may open several before closing any of them.
+    // Calls still streaming, keyed by tool call id: a gateway may open several before closing
+    // any of them. A fragment without an id belongs to the call opened last.
     const openToolCalls = new Map<
       string,
-      { name: string; tool_call_id: string; arguments: string }
+      { name: string; arguments: string }
     >();
     let lastOpened = "";
-    const keyOf = (itemId?: string) =>
-      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
+    const keyOf = (toolCallId: string) =>
+      openToolCalls.has(toolCallId) ? toolCallId : lastOpened;
 
     // MiniMax accepts output_text assistant inputs and function tools without OpenAI's required
     // strict field, so narrow the compatibility cast to this boundary.
@@ -372,17 +376,13 @@ export class MiniMaxM3Client extends LLMClient {
       );
       if (uniEvent.event_type === "start") {
         for (const item of fragments) {
-          lastOpened = item.item_id || item.tool_call_id;
-          openToolCalls.set(lastOpened, {
-            name: item.name,
-            tool_call_id: item.tool_call_id,
-            arguments: "",
-          });
+          lastOpened = item.tool_call_id;
+          openToolCalls.set(lastOpened, { name: item.name, arguments: "" });
         }
         yield uniEvent;
       } else if (uniEvent.event_type === "delta") {
         for (const item of fragments) {
-          const toolCall = openToolCalls.get(keyOf(item.item_id));
+          const toolCall = openToolCalls.get(keyOf(item.tool_call_id));
           if (toolCall) {
             toolCall.arguments += item.arguments;
           }
@@ -393,14 +393,14 @@ export class MiniMaxM3Client extends LLMClient {
         // gateway never closed on its own
         const closing =
           fragments.length > 0
-            ? fragments.map((item) => keyOf(item.item_id))
+            ? fragments.map((item) => keyOf(item.tool_call_id))
             : [...openToolCalls.keys()];
-        for (const key of closing) {
-          const toolCall = openToolCalls.get(key);
+        for (const toolCallId of closing) {
+          const toolCall = openToolCalls.get(toolCallId);
           if (!toolCall) {
             continue;
           }
-          openToolCalls.delete(key);
+          openToolCalls.delete(toolCallId);
           yield {
             role: "assistant",
             event_type: "delta",
@@ -412,9 +412,9 @@ export class MiniMaxM3Client extends LLMClient {
                   toolCall.arguments,
                   this.constructor.name,
                   toolCall.name,
-                  toolCall.tool_call_id,
+                  toolCallId,
                 ),
-                tool_call_id: toolCall.tool_call_id,
+                tool_call_id: toolCallId,
               },
             ],
             usage_metadata: null,

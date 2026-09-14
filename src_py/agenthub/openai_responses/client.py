@@ -48,6 +48,9 @@ class OpenaiResponsesClient(LLMClient):
     ):
         """Initialize OpenAI Responses-compatible client with model, API key, and base URL."""
         self._model = model
+        # call ids of the function calls in flight, by output item id: the argument events name
+        # only the item, and a gateway may stream several calls at once
+        self._item_call_ids: dict[str, str] = {}
         api_key = api_key or os.getenv("OPENAI_API_KEY")
         base_url = base_url or os.getenv("OPENAI_BASE_URL")
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
@@ -261,6 +264,8 @@ class OpenaiResponsesClient(LLMClient):
 
         elif openai_event_type == "response.output_item.added":
             if model_output.item.type == "function_call":
+                if model_output.item.id:
+                    self._item_call_ids[model_output.item.id] = model_output.item.call_id
                 event_type = "start"
                 content_items.append(
                     {
@@ -268,7 +273,6 @@ class OpenaiResponsesClient(LLMClient):
                         "name": model_output.item.name,
                         "arguments": "",
                         "tool_call_id": model_output.item.call_id,
-                        "item_id": model_output.item.id,
                     }
                 )
             elif model_output.item.type == "message" and getattr(model_output.item, "phase", None):
@@ -300,23 +304,22 @@ class OpenaiResponsesClient(LLMClient):
                     "type": "partial_tool_call",
                     "name": "",
                     "arguments": model_output.delta,
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
+                    "tool_call_id": self._item_call_ids.get(model_output.item_id, ""),
                 }
             )
 
         elif openai_event_type == "response.function_call_arguments.done":
-            # a stop naming the item closes that call
+            # a stop naming the call closes it; the streaming loop yields the complete tool_call
             event_type = "stop"
             content_items.append(
                 {
                     "type": "partial_tool_call",
                     "name": "",
                     "arguments": "",
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
+                    "tool_call_id": self._item_call_ids.get(model_output.item_id, ""),
                 }
             )
+            self._item_call_ids.pop(model_output.item_id, None)
 
         elif openai_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
@@ -381,13 +384,13 @@ class OpenaiResponsesClient(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
-        # server sends none): a gateway may open several before closing any of them.
+        # Calls still streaming, keyed by tool call id: a gateway may open several before closing
+        # any of them. A fragment without an id belongs to the call opened last.
         open_tool_calls: dict[str, dict] = {}
         last_opened = ""
 
-        def key_of(item_id: str | None) -> str:
-            return item_id if item_id in open_tool_calls else last_opened
+        def key_of(tool_call_id: str) -> str:
+            return tool_call_id if tool_call_id in open_tool_calls else last_opened
 
         # Stream generate
         stream = await self._client.responses.create(**openai_config, input=input_list, stream=True)
@@ -396,25 +399,21 @@ class OpenaiResponsesClient(LLMClient):
             fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
             if event["event_type"] == "start":
                 for item in fragments:
-                    last_opened = item.get("item_id") or item["tool_call_id"]
-                    open_tool_calls[last_opened] = {
-                        "name": item["name"],
-                        "tool_call_id": item["tool_call_id"],
-                        "arguments": "",
-                    }
+                    last_opened = item["tool_call_id"]
+                    open_tool_calls[last_opened] = {"name": item["name"], "arguments": ""}
                 yield event
             elif event["event_type"] == "delta":
                 for item in fragments:
-                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
+                    tool_call = open_tool_calls.get(key_of(item["tool_call_id"]))
                     if tool_call is not None:
                         tool_call["arguments"] += item["arguments"]
                 yield event
             elif event["event_type"] == "stop":
                 # a stop that names calls closes them; the end of the response closes whatever
                 # a gateway never closed on its own
-                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
-                for key in closing:
-                    tool_call = open_tool_calls.pop(key, None)
+                closing = [key_of(item["tool_call_id"]) for item in fragments] or list(open_tool_calls)
+                for tool_call_id in closing:
+                    tool_call = open_tool_calls.pop(tool_call_id, None)
                     if tool_call is None:
                         continue
                     yield {
@@ -428,9 +427,9 @@ class OpenaiResponsesClient(LLMClient):
                                     tool_call["arguments"],
                                     self.__class__.__name__,
                                     tool_call["name"],
-                                    tool_call["tool_call_id"],
+                                    tool_call_id,
                                 ),
-                                "tool_call_id": tool_call["tool_call_id"],
+                                "tool_call_id": tool_call_id,
                             }
                         ],
                         "usage_metadata": None,
