@@ -96,6 +96,9 @@ class PartialToolCallContentItem(TypedDict):
     name: str
     arguments: str
     tool_call_id: str
+    # id of the streamed item this fragment belongs to, when the provider sends one (the
+    # Responses output item id); ties fragments to their call when several calls stream at once
+    item_id: NotRequired[str | None]
     fidelity: NotRequired[Fidelity]
 
 

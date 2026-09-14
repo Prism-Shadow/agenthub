@@ -27,7 +27,6 @@ from ..types import (
     PartialContentItem,
     PromptCaching,
     ThinkingLevel,
-    ToolCallContentItem,
     ToolChoice,
     UniConfig,
     UniEvent,
@@ -52,11 +51,6 @@ class MiniMaxM3Client(LLMClient):
     ):
         """Initialize a MiniMax M3 Responses client with a Subscription Key or API key."""
         self._model = model
-        # Function calls of the response in flight, keyed by output item id (the call id when a
-        # server sends none): the argument events name a call only by that id, and a gateway may
-        # open several calls before closing any of them.
-        self._open_tool_calls: dict[str, dict] = {}
-        self._last_opened_tool_call = ""
         # The wrapped OpenAI SDK falls back to OPENAI_API_KEY when handed None, which would send an
         # OpenAI credential to the MiniMax host, so resolve the key here and fail loudly instead.
         resolved_api_key = api_key or os.getenv("MINIMAX_API_KEY")
@@ -198,32 +192,6 @@ class MiniMaxM3Client(LLMClient):
 
         return input_list
 
-    def _tool_call_key(self, item_id: str | None) -> str:
-        """The open call an argument event belongs to: the one it names, else the one opened last."""
-        return item_id if item_id in self._open_tool_calls else self._last_opened_tool_call
-
-    def _close_tool_calls(self, keys: list[str]) -> list[ToolCallContentItem]:
-        """Pop the named calls and return them as complete tool_call items."""
-        items: list[ToolCallContentItem] = []
-        for key in keys:
-            tool_call = self._open_tool_calls.pop(key, None)
-            if tool_call is None:
-                continue
-            items.append(
-                {
-                    "type": "tool_call",
-                    "name": tool_call["name"],
-                    "arguments": parse_tool_call_arguments(
-                        tool_call["arguments"],
-                        self.__class__.__name__,
-                        tool_call["name"],
-                        tool_call["tool_call_id"],
-                    ),
-                    "tool_call_id": tool_call["tool_call_id"],
-                }
-            )
-        return items
-
     def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
         """Transform a MiniMax streaming event to AgentHub's universal event format."""
         event_type: EventType = "unused"
@@ -242,12 +210,6 @@ class MiniMaxM3Client(LLMClient):
 
         elif minimax_event_type == "response.output_item.added":
             if model_output.item.type == "function_call":
-                self._last_opened_tool_call = model_output.item.id or model_output.item.call_id
-                self._open_tool_calls[self._last_opened_tool_call] = {
-                    "name": model_output.item.name,
-                    "tool_call_id": model_output.item.call_id,
-                    "arguments": "",
-                }
                 event_type = "start"
                 content_items.append(
                     {
@@ -255,27 +217,37 @@ class MiniMaxM3Client(LLMClient):
                         "name": model_output.item.name,
                         "arguments": "",
                         "tool_call_id": model_output.item.call_id,
+                        "item_id": model_output.item.id,
                     }
                 )
 
         elif minimax_event_type == "response.function_call_arguments.delta":
-            tool_call = self._open_tool_calls.get(self._tool_call_key(model_output.item_id))
-            if tool_call is not None:
-                tool_call["arguments"] += model_output.delta
             event_type = "delta"
             content_items.append(
-                {"type": "partial_tool_call", "name": "", "arguments": model_output.delta, "tool_call_id": ""}
+                {
+                    "type": "partial_tool_call",
+                    "name": "",
+                    "arguments": model_output.delta,
+                    "tool_call_id": "",
+                    "item_id": model_output.item_id,
+                }
             )
 
         elif minimax_event_type == "response.function_call_arguments.done":
-            # the call is complete: emit it whole
-            content_items.extend(self._close_tool_calls([self._tool_call_key(model_output.item_id)]))
-            event_type = "delta" if content_items else "unused"
+            # a stop naming the item closes that call
+            event_type = "stop"
+            content_items.append(
+                {
+                    "type": "partial_tool_call",
+                    "name": "",
+                    "arguments": "",
+                    "tool_call_id": "",
+                    "item_id": model_output.item_id,
+                }
+            )
 
         elif minimax_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
-            # a gateway may end the response without closing every call
-            content_items.extend(self._close_tool_calls(list(self._open_tool_calls)))
             response = model_output.response
             finish_reason_mapping: dict[str, FinishReason] = {"completed": "stop", "incomplete": "length"}
             finish_reason = finish_reason_mapping.get(response.status, "unknown")
@@ -324,11 +296,63 @@ class MiniMaxM3Client(LLMClient):
         minimax_config = self.transform_uni_config_to_model_config(config)
         input_list = self.transform_uni_message_to_model_input(messages)
 
+        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
+        # server sends none): a gateway may open several before closing any of them.
+        open_tool_calls: dict[str, dict] = {}
+        last_opened = ""
+
+        def key_of(item_id: str | None) -> str:
+            return item_id if item_id in open_tool_calls else last_opened
+
         stream = await self._client.responses.create(**minimax_config, input=input_list, stream=True)
         async for model_event in stream:
             event = self.transform_model_output_to_uni_event(model_event)
-            if event["event_type"] != "unused":
+            fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
+            if event["event_type"] == "start":
+                for item in fragments:
+                    last_opened = item.get("item_id") or item["tool_call_id"]
+                    open_tool_calls[last_opened] = {
+                        "name": item["name"],
+                        "tool_call_id": item["tool_call_id"],
+                        "arguments": "",
+                    }
                 yield event
+            elif event["event_type"] == "delta":
+                for item in fragments:
+                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
+                    if tool_call is not None:
+                        tool_call["arguments"] += item["arguments"]
+                yield event
+            elif event["event_type"] == "stop":
+                # a stop that names calls closes them; the end of the response closes whatever
+                # a gateway never closed on its own
+                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
+                for key in closing:
+                    tool_call = open_tool_calls.pop(key, None)
+                    if tool_call is None:
+                        continue
+                    yield {
+                        "role": "assistant",
+                        "event_type": "delta",
+                        "content_items": [
+                            {
+                                "type": "tool_call",
+                                "name": tool_call["name"],
+                                "arguments": parse_tool_call_arguments(
+                                    tool_call["arguments"],
+                                    self.__class__.__name__,
+                                    tool_call["name"],
+                                    tool_call["tool_call_id"],
+                                ),
+                                "tool_call_id": tool_call["tool_call_id"],
+                            }
+                        ],
+                        "usage_metadata": None,
+                        "finish_reason": None,
+                    }
+
+                if event["finish_reason"] or event["usage_metadata"]:
+                    yield event
 
     async def list_models(self) -> list[str]:
         """

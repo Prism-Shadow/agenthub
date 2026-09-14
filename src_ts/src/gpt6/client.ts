@@ -24,8 +24,8 @@ import {
   EventType,
   FinishReason,
   PartialContentItem,
+  PartialToolCallContentItem,
   ThinkingLevel,
-  ToolCallContentItem,
   ToolChoice,
   UniConfig,
   UniEvent,
@@ -41,14 +41,6 @@ import { isDebugEnabled, openaiImageDetail } from "../utils";
 export class GPT6Client extends LLMClient {
   protected _model: string;
   private _client: OpenAI;
-  // Function calls of the response in flight, keyed by output item id (the call id when a
-  // server sends none): the argument events name a call only by that id, and a gateway may
-  // open several calls before closing any of them.
-  private _openToolCalls = new Map<
-    string,
-    { name: string; tool_call_id: string; arguments: string }
-  >();
-  private _lastOpenedToolCall = "";
 
   /**
    * Initialize GPT-6 client with model and API key.
@@ -335,37 +327,6 @@ export class GPT6Client extends LLMClient {
     return inputList;
   }
 
-  /** The open call an argument event belongs to: the one it names, else the one opened last. */
-  private _toolCallKey(itemId?: string): string {
-    return itemId && this._openToolCalls.has(itemId)
-      ? itemId
-      : this._lastOpenedToolCall;
-  }
-
-  /** Pop the named calls and return them as complete tool_call items. */
-  private _closeToolCalls(keys: string[]): ToolCallContentItem[] {
-    const items: ToolCallContentItem[] = [];
-    for (const key of keys) {
-      const toolCall = this._openToolCalls.get(key);
-      if (!toolCall) {
-        continue;
-      }
-      this._openToolCalls.delete(key);
-      items.push({
-        type: "tool_call",
-        name: toolCall.name,
-        arguments: parseToolCallArguments(
-          toolCall.arguments,
-          this.constructor.name,
-          toolCall.name,
-          toolCall.tool_call_id,
-        ),
-        tool_call_id: toolCall.tool_call_id,
-      });
-    }
-    return items;
-  }
-
   /**
    * Transform OpenAI Responses API streaming event to universal event format.
    */
@@ -388,18 +349,13 @@ export class GPT6Client extends LLMClient {
     } else if (openaiEventType === "response.output_item.added") {
       const item = modelOutput.item;
       if (item.type === "function_call") {
-        this._lastOpenedToolCall = item.id || item.call_id;
-        this._openToolCalls.set(this._lastOpenedToolCall, {
-          name: item.name,
-          tool_call_id: item.call_id,
-          arguments: "",
-        });
         eventType = "start";
         contentItems.push({
           type: "partial_tool_call",
           name: item.name,
           arguments: "",
           tool_call_id: item.call_id,
+          item_id: item.id,
         });
       } else if (item.type === "message") {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -446,34 +402,29 @@ export class GPT6Client extends LLMClient {
         eventType = "unused";
       }
     } else if (openaiEventType === "response.function_call_arguments.delta") {
-      const toolCall = this._openToolCalls.get(
-        this._toolCallKey(modelOutput.item_id),
-      );
-      if (toolCall) {
-        toolCall.arguments += modelOutput.delta;
-      }
       eventType = "delta";
       contentItems.push({
         type: "partial_tool_call",
         name: "",
         arguments: modelOutput.delta,
         tool_call_id: "",
+        item_id: modelOutput.item_id,
       });
     } else if (openaiEventType === "response.function_call_arguments.done") {
-      // the call is complete: emit it whole
-      contentItems.push(
-        ...this._closeToolCalls([this._toolCallKey(modelOutput.item_id)]),
-      );
-      eventType = contentItems.length > 0 ? "delta" : "unused";
+      // a stop naming the item closes that call
+      eventType = "stop";
+      contentItems.push({
+        type: "partial_tool_call",
+        name: "",
+        arguments: "",
+        tool_call_id: "",
+        item_id: modelOutput.item_id,
+      });
     } else if (
       openaiEventType === "response.completed" ||
       openaiEventType === "response.incomplete"
     ) {
       eventType = "stop";
-      // a gateway may end the response without closing every call
-      contentItems.push(
-        ...this._closeToolCalls([...this._openToolCalls.keys()]),
-      );
       const response = modelOutput.response;
       const finishReasonMapping: { [key: string]: FinishReason } = {
         completed: "stop",
@@ -544,6 +495,16 @@ export class GPT6Client extends LLMClient {
       options.signal,
     );
 
+    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
+    // server sends none): a gateway may open several before closing any of them.
+    const openToolCalls = new Map<
+      string,
+      { name: string; tool_call_id: string; arguments: string }
+    >();
+    let lastOpened = "";
+    const keyOf = (itemId?: string) =>
+      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
+
     const params: ResponseCreateParamsStreaming = {
       ...openaiConfig,
       input: inputList,
@@ -555,8 +516,65 @@ export class GPT6Client extends LLMClient {
     });
     for await (const event of stream) {
       const uniEvent = this.transformModelOutputToUniEvent(event);
-      if (uniEvent.event_type !== "unused") {
+      const fragments = uniEvent.content_items.filter(
+        (item): item is PartialToolCallContentItem =>
+          item.type === "partial_tool_call",
+      );
+      if (uniEvent.event_type === "start") {
+        for (const item of fragments) {
+          lastOpened = item.item_id || item.tool_call_id;
+          openToolCalls.set(lastOpened, {
+            name: item.name,
+            tool_call_id: item.tool_call_id,
+            arguments: "",
+          });
+        }
         yield uniEvent;
+      } else if (uniEvent.event_type === "delta") {
+        for (const item of fragments) {
+          const toolCall = openToolCalls.get(keyOf(item.item_id));
+          if (toolCall) {
+            toolCall.arguments += item.arguments;
+          }
+        }
+        yield uniEvent;
+      } else if (uniEvent.event_type === "stop") {
+        // a stop that names calls closes them; the end of the response closes whatever a
+        // gateway never closed on its own
+        const closing =
+          fragments.length > 0
+            ? fragments.map((item) => keyOf(item.item_id))
+            : [...openToolCalls.keys()];
+        for (const key of closing) {
+          const toolCall = openToolCalls.get(key);
+          if (!toolCall) {
+            continue;
+          }
+          openToolCalls.delete(key);
+          yield {
+            role: "assistant",
+            event_type: "delta",
+            content_items: [
+              {
+                type: "tool_call",
+                name: toolCall.name,
+                arguments: parseToolCallArguments(
+                  toolCall.arguments,
+                  this.constructor.name,
+                  toolCall.name,
+                  toolCall.tool_call_id,
+                ),
+                tool_call_id: toolCall.tool_call_id,
+              },
+            ],
+            usage_metadata: null,
+            finish_reason: null,
+          };
+        }
+
+        if (uniEvent.finish_reason || uniEvent.usage_metadata) {
+          yield uniEvent;
+        }
       }
     }
   }
