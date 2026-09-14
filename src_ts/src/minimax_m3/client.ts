@@ -18,14 +18,12 @@ import type {
   ResponseStreamEvent,
 } from "openai/resources/responses/responses";
 import { LLMClient } from "../baseClient";
-import {
-  parseToolCallArguments,
-  UnsupportedParameterError,
-} from "../errors";
+import { parseToolCallArguments, UnsupportedParameterError } from "../errors";
 import {
   EventType,
   FinishReason,
   PartialContentItem,
+  PartialToolCallContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
@@ -90,7 +88,8 @@ export class MiniMaxM3Client extends LLMClient {
     throw new UnsupportedParameterError({
       client: this.constructor.name,
       parameter: "tool_choice",
-      message: "MiniMax Responses API does not support required or named tool selection.",
+      message:
+        "MiniMax Responses API does not support required or named tool selection.",
     });
   }
 
@@ -115,7 +114,8 @@ export class MiniMaxM3Client extends LLMClient {
         throw new UnsupportedParameterError({
           client: this.constructor.name,
           parameter: "temperature",
-          message: "MiniMax Responses API does not support temperatures outside the range 0 to 1.",
+          message:
+            "MiniMax Responses API does not support temperatures outside the range 0 to 1.",
         });
       }
       minimaxConfig.temperature = config.temperature;
@@ -142,14 +142,16 @@ export class MiniMaxM3Client extends LLMClient {
       throw new UnsupportedParameterError({
         client: this.constructor.name,
         parameter: "prompt_caching",
-        message: "MiniMax Responses API does not support disabling its automatic prompt cache.",
+        message:
+          "MiniMax Responses API does not support disabling its automatic prompt cache.",
       });
     }
     if (config.prompt_caching === PromptCaching.ENHANCE) {
       throw new UnsupportedParameterError({
         client: this.constructor.name,
         parameter: "prompt_caching",
-        message: "MiniMax Responses API does not support enhancing its automatic prompt cache.",
+        message:
+          "MiniMax Responses API does not support enhancing its automatic prompt cache.",
       });
     }
 
@@ -257,6 +259,7 @@ export class MiniMaxM3Client extends LLMClient {
           name: modelOutput.item.name,
           arguments: "",
           tool_call_id: modelOutput.item.call_id,
+          item_id: modelOutput.item.id,
         });
       }
     } else if (minimaxEventType === "response.function_call_arguments.delta") {
@@ -266,9 +269,18 @@ export class MiniMaxM3Client extends LLMClient {
         name: "",
         arguments: modelOutput.delta,
         tool_call_id: "",
+        item_id: modelOutput.item_id,
       });
     } else if (minimaxEventType === "response.function_call_arguments.done") {
+      // a stop naming the item closes that call
       eventType = "stop";
+      contentItems.push({
+        type: "partial_tool_call",
+        name: "",
+        arguments: "",
+        tool_call_id: "",
+        item_id: modelOutput.item_id,
+      });
     } else if (
       minimaxEventType === "response.completed" ||
       minimaxEventType === "response.incomplete"
@@ -331,11 +343,15 @@ export class MiniMaxM3Client extends LLMClient {
     const minimaxConfig = this.transformUniConfigToModelConfig(options.config);
     const inputList = this.transformUniMessageToModelInput(options.messages);
 
-    const partialToolCall: {
-      name?: string;
-      arguments?: string;
-      tool_call_id?: string;
-    } = {};
+    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
+    // server sends none): a gateway may open several before closing any of them.
+    const openToolCalls = new Map<
+      string,
+      { name: string; tool_call_id: string; arguments: string }
+    >();
+    let lastOpened = "";
+    const keyOf = (itemId?: string) =>
+      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
 
     // MiniMax accepts output_text assistant inputs and function tools without OpenAI's required
     // strict field, so narrow the compatibility cast to this boundary.
@@ -348,55 +364,66 @@ export class MiniMaxM3Client extends LLMClient {
     const stream = await this._client.responses.create(params, {
       signal: options.signal,
     });
-    for await (const modelEvent of stream) {
-      const event = this.transformModelOutputToUniEvent(modelEvent);
-
-      if (event.event_type === "start") {
-        for (const item of event.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.name = item.name;
-            partialToolCall.arguments = "";
-            partialToolCall.tool_call_id = item.tool_call_id;
-            yield event;
+    for await (const event of stream) {
+      const uniEvent = this.transformModelOutputToUniEvent(event);
+      const fragments = uniEvent.content_items.filter(
+        (item): item is PartialToolCallContentItem =>
+          item.type === "partial_tool_call",
+      );
+      if (uniEvent.event_type === "start") {
+        for (const item of fragments) {
+          lastOpened = item.item_id || item.tool_call_id;
+          openToolCalls.set(lastOpened, {
+            name: item.name,
+            tool_call_id: item.tool_call_id,
+            arguments: "",
+          });
+        }
+        yield uniEvent;
+      } else if (uniEvent.event_type === "delta") {
+        for (const item of fragments) {
+          const toolCall = openToolCalls.get(keyOf(item.item_id));
+          if (toolCall) {
+            toolCall.arguments += item.arguments;
           }
         }
-      } else if (event.event_type === "delta") {
-        for (const item of event.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.arguments =
-              (partialToolCall.arguments || "") + item.arguments;
+        yield uniEvent;
+      } else if (uniEvent.event_type === "stop") {
+        // a stop that names calls closes them; the end of the response closes whatever a
+        // gateway never closed on its own
+        const closing =
+          fragments.length > 0
+            ? fragments.map((item) => keyOf(item.item_id))
+            : [...openToolCalls.keys()];
+        for (const key of closing) {
+          const toolCall = openToolCalls.get(key);
+          if (!toolCall) {
+            continue;
           }
-        }
-
-        yield event;
-      } else if (event.event_type === "stop") {
-        if (partialToolCall.name && partialToolCall.arguments !== undefined) {
+          openToolCalls.delete(key);
           yield {
             role: "assistant",
             event_type: "delta",
             content_items: [
               {
                 type: "tool_call",
-                name: partialToolCall.name,
+                name: toolCall.name,
                 arguments: parseToolCallArguments(
-                  partialToolCall.arguments,
+                  toolCall.arguments,
                   this.constructor.name,
-                  partialToolCall.name || "",
-                  partialToolCall.tool_call_id || "",
+                  toolCall.name,
+                  toolCall.tool_call_id,
                 ),
-                tool_call_id: partialToolCall.tool_call_id || "",
+                tool_call_id: toolCall.tool_call_id,
               },
             ],
             usage_metadata: null,
             finish_reason: null,
           };
-          partialToolCall.name = undefined;
-          partialToolCall.arguments = undefined;
-          partialToolCall.tool_call_id = undefined;
         }
 
-        if (event.finish_reason || event.usage_metadata) {
-          yield event;
+        if (uniEvent.finish_reason || uniEvent.usage_metadata) {
+          yield uniEvent;
         }
       }
     }

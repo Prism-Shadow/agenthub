@@ -4,6 +4,8 @@
 
 Here, we record the addition and removal times of models, major functional updates, bug fixes, and release times of key versions. Each release keeps one brief line here; the per-entry summaries live in `changelog/<version>/README.md`, and every entry links its detail file.
 
+- [2026-09-14] [Version 0.4.15](changelog/0.4.15/README.md): the Responses clients (`openai_responses`, `gpt6`, `deepseek_v4`, `minimax_m3`) keep every function call of an interleaved parallel tool-call turn, so a gateway that opens every call before closing any no longer loses all but the last one, and the next request no longer fails on an orphaned `function_call_output`.
+
 - [2026-09-12] [Version 0.4.14](changelog/0.4.14/README.md): the first-party DeepSeek V4 and GPT Responses clients send a text-only tool result as a plain string, so a strictly validating DeepSeek Responses endpoint no longer rejects every request after a tool call with `400 invalid_json`.
 
 - [2026-09-12] [Version 0.4.13](changelog/0.4.13/README.md): the OpenAI Chat client replays a tool-calling assistant turn with its reasoning field present even when the model produced no chain of thought, so a DeepSeek tool chain reached through an endpoint that reissues tool_call ids is no longer rejected part-way through.
