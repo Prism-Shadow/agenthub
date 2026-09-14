@@ -3,6 +3,7 @@
 - **Date:** 2026-09-14
 - **Type:** fix
 - **Scope:** `minimax_m3`, `tests`, `skills`
+- **PR:** [#221](https://github.com/Prism-Shadow/agenthub/pull/221)
 
 [中文版](2026-09-14-minimax-tool-call-from-completed-item.zh.md)
 
