@@ -484,18 +484,16 @@ export class GPT6Client extends LLMClient {
       options.signal,
     );
 
-    // A gateway may open several function calls in one response before closing any of them:
-    // Console Go streams added(A), deltas(A), added(B), deltas(B), done(A), done(B). A single
-    // accumulator lets B's opening overwrite A's, so A never reaches the assistant message and
-    // its tool result replays as an orphaned function_call_output on the next request, which
-    // Console Go rejects with "No function call found for function_call_output with call_id ...".
-    // Every open call is therefore accumulated under its own response item id, with the call
-    // opened last kept as the fallback for argument deltas that carry no item id.
+    // Calls still streaming, keyed by output item id: a gateway may open several before closing
+    // any of them (added A, deltas A, added B, deltas B, done A, done B), and the argument events
+    // name the item they belong to. A server that sends no ids gets the call opened last.
     const openToolCalls = new Map<
       string,
-      { name?: string; arguments?: string; tool_call_id?: string }
+      { name: string; tool_call_id: string; arguments: string }
     >();
-    let lastOpenedToolCall = "";
+    let lastOpened = "";
+    const keyOf = (itemId: string) =>
+      openToolCalls.has(itemId) ? itemId : lastOpened;
 
     const params: ResponseCreateParamsStreaming = {
       ...openaiConfig,
@@ -507,75 +505,58 @@ export class GPT6Client extends LLMClient {
       signal: options.signal,
     });
     for await (const event of stream) {
-      const eventItemId = (event as { item_id?: string }).item_id;
+      if (
+        event.type === "response.output_item.added" &&
+        event.item.type === "function_call"
+      ) {
+        lastOpened = event.item.id || event.item.call_id;
+        openToolCalls.set(lastOpened, {
+          name: event.item.name,
+          tool_call_id: event.item.call_id,
+          arguments: "",
+        });
+      } else if (event.type === "response.function_call_arguments.delta") {
+        const toolCall = openToolCalls.get(keyOf(event.item_id));
+        if (toolCall) {
+          toolCall.arguments += event.delta;
+        }
+      }
+
       const uniEvent = this.transformModelOutputToUniEvent(event);
-
-      if (uniEvent.event_type === "start") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            const itemId =
-              (event as { item?: { id?: string } }).item?.id ||
-              item.tool_call_id ||
-              "";
-            openToolCalls.set(itemId, {
-              name: item.name,
-              arguments: "",
-              tool_call_id: item.tool_call_id,
-            });
-            lastOpenedToolCall = itemId;
-            yield uniEvent;
-          }
-        }
-      } else if (uniEvent.event_type === "delta") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            const toolCall =
-              (eventItemId !== undefined
-                ? openToolCalls.get(eventItemId)
-                : undefined) ?? openToolCalls.get(lastOpenedToolCall);
-            if (toolCall) {
-              toolCall.arguments = (toolCall.arguments || "") + item.arguments;
-            }
-          }
-        }
-
+      if (uniEvent.event_type === "start" || uniEvent.event_type === "delta") {
         yield uniEvent;
       } else if (uniEvent.event_type === "stop") {
-        // the event names the call it closes; the end of the response closes whatever a
+        // arguments.done closes the call it names; the end of the response closes whatever a
         // gateway never closed on its own
         const closing =
-          eventItemId !== undefined && openToolCalls.has(eventItemId)
-            ? [eventItemId]
-            : uniEvent.finish_reason || uniEvent.usage_metadata
-              ? [...openToolCalls.keys()]
-              : openToolCalls.has(lastOpenedToolCall)
-                ? [lastOpenedToolCall]
-                : [];
-
+          event.type === "response.function_call_arguments.done"
+            ? [keyOf(event.item_id)]
+            : [...openToolCalls.keys()];
         for (const key of closing) {
           const toolCall = openToolCalls.get(key);
-          openToolCalls.delete(key);
-          if (toolCall?.name && toolCall.arguments !== undefined) {
-            yield {
-              role: "assistant",
-              event_type: "delta",
-              content_items: [
-                {
-                  type: "tool_call",
-                  name: toolCall.name,
-                  arguments: parseToolCallArguments(
-                    toolCall.arguments,
-                    this.constructor.name,
-                    toolCall.name || "",
-                    toolCall.tool_call_id || "",
-                  ),
-                  tool_call_id: toolCall.tool_call_id || "",
-                },
-              ],
-              usage_metadata: null,
-              finish_reason: null,
-            };
+          if (!toolCall) {
+            continue;
           }
+          openToolCalls.delete(key);
+          yield {
+            role: "assistant",
+            event_type: "delta",
+            content_items: [
+              {
+                type: "tool_call",
+                name: toolCall.name,
+                arguments: parseToolCallArguments(
+                  toolCall.arguments,
+                  this.constructor.name,
+                  toolCall.name,
+                  toolCall.tool_call_id,
+                ),
+                tool_call_id: toolCall.tool_call_id,
+              },
+            ],
+            usage_metadata: null,
+            finish_reason: null,
+          };
         }
 
         if (uniEvent.finish_reason || uniEvent.usage_metadata) {

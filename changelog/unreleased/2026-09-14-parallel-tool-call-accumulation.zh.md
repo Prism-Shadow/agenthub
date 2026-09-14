@@ -3,7 +3,7 @@
 - **Date:** 2026-09-14
 - **Type:** fix
 - **Scope:** `openai_responses`, `gpt6`, `deepseek_v4`, `minimax_m3`, `tests`
-- **PR:** [#N](https://github.com/Prism-Shadow/agenthub/pull/218)
+- **PR:** [#218](https://github.com/Prism-Shadow/agenthub/pull/218)
 
 [English](2026-09-14-parallel-tool-call-accumulation.md)
 
@@ -20,12 +20,3 @@
   其 `item_id` 指向的调用，对不发 item id 的服务端则回退到最后开出的那个。调用在自己的
   `response.function_call_arguments.done` 到达时收尾，响应结束时再收掉网关始终没有收尾的调用。
 - 两种语言同步修改；并行调用用例覆盖 tool-call-arguments 测试中的两个 Responses 用例行。
-
-## 验证
-
-- 在 Console Go（`opencode_go` / `muse-spark-1.3-contributor`，即上文交错顺序的来源）上复现：修复前回放
-  内容是 `function_call(B) | function_call_output(B) | function_call_output(A)`，被回以 400；修复后为
-  `reasoning | reasoning | function_call(A) | function_call(B) | function_call_output(A) |
-  function_call_output(B)`，模型正常作答。
-- `tool-call-arguments` 套件：TypeScript 17 通过、Python 16 通过；新用例在修复前的客户端上两种语言都会失败。
-  全量套件除需要真实 API key 的 `:official` 实调用例外全部通过。

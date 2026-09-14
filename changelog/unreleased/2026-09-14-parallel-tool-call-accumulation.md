@@ -3,7 +3,7 @@
 - **Date:** 2026-09-14
 - **Type:** fix
 - **Scope:** `openai_responses`, `gpt6`, `deepseek_v4`, `minimax_m3`, `tests`
-- **PR:** [#N](https://github.com/Prism-Shadow/agenthub/pull/218)
+- **PR:** [#218](https://github.com/Prism-Shadow/agenthub/pull/218)
 
 [中文版](2026-09-14-parallel-tool-call-accumulation.zh.md)
 
@@ -26,14 +26,3 @@
   the response closes whatever a gateway never closed on its own.
 - Both languages changed together, and the parallel-call suite covers both Responses rows of
   the tool-call-arguments tests.
-
-## Verification
-
-- Reproduced against Console Go (`opencode_go` / `muse-spark-1.3-contributor`), which emits
-  the interleaved order above: before the fix the replay carried
-  `function_call(B) | function_call_output(B) | function_call_output(A)` and was answered
-  with the 400; after it, `reasoning | reasoning | function_call(A) | function_call(B) |
-  function_call_output(A) | function_call_output(B)`, and the model answered.
-- `tool-call-arguments` suites: 17 passed (TypeScript) and 16 passed (Python); the new case
-  fails on the pre-fix client in both languages. The full suites pass except the live
-  `:official` cases, which need real API keys.

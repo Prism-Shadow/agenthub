@@ -382,81 +382,65 @@ class GPT6Client(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # A gateway may open several function calls in one response before closing any of them:
-        # Console Go streams added(A), deltas(A), added(B), deltas(B), done(A), done(B). A single
-        # accumulator lets B's opening overwrite A's, so A never reaches the assistant message and
-        # its tool result replays as an orphaned function_call_output on the next request, which
-        # Console Go rejects with "No function call found for function_call_output with call_id ...".
-        # Every open call is therefore accumulated under its own response item id, with the call
-        # opened last kept as the fallback for argument deltas that carry no item id.
+        # Calls still streaming, keyed by output item id: a gateway may open several before closing
+        # any of them (added A, deltas A, added B, deltas B, done A, done B), and the argument events
+        # name the item they belong to. A server that sends no ids gets the call opened last.
         open_tool_calls: dict[str, dict] = {}
-        last_opened_tool_call = ""
+        last_opened = ""
+
+        def key_of(item_id: str | None) -> str:
+            return item_id if item_id in open_tool_calls else last_opened
 
         # Stream generate
         stream = await self._client.responses.create(**openai_config, input=input_list, stream=True)
-        async for raw_event in stream:
-            event_item_id = getattr(raw_event, "item_id", None)
-            event = self.transform_model_output_to_uni_event(raw_event)
-            if event["event_type"] == "start":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        # initialize partial_tool_call
-                        item_id = (
-                            getattr(getattr(raw_event, "item", None), "id", None)
-                            or item["tool_call_id"]
-                            or ""
-                        )
-                        open_tool_calls[item_id] = {
-                            "name": item["name"],
-                            "arguments": "",
-                            "tool_call_id": item["tool_call_id"],
-                        }
-                        last_opened_tool_call = item_id
-                        yield event
-            elif event["event_type"] == "delta":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        # update partial_tool_call
-                        tool_call = open_tool_calls.get(event_item_id) or open_tool_calls.get(last_opened_tool_call)
-                        if tool_call is not None:
-                            tool_call["arguments"] += item["arguments"]
+        async for model_event in stream:
+            item_id = getattr(model_event, "item_id", None)
+            if model_event.type == "response.output_item.added" and model_event.item.type == "function_call":
+                last_opened = getattr(model_event.item, "id", None) or model_event.item.call_id
+                open_tool_calls[last_opened] = {
+                    "name": model_event.item.name,
+                    "tool_call_id": model_event.item.call_id,
+                    "arguments": "",
+                }
+            elif model_event.type == "response.function_call_arguments.delta":
+                tool_call = open_tool_calls.get(key_of(item_id))
+                if tool_call is not None:
+                    tool_call["arguments"] += model_event.delta
 
+            event = self.transform_model_output_to_uni_event(model_event)
+            if event["event_type"] in ("start", "delta"):
                 yield event
             elif event["event_type"] == "stop":
-                # the event names the call it closes; the end of the response closes whatever a
-                # gateway never closed on its own
-                if event_item_id is not None and event_item_id in open_tool_calls:
-                    closing = [event_item_id]
-                elif event["finish_reason"] or event["usage_metadata"]:
-                    closing = list(open_tool_calls)
-                elif last_opened_tool_call in open_tool_calls:
-                    closing = [last_opened_tool_call]
+                # arguments.done closes the call it names; the end of the response closes whatever
+                # a gateway never closed on its own
+                if model_event.type == "response.function_call_arguments.done":
+                    closing = [key_of(item_id)]
                 else:
-                    closing = []
+                    closing = list(open_tool_calls)
 
                 for key in closing:
-                    partial_tool_call = open_tool_calls.pop(key)
-                    if partial_tool_call.get("name") and partial_tool_call.get("arguments") is not None:
-                        # finish partial_tool_call
-                        yield {
-                            "role": "assistant",
-                            "event_type": "delta",
-                            "content_items": [
-                                {
-                                    "type": "tool_call",
-                                    "name": partial_tool_call["name"],
-                                    "arguments": parse_tool_call_arguments(
-                                        partial_tool_call["arguments"],
-                                        self.__class__.__name__,
-                                        partial_tool_call["name"],
-                                        partial_tool_call["tool_call_id"],
-                                    ),
-                                    "tool_call_id": partial_tool_call["tool_call_id"],
-                                }
-                            ],
-                            "usage_metadata": None,
-                            "finish_reason": None,
-                        }
+                    tool_call = open_tool_calls.pop(key, None)
+                    if tool_call is None:
+                        continue
+                    yield {
+                        "role": "assistant",
+                        "event_type": "delta",
+                        "content_items": [
+                            {
+                                "type": "tool_call",
+                                "name": tool_call["name"],
+                                "arguments": parse_tool_call_arguments(
+                                    tool_call["arguments"],
+                                    self.__class__.__name__,
+                                    tool_call["name"],
+                                    tool_call["tool_call_id"],
+                                ),
+                                "tool_call_id": tool_call["tool_call_id"],
+                            }
+                        ],
+                        "usage_metadata": None,
+                        "finish_reason": None,
+                    }
 
                 if event["finish_reason"] or event["usage_metadata"]:
                     yield event
