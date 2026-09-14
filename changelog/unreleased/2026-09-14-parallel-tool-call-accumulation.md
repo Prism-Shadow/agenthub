@@ -3,7 +3,7 @@
 - **Date:** 2026-09-14
 - **Type:** fix
 - **Scope:** `openai_responses`, `gpt6`, `deepseek_v4`, `minimax_m3`, `tests`
-- **PR:** [#N](https://github.com/Prism-Shadow/agenthub/pull/N)
+- **PR:** [#N](https://github.com/Prism-Shadow/agenthub/pull/218)
 
 [中文版](2026-09-14-parallel-tool-call-accumulation.zh.md)
 
