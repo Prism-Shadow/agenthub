@@ -19,14 +19,12 @@ import type {
   ResponseCreateParamsStreaming,
 } from "openai/resources/responses/responses";
 import { LLMClient } from "../baseClient";
-import {
-  parseToolCallArguments,
-  UnsupportedParameterError,
-} from "../errors";
+import { parseToolCallArguments, UnsupportedParameterError } from "../errors";
 import {
   EventType,
   FinishReason,
   PartialContentItem,
+  PartialToolCallContentItem,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
@@ -253,7 +251,9 @@ export class OpenaiResponsesClient extends LLMClient {
           const reasoning: any = { type: "reasoning", summary: [] };
           if (fidelity.channel === "summary") {
             if (item.thinking) {
-              reasoning.summary = [{ type: "summary_text", text: item.thinking }];
+              reasoning.summary = [
+                { type: "summary_text", text: item.thinking },
+              ];
             }
           } else if (item.thinking) {
             reasoning.content = [
@@ -351,6 +351,7 @@ export class OpenaiResponsesClient extends LLMClient {
           name: item.name,
           arguments: "",
           tool_call_id: item.call_id,
+          item_id: item.id,
         });
       } else if (item.type === "message" && phase) {
         eventType = "delta";
@@ -388,9 +389,18 @@ export class OpenaiResponsesClient extends LLMClient {
         name: "",
         arguments: modelOutput.delta,
         tool_call_id: "",
+        item_id: modelOutput.item_id,
       });
     } else if (openaiEventType === "response.function_call_arguments.done") {
+      // a stop naming the item closes that call
       eventType = "stop";
+      contentItems.push({
+        type: "partial_tool_call",
+        name: "",
+        arguments: "",
+        tool_call_id: "",
+        item_id: modelOutput.item_id,
+      });
     } else if (
       openaiEventType === "response.completed" ||
       openaiEventType === "response.incomplete"
@@ -406,7 +416,8 @@ export class OpenaiResponsesClient extends LLMClient {
       }
       if (response.usage) {
         // some servers drop the detail blocks (e.g. MiniMax on truncation), so default to zero
-        const cachedTokens = response.usage.input_tokens_details?.cached_tokens || 0;
+        const cachedTokens =
+          response.usage.input_tokens_details?.cached_tokens || 0;
         const reasoningTokens =
           response.usage.output_tokens_details?.reasoning_tokens || 0;
 
@@ -433,7 +444,7 @@ export class OpenaiResponsesClient extends LLMClient {
       ].includes(openaiEventType)
     ) {
       eventType = "unused";
-        } else if (isDebugEnabled()) {
+    } else if (isDebugEnabled()) {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     } else {
       // a gateway injects its own events (heartbeats, cost tickers) into the stream, and
@@ -464,11 +475,15 @@ export class OpenaiResponsesClient extends LLMClient {
       options.signal,
     );
 
-    const partialToolCall: {
-      name?: string;
-      arguments?: string;
-      tool_call_id?: string;
-    } = {};
+    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
+    // server sends none): a gateway may open several before closing any of them.
+    const openToolCalls = new Map<
+      string,
+      { name: string; tool_call_id: string; arguments: string }
+    >();
+    let lastOpened = "";
+    const keyOf = (itemId?: string) =>
+      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
 
     const params: ResponseCreateParamsStreaming = {
       ...openaiConfig,
@@ -481,49 +496,60 @@ export class OpenaiResponsesClient extends LLMClient {
     });
     for await (const event of stream) {
       const uniEvent = this.transformModelOutputToUniEvent(event);
-
+      const fragments = uniEvent.content_items.filter(
+        (item): item is PartialToolCallContentItem =>
+          item.type === "partial_tool_call",
+      );
       if (uniEvent.event_type === "start") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.name = item.name;
-            partialToolCall.arguments = "";
-            partialToolCall.tool_call_id = item.tool_call_id;
-            yield uniEvent;
-          }
+        for (const item of fragments) {
+          lastOpened = item.item_id || item.tool_call_id;
+          openToolCalls.set(lastOpened, {
+            name: item.name,
+            tool_call_id: item.tool_call_id,
+            arguments: "",
+          });
         }
+        yield uniEvent;
       } else if (uniEvent.event_type === "delta") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.arguments =
-              (partialToolCall.arguments || "") + item.arguments;
+        for (const item of fragments) {
+          const toolCall = openToolCalls.get(keyOf(item.item_id));
+          if (toolCall) {
+            toolCall.arguments += item.arguments;
           }
         }
-
         yield uniEvent;
       } else if (uniEvent.event_type === "stop") {
-        if (partialToolCall.name && partialToolCall.arguments !== undefined) {
+        // a stop that names calls closes them; the end of the response closes whatever a
+        // gateway never closed on its own
+        const closing =
+          fragments.length > 0
+            ? fragments.map((item) => keyOf(item.item_id))
+            : [...openToolCalls.keys()];
+        for (const key of closing) {
+          const toolCall = openToolCalls.get(key);
+          if (!toolCall) {
+            continue;
+          }
+          openToolCalls.delete(key);
           yield {
             role: "assistant",
             event_type: "delta",
             content_items: [
               {
                 type: "tool_call",
-                name: partialToolCall.name,
+                name: toolCall.name,
                 arguments: parseToolCallArguments(
-                  partialToolCall.arguments,
+                  toolCall.arguments,
                   this.constructor.name,
-                  partialToolCall.name || "",
-                  partialToolCall.tool_call_id || "",
+                  toolCall.name,
+                  toolCall.tool_call_id,
                 ),
-                tool_call_id: partialToolCall.tool_call_id || "",
+                tool_call_id: toolCall.tool_call_id,
               },
             ],
             usage_metadata: null,
             finish_reason: null,
           };
-          partialToolCall.name = undefined;
-          partialToolCall.arguments = undefined;
-          partialToolCall.tool_call_id = undefined;
         }
 
         if (uniEvent.finish_reason || uniEvent.usage_metadata) {

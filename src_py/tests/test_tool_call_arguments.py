@@ -129,13 +129,14 @@ def _tool_stream(case: OpenAICompatibleToolStreamCase, tool_call_id: str, name: 
         events = [
             SimpleNamespace(
                 type="response.output_item.added",
-                item=SimpleNamespace(type="function_call", name=name, call_id=tool_call_id),
+                item=SimpleNamespace(type="function_call", name=name, call_id=tool_call_id, id=None),
             )
         ]
         events += [
-            SimpleNamespace(type="response.function_call_arguments.delta", delta=fragment) for fragment in fragments
+            SimpleNamespace(type="response.function_call_arguments.delta", item_id=None, delta=fragment)
+            for fragment in fragments
         ]
-        events.append(SimpleNamespace(type="response.function_call_arguments.done"))
+        events.append(SimpleNamespace(type="response.function_call_arguments.done", item_id=None))
         events.append(
             SimpleNamespace(
                 type="response.completed",
@@ -237,3 +238,95 @@ async def test_openai_compatible_clients_report_non_object_streamed_tool_call_ar
     assert parse_error.raw_arguments_length == 2
     assert parse_error.raw_arguments_preview == "[]"
     assert "Expected a JSON object." in str(parse_error)
+
+
+# A gateway may open every function call of a response before closing any of them: Console Go
+# streams added(A), deltas(A), added(B), deltas(B), done(A), done(B). Each call still belongs to
+# the assistant message -- one dropped call replays its tool result as an orphaned
+# function_call_output on the next request, which Console Go rejects with "No function call found
+# for function_call_output with call_id ...".
+RESPONSES_CASES = [case for case in OPENAI_COMPATIBLE_TOOL_STREAM_CASES if case.protocol == "responses"]
+
+_COMPLETED_EVENT = SimpleNamespace(
+    type="response.completed",
+    response=SimpleNamespace(
+        status="completed",
+        usage=SimpleNamespace(
+            input_tokens=1,
+            output_tokens=1,
+            input_tokens_details=SimpleNamespace(cached_tokens=0),
+            output_tokens_details=SimpleNamespace(reasoning_tokens=0),
+        ),
+    ),
+)
+
+
+def _interleaved_parallel_call_stream() -> list[object]:
+    """Two function calls of one response, interleaved the way Console Go streams them."""
+
+    def open_call(suffix: str) -> dict[str, object]:
+        return {
+            "added": SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(
+                    type="function_call",
+                    id=f"fc_{suffix}",
+                    call_id=f"call_{suffix}",
+                    name=f"tool_{suffix}",
+                ),
+            ),
+            "deltas": [
+                SimpleNamespace(
+                    type="response.function_call_arguments.delta", item_id=f"fc_{suffix}", delta='{"city":'
+                ),
+                SimpleNamespace(
+                    type="response.function_call_arguments.delta", item_id=f"fc_{suffix}", delta='"Paris"}'
+                ),
+            ],
+            "done": SimpleNamespace(type="response.function_call_arguments.done", item_id=f"fc_{suffix}"),
+        }
+
+    first = open_call("first")
+    second = open_call("second")
+
+    return [
+        first["added"],
+        *first["deltas"],
+        second["added"],
+        *second["deltas"],
+        first["done"],
+        second["done"],
+        _COMPLETED_EVENT,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    RESPONSES_CASES,
+    ids=[case.client_type for case in RESPONSES_CASES],
+)
+async def test_openai_responses_clients_keep_interleaved_parallel_tool_calls(
+    case: OpenAICompatibleToolStreamCase,
+):
+    client = _create_auto_client(case)
+    _install_fake_stream(client, case, _interleaved_parallel_call_stream())
+
+    messages = [{"role": "user", "content_items": [{"type": "text", "text": "Create a memo."}]}]
+    events = [event async for event in client.streaming_response(messages, {})]
+    tool_calls = [item for event in events for item in event["content_items"] if item["type"] == "tool_call"]
+
+    assert tool_calls == [
+        {
+            "type": "tool_call",
+            "name": "tool_first",
+            "arguments": {"city": "Paris"},
+            "tool_call_id": "call_first",
+        },
+        {
+            "type": "tool_call",
+            "name": "tool_second",
+            "arguments": {"city": "Paris"},
+            "tool_call_id": "call_second",
+        },
+    ]

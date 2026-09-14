@@ -260,6 +260,7 @@ class DeepSeekV4Client(LLMClient):
                         "name": model_output.item.name,
                         "arguments": "",
                         "tool_call_id": model_output.item.call_id,
+                        "item_id": model_output.item.id,
                     }
                 )
             else:
@@ -268,11 +269,27 @@ class DeepSeekV4Client(LLMClient):
         elif deepseek_event_type == "response.function_call_arguments.delta":
             event_type = "delta"
             content_items.append(
-                {"type": "partial_tool_call", "name": "", "arguments": model_output.delta, "tool_call_id": ""}
+                {
+                    "type": "partial_tool_call",
+                    "name": "",
+                    "arguments": model_output.delta,
+                    "tool_call_id": "",
+                    "item_id": model_output.item_id,
+                }
             )
 
         elif deepseek_event_type == "response.function_call_arguments.done":
+            # a stop naming the item closes that call
             event_type = "stop"
+            content_items.append(
+                {
+                    "type": "partial_tool_call",
+                    "name": "",
+                    "arguments": "",
+                    "tool_call_id": "",
+                    "item_id": model_output.item_id,
+                }
+            )
 
         elif deepseek_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
@@ -334,51 +351,61 @@ class DeepSeekV4Client(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # Stream generate
-        partial_tool_call = {}
-        stream = await self._client.responses.create(**deepseek_config, input=input_list, stream=True)
-        async for event in stream:
-            event = self.transform_model_output_to_uni_event(event)
-            if event["event_type"] == "start":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        # initialize partial_tool_call
-                        partial_tool_call = {
-                            "name": item["name"],
-                            "arguments": "",
-                            "tool_call_id": item["tool_call_id"],
-                        }
-                        yield event
-            elif event["event_type"] == "delta":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        # update partial_tool_call
-                        partial_tool_call["arguments"] += item["arguments"]
+        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
+        # server sends none): a gateway may open several before closing any of them.
+        open_tool_calls: dict[str, dict] = {}
+        last_opened = ""
 
+        def key_of(item_id: str | None) -> str:
+            return item_id if item_id in open_tool_calls else last_opened
+
+        # Stream generate
+        stream = await self._client.responses.create(**deepseek_config, input=input_list, stream=True)
+        async for model_event in stream:
+            event = self.transform_model_output_to_uni_event(model_event)
+            fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
+            if event["event_type"] == "start":
+                for item in fragments:
+                    last_opened = item.get("item_id") or item["tool_call_id"]
+                    open_tool_calls[last_opened] = {
+                        "name": item["name"],
+                        "tool_call_id": item["tool_call_id"],
+                        "arguments": "",
+                    }
+                yield event
+            elif event["event_type"] == "delta":
+                for item in fragments:
+                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
+                    if tool_call is not None:
+                        tool_call["arguments"] += item["arguments"]
                 yield event
             elif event["event_type"] == "stop":
-                if "name" in partial_tool_call and "arguments" in partial_tool_call:
-                    # finish partial_tool_call
+                # a stop that names calls closes them; the end of the response closes whatever
+                # a gateway never closed on its own
+                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
+                for key in closing:
+                    tool_call = open_tool_calls.pop(key, None)
+                    if tool_call is None:
+                        continue
                     yield {
                         "role": "assistant",
                         "event_type": "delta",
                         "content_items": [
                             {
                                 "type": "tool_call",
-                                "name": partial_tool_call["name"],
+                                "name": tool_call["name"],
                                 "arguments": parse_tool_call_arguments(
-                                    partial_tool_call["arguments"],
+                                    tool_call["arguments"],
                                     self.__class__.__name__,
-                                    partial_tool_call["name"],
-                                    partial_tool_call["tool_call_id"],
+                                    tool_call["name"],
+                                    tool_call["tool_call_id"],
                                 ),
-                                "tool_call_id": partial_tool_call["tool_call_id"],
+                                "tool_call_id": tool_call["tool_call_id"],
                             }
                         ],
                         "usage_metadata": None,
                         "finish_reason": None,
                     }
-                    partial_tool_call = {}
 
                 if event["finish_reason"] or event["usage_metadata"]:
                     yield event

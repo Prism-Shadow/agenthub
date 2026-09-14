@@ -105,6 +105,9 @@ export interface PartialToolCallContentItem {
   name: string;
   arguments: string;
   tool_call_id: string;
+  // id of the streamed item this fragment belongs to, when the provider sends one (the
+  // Responses output item id); ties fragments to their call when several calls stream at once
+  item_id?: string;
   fidelity?: Fidelity;
 }
 
