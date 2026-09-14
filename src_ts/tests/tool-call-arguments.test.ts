@@ -236,7 +236,13 @@ describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
       installFakeStream(
         client,
         testCase,
-        toolStream(testCase, "call_ok", "exec_command", '{"cmd":', '"echo ok"}'),
+        toolStream(
+          testCase,
+          "call_ok",
+          "exec_command",
+          '{"cmd":',
+          '"echo ok"}',
+        ),
       );
 
       const events = await collectEvents(
@@ -304,6 +310,97 @@ describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
       expect(parseError.rawArgumentsLength).toBe(2);
       expect(parseError.rawArgumentsPreview).toBe("[]");
       expect(parseError.message).toContain("Expected a JSON object.");
+    });
+  },
+);
+
+// A gateway may open every function call of a response before closing any of them: Console Go
+// streams added(A), deltas(A), added(B), deltas(B), done(A), done(B). Each call still belongs to
+// the assistant message -- one dropped call replays its tool result as an orphaned
+// function_call_output on the next request, which Console Go rejects with "No function call found
+// for function_call_output with call_id ...".
+const RESPONSES_CASES = OPENAI_COMPATIBLE_TOOL_STREAM_CASES.filter(
+  (testCase) => testCase.protocol === "responses",
+);
+
+const COMPLETED_EVENT: unknown = {
+  type: "response.completed",
+  response: {
+    status: "completed",
+    usage: {
+      input_tokens: 1,
+      output_tokens: 1,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens_details: { reasoning_tokens: 0 },
+    },
+  },
+};
+
+/** Two function calls of one response, interleaved the way Console Go streams them. */
+function interleavedParallelCallStream(): unknown[] {
+  const open = (suffix: string) => ({
+    added: {
+      type: "response.output_item.added",
+      item: {
+        type: "function_call",
+        id: `fc_${suffix}`,
+        call_id: `call_${suffix}`,
+        name: `tool_${suffix}`,
+      },
+    },
+    deltas: [
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: `fc_${suffix}`,
+        delta: '{"city":',
+      },
+      {
+        type: "response.function_call_arguments.delta",
+        item_id: `fc_${suffix}`,
+        delta: '"Paris"}',
+      },
+    ],
+    done: {
+      type: "response.function_call_arguments.done",
+      item_id: `fc_${suffix}`,
+    },
+  });
+  const first = open("first");
+  const second = open("second");
+
+  return [
+    first.added,
+    ...first.deltas,
+    second.added,
+    ...second.deltas,
+    first.done,
+    second.done,
+    COMPLETED_EVENT,
+  ];
+}
+
+describe.each(RESPONSES_CASES)(
+  "OpenAI Responses parallel tool calls for $clientType",
+  (testCase) => {
+    test("keeps every call when a gateway interleaves their events", async () => {
+      const client = createAutoClient(testCase);
+      installFakeStream(client, testCase, interleavedParallelCallStream());
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      const toolCalls = events.flatMap((event) =>
+        event.content_items.filter(
+          (item): item is ToolCallContentItem => item.type === "tool_call",
+        ),
+      );
+
+      expect(
+        toolCalls.map((call) => [call.tool_call_id, call.name, call.arguments]),
+      ).toEqual([
+        ["call_first", "tool_first", { city: "Paris" }],
+        ["call_second", "tool_second", { city: "Paris" }],
+      ]);
     });
   },
 );
