@@ -209,9 +209,10 @@ class MiniMaxM3Client(LLMClient):
             content_items.append({"type": "thinking", "thinking": model_output.delta})
 
         elif minimax_event_type == "response.output_item.done":
-            # MiniMax's tool calls are read from the completed item alone and no fragment is
-            # streamed for them, so what a consumer streams can never differ from the call it is
-            # handed: the argument deltas are left unread rather than reconciled against this item.
+            # MiniMax's tool calls are read from the completed item alone: the argument deltas are
+            # left unread rather than reconciled against this item, and the streaming loop announces
+            # the call with one fragment carrying the whole arguments, so what a consumer streams
+            # and the call it is handed are one and the same.
             if model_output.item.type == "function_call":
                 event_type = "delta"
                 content_items.append(
@@ -285,6 +286,27 @@ class MiniMaxM3Client(LLMClient):
             event = self.transform_model_output_to_uni_event(model_event)
             if event["event_type"] == "unused":
                 continue
+
+            for item in event["content_items"]:
+                if item["type"] == "tool_call":
+                    # the argument deltas are not streamed, so announce the call the way the
+                    # Gemini client does: one fragment carrying the whole arguments, then the
+                    # complete call
+                    yield {
+                        "role": "assistant",
+                        "event_type": "delta",
+                        "content_items": [
+                            {
+                                "type": "partial_tool_call",
+                                "name": item["name"],
+                                "arguments": json.dumps(item["arguments"], ensure_ascii=False),
+                                "tool_call_id": item["tool_call_id"],
+                            }
+                        ],
+                        "usage_metadata": None,
+                        "finish_reason": None,
+                    }
+
             yield event
 
     async def list_models(self) -> list[str]:

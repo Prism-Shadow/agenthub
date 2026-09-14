@@ -251,9 +251,10 @@ export class MiniMaxM3Client extends LLMClient {
       eventType = "delta";
       contentItems.push({ type: "thinking", thinking: modelOutput.delta });
     } else if (minimaxEventType === "response.output_item.done") {
-      // MiniMax's tool calls are read from the completed item alone and no fragment is
-      // streamed for them, so what a consumer streams can never differ from the call it is
-      // handed: the argument deltas are left unread rather than reconciled against this item.
+      // MiniMax's tool calls are read from the completed item alone: the argument deltas are
+      // left unread rather than reconciled against this item, and the streaming loop announces
+      // the call with one fragment carrying the whole arguments, so what a consumer streams
+      // and the call it is handed are one and the same.
       if (modelOutput.item.type === "function_call") {
         eventType = "delta";
         contentItems.push({
@@ -348,6 +349,28 @@ export class MiniMaxM3Client extends LLMClient {
       if (uniEvent.event_type === "unused") {
         continue;
       }
+
+      for (const item of uniEvent.content_items) {
+        if (item.type === "tool_call") {
+          // the argument deltas are not streamed, so announce the call the way the Gemini
+          // client does: one fragment carrying the whole arguments, then the complete call
+          yield {
+            role: "assistant",
+            event_type: "delta",
+            content_items: [
+              {
+                type: "partial_tool_call",
+                name: item.name,
+                arguments: JSON.stringify(item.arguments),
+                tool_call_id: item.tool_call_id,
+              },
+            ],
+            usage_metadata: null,
+            finish_reason: null,
+          };
+        }
+      }
+
       yield uniEvent;
     }
   }

@@ -32,6 +32,11 @@ type FakeStreamClient = {
   responses?: FakeCreateEndpoint;
 };
 
+type PartialToolCallItem = Extract<
+  UniEvent["content_items"][number],
+  { type: "partial_tool_call" }
+>;
+
 type OpenAICompatibleToolStreamClient = {
   streamingResponse(options: {
     messages: UniMessage[];
@@ -288,6 +293,33 @@ describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
         arguments: { cmd: "echo ok" },
         tool_call_id: "call_ok",
       });
+
+      // the fragments announce the call before the complete item and concatenate to the
+      // arguments it carries, whether the client streamed them or delivered the item alone
+      const fragments = events.flatMap((event) =>
+        event.content_items.filter(
+          (item): item is PartialToolCallItem =>
+            item.type === "partial_tool_call",
+        ),
+      );
+      expect(fragments[0]).toMatchObject({
+        name: "exec_command",
+        tool_call_id: "call_ok",
+      });
+      expect(
+        JSON.parse(fragments.map((fragment) => fragment.arguments).join("")),
+      ).toEqual(toolCalls[0].arguments);
+      const kinds = events.flatMap((event) =>
+        event.content_items
+          .filter(
+            (item) =>
+              item.type === "partial_tool_call" || item.type === "tool_call",
+          )
+          .map((item) => item.type),
+      );
+      expect(kinds.indexOf("partial_tool_call")).toBeLessThan(
+        kinds.indexOf("tool_call"),
+      );
     });
 
     test("reports malformed streamed tool call arguments with context", async () => {

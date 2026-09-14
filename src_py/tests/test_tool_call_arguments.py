@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -212,6 +213,20 @@ async def test_openai_compatible_clients_combine_streamed_tool_call_arguments(
             "tool_call_id": "call_ok",
         }
     ]
+
+    # the fragments announce the call before the complete item and concatenate to the arguments
+    # it carries, whether the client streamed them or delivered the item alone
+    fragments = [item for event in events for item in event["content_items"] if item["type"] == "partial_tool_call"]
+    assert fragments[0]["name"] == "exec_command"
+    assert fragments[0]["tool_call_id"] == "call_ok"
+    assert json.loads("".join(fragment["arguments"] for fragment in fragments)) == tool_calls[0]["arguments"]
+    kinds = [
+        item["type"]
+        for event in events
+        for item in event["content_items"]
+        if item["type"] in ("partial_tool_call", "tool_call")
+    ]
+    assert kinds.index("partial_tool_call") < kinds.index("tool_call")
 
 
 @pytest.mark.asyncio
