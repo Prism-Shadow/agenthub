@@ -260,6 +260,7 @@ class DeepSeekV4Client(LLMClient):
                         "name": model_output.item.name,
                         "arguments": "",
                         "tool_call_id": model_output.item.call_id,
+                        "item_id": model_output.item.id,
                     }
                 )
             else:
@@ -268,11 +269,27 @@ class DeepSeekV4Client(LLMClient):
         elif deepseek_event_type == "response.function_call_arguments.delta":
             event_type = "delta"
             content_items.append(
-                {"type": "partial_tool_call", "name": "", "arguments": model_output.delta, "tool_call_id": ""}
+                {
+                    "type": "partial_tool_call",
+                    "name": "",
+                    "arguments": model_output.delta,
+                    "tool_call_id": "",
+                    "item_id": model_output.item_id,
+                }
             )
 
         elif deepseek_event_type == "response.function_call_arguments.done":
+            # a stop naming the item closes that call
             event_type = "stop"
+            content_items.append(
+                {
+                    "type": "partial_tool_call",
+                    "name": "",
+                    "arguments": "",
+                    "tool_call_id": "",
+                    "item_id": model_output.item_id,
+                }
+            )
 
         elif deepseek_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
@@ -334,9 +351,8 @@ class DeepSeekV4Client(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # Calls still streaming, keyed by output item id: a gateway may open several before closing
-        # any of them (added A, deltas A, added B, deltas B, done A, done B), and the argument events
-        # name the item they belong to. A server that sends no ids gets the call opened last.
+        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
+        # server sends none): a gateway may open several before closing any of them.
         open_tool_calls: dict[str, dict] = {}
         last_opened = ""
 
@@ -346,30 +362,27 @@ class DeepSeekV4Client(LLMClient):
         # Stream generate
         stream = await self._client.responses.create(**deepseek_config, input=input_list, stream=True)
         async for model_event in stream:
-            item_id = getattr(model_event, "item_id", None)
-            if model_event.type == "response.output_item.added" and model_event.item.type == "function_call":
-                last_opened = getattr(model_event.item, "id", None) or model_event.item.call_id
-                open_tool_calls[last_opened] = {
-                    "name": model_event.item.name,
-                    "tool_call_id": model_event.item.call_id,
-                    "arguments": "",
-                }
-            elif model_event.type == "response.function_call_arguments.delta":
-                tool_call = open_tool_calls.get(key_of(item_id))
-                if tool_call is not None:
-                    tool_call["arguments"] += model_event.delta
-
             event = self.transform_model_output_to_uni_event(model_event)
-            if event["event_type"] in ("start", "delta"):
+            fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
+            if event["event_type"] == "start":
+                for item in fragments:
+                    last_opened = item.get("item_id") or item["tool_call_id"]
+                    open_tool_calls[last_opened] = {
+                        "name": item["name"],
+                        "tool_call_id": item["tool_call_id"],
+                        "arguments": "",
+                    }
+                yield event
+            elif event["event_type"] == "delta":
+                for item in fragments:
+                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
+                    if tool_call is not None:
+                        tool_call["arguments"] += item["arguments"]
                 yield event
             elif event["event_type"] == "stop":
-                # arguments.done closes the call it names; the end of the response closes whatever
+                # a stop that names calls closes them; the end of the response closes whatever
                 # a gateway never closed on its own
-                if model_event.type == "response.function_call_arguments.done":
-                    closing = [key_of(item_id)]
-                else:
-                    closing = list(open_tool_calls)
-
+                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
                 for key in closing:
                     tool_call = open_tool_calls.pop(key, None)
                     if tool_call is None:

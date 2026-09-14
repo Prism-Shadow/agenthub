@@ -129,13 +129,14 @@ def _tool_stream(case: OpenAICompatibleToolStreamCase, tool_call_id: str, name: 
         events = [
             SimpleNamespace(
                 type="response.output_item.added",
-                item=SimpleNamespace(type="function_call", name=name, call_id=tool_call_id),
+                item=SimpleNamespace(type="function_call", name=name, call_id=tool_call_id, id=None),
             )
         ]
         events += [
-            SimpleNamespace(type="response.function_call_arguments.delta", delta=fragment) for fragment in fragments
+            SimpleNamespace(type="response.function_call_arguments.delta", item_id=None, delta=fragment)
+            for fragment in fragments
         ]
-        events.append(SimpleNamespace(type="response.function_call_arguments.done"))
+        events.append(SimpleNamespace(type="response.function_call_arguments.done", item_id=None))
         events.append(
             SimpleNamespace(
                 type="response.completed",

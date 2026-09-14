@@ -24,6 +24,7 @@ import {
   EventType,
   FinishReason,
   PartialContentItem,
+  PartialToolCallContentItem,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
@@ -354,6 +355,7 @@ export class GPT6Client extends LLMClient {
           name: item.name,
           arguments: "",
           tool_call_id: item.call_id,
+          item_id: item.id,
         });
       } else if (item.type === "message") {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -406,9 +408,18 @@ export class GPT6Client extends LLMClient {
         name: "",
         arguments: modelOutput.delta,
         tool_call_id: "",
+        item_id: modelOutput.item_id,
       });
     } else if (openaiEventType === "response.function_call_arguments.done") {
+      // a stop naming the item closes that call
       eventType = "stop";
+      contentItems.push({
+        type: "partial_tool_call",
+        name: "",
+        arguments: "",
+        tool_call_id: "",
+        item_id: modelOutput.item_id,
+      });
     } else if (
       openaiEventType === "response.completed" ||
       openaiEventType === "response.incomplete"
@@ -484,16 +495,15 @@ export class GPT6Client extends LLMClient {
       options.signal,
     );
 
-    // Calls still streaming, keyed by output item id: a gateway may open several before closing
-    // any of them (added A, deltas A, added B, deltas B, done A, done B), and the argument events
-    // name the item they belong to. A server that sends no ids gets the call opened last.
+    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
+    // server sends none): a gateway may open several before closing any of them.
     const openToolCalls = new Map<
       string,
       { name: string; tool_call_id: string; arguments: string }
     >();
     let lastOpened = "";
-    const keyOf = (itemId: string) =>
-      openToolCalls.has(itemId) ? itemId : lastOpened;
+    const keyOf = (itemId?: string) =>
+      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
 
     const params: ResponseCreateParamsStreaming = {
       ...openaiConfig,
@@ -505,32 +515,35 @@ export class GPT6Client extends LLMClient {
       signal: options.signal,
     });
     for await (const event of stream) {
-      if (
-        event.type === "response.output_item.added" &&
-        event.item.type === "function_call"
-      ) {
-        lastOpened = event.item.id || event.item.call_id;
-        openToolCalls.set(lastOpened, {
-          name: event.item.name,
-          tool_call_id: event.item.call_id,
-          arguments: "",
-        });
-      } else if (event.type === "response.function_call_arguments.delta") {
-        const toolCall = openToolCalls.get(keyOf(event.item_id));
-        if (toolCall) {
-          toolCall.arguments += event.delta;
-        }
-      }
-
       const uniEvent = this.transformModelOutputToUniEvent(event);
-      if (uniEvent.event_type === "start" || uniEvent.event_type === "delta") {
+      const fragments = uniEvent.content_items.filter(
+        (item): item is PartialToolCallContentItem =>
+          item.type === "partial_tool_call",
+      );
+      if (uniEvent.event_type === "start") {
+        for (const item of fragments) {
+          lastOpened = item.item_id || item.tool_call_id;
+          openToolCalls.set(lastOpened, {
+            name: item.name,
+            tool_call_id: item.tool_call_id,
+            arguments: "",
+          });
+        }
+        yield uniEvent;
+      } else if (uniEvent.event_type === "delta") {
+        for (const item of fragments) {
+          const toolCall = openToolCalls.get(keyOf(item.item_id));
+          if (toolCall) {
+            toolCall.arguments += item.arguments;
+          }
+        }
         yield uniEvent;
       } else if (uniEvent.event_type === "stop") {
-        // arguments.done closes the call it names; the end of the response closes whatever a
+        // a stop that names calls closes them; the end of the response closes whatever a
         // gateway never closed on its own
         const closing =
-          event.type === "response.function_call_arguments.done"
-            ? [keyOf(event.item_id)]
+          fragments.length > 0
+            ? fragments.map((item) => keyOf(item.item_id))
             : [...openToolCalls.keys()];
         for (const key of closing) {
           const toolCall = openToolCalls.get(key);

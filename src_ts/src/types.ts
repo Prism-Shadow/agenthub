@@ -41,14 +41,7 @@ export type Role = "user" | "assistant";
 export type EventType = "start" | "delta" | "stop" | "unused";
 export type FinishReason = "stop" | "length" | "tool_call" | "unknown";
 export type AspectRatio =
-  | "1:1"
-  | "2:3"
-  | "3:2"
-  | "3:4"
-  | "4:3"
-  | "9:16"
-  | "16:9"
-  | "21:9";
+  "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9" | "21:9";
 export type ImageSize = "1K" | "2K";
 
 /**
@@ -105,6 +98,9 @@ export interface PartialToolCallContentItem {
   name: string;
   arguments: string;
   tool_call_id: string;
+  // id of the streamed item this fragment belongs to, when the provider sends one (the
+  // Responses output item id); ties fragments to their call when several calls stream at once
+  item_id?: string;
   fidelity?: Fidelity;
 }
 
