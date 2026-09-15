@@ -16,8 +16,8 @@
   a message. A vLLM-style Responses server answers the bare
   `{"role": "assistant", "content": [...]}` item with a 400 on the turn that replays it and
   takes the typed form for every role; OpenAI, DeepSeek and MiniMax accept either shape.
-- Each client builds the item through a private helper of its own, in TypeScript and Python
-  alike, so the four transforms stay self-contained.
+- The item is written out inline at every site, in TypeScript and Python alike — no helper stands
+  between the transform and the shape it sends, so each transform reads top to bottom.
 - The item carries nothing beyond that minimal shape: no `id`, `status` or `annotations`,
   none of which the client received from the server. The `phase` key an interleaved turn
   carries on `openai_responses` and `gpt6` is unchanged.

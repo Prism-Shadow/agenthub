@@ -85,21 +85,6 @@ class OpenaiResponsesClient(LLMClient):
 
         return item
 
-    def _build_message_entry(self, role: str, content_items: list[Any], phase: str | None) -> dict[str, Any]:
-        """Build the input item that carries the content parts collected for a message."""
-        # every turn goes back as a typed message item, the Responses API's EasyInputMessage
-        # shape (type "message" is valid for any role). A vLLM-style Responses server answers a
-        # bare {"role": "assistant", "content": [...]} item with a 400 on the second turn of a
-        # conversation, and takes the typed form for user and assistant alike (both verified
-        # live 2026-09-15 against the Atria-Dawn-Preview endpoint); OpenAI, DeepSeek and MiniMax
-        # accept either shape. Nothing beyond that minimal shape goes out: an id or a status the
-        # server never sent would be an invention.
-        entry: dict[str, Any] = {"type": "message", "role": role, "content": content_items}
-        if phase is not None:
-            entry["phase"] = phase
-
-        return entry
-
     def transform_uni_config_to_model_config(self, config: UniConfig) -> dict[str, Any]:
         """
         Transform universal configuration to OpenAI Responses-compatible configuration.
@@ -169,14 +154,25 @@ class OpenaiResponsesClient(LLMClient):
                 # merges a function call into the adjacent assistant message rejects a call whose
                 # output does not follow it (DeepSeek answers "No tool output found for tool call")
                 if item["type"] not in ("text", "image_url") and content_items:
-                    input_list.append(self._build_message_entry(msg["role"], content_items, last_phase))
+                    # Every turn goes back as a typed message item — the Responses API's EasyInputMessage
+                    # shape, where type "message" is valid for any role. A vLLM-style Responses server
+                    # answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn that
+                    # replays it and takes the typed form for every role; OpenAI, DeepSeek and MiniMax accept
+                    # either shape. Nothing beyond that minimal shape goes out: an id or a status the server
+                    # never sent would be an invention.
+                    entry = {"type": "message", "role": msg["role"], "content": content_items}
+                    if last_phase is not None:
+                        entry["phase"] = last_phase
+                    input_list.append(entry)
                     content_items = []
 
                 if item["type"] == "text":
                     phase = (item.get("fidelity") or {}).get("phase")
                     if msg["role"] == "assistant" and phase:  # split different phases
                         if last_phase is not None and last_phase != phase and content_items:
-                            input_list.append(self._build_message_entry(msg["role"], content_items, last_phase))
+                            input_list.append(
+                                {"type": "message", "role": msg["role"], "content": content_items, "phase": last_phase}
+                            )
                             content_items = []
 
                         last_phase = phase
@@ -238,7 +234,10 @@ class OpenaiResponsesClient(LLMClient):
                     raise ValueError(f"Unknown item: {item}")
 
             if content_items:
-                input_list.append(self._build_message_entry(msg["role"], content_items, last_phase))
+                entry = {"type": "message", "role": msg["role"], "content": content_items}
+                if last_phase is not None:
+                    entry["phase"] = last_phase
+                input_list.append(entry)
 
         return input_list
 

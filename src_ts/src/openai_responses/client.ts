@@ -116,33 +116,6 @@ export class OpenaiResponsesClient extends LLMClient {
   }
 
   /**
-   * Build the input item that carries the content parts collected for a message.
-   */
-  private _buildMessageEntry(
-    role: string,
-    contentItems: unknown[],
-    phase: string | null,
-  ): Record<string, unknown> {
-    // every turn goes back as a typed message item, the Responses API's EasyInputMessage
-    // shape (type "message" is valid for any role). A vLLM-style Responses server answers a
-    // bare { role: "assistant", content: [...] } item with a 400 on the second turn of a
-    // conversation, and takes the typed form for user and assistant alike (both verified
-    // live 2026-09-15 against the Atria-Dawn-Preview endpoint); OpenAI, DeepSeek and MiniMax
-    // accept either shape. Nothing beyond that minimal shape goes out: an id or a status the
-    // server never sent would be an invention.
-    const entry: Record<string, unknown> = {
-      type: "message",
-      role,
-      content: contentItems,
-    };
-    if (phase !== null) {
-      entry.phase = phase;
-    }
-
-    return entry;
-  }
-
-  /**
    * Transform universal configuration to OpenAI Responses-compatible configuration.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -233,9 +206,21 @@ export class OpenaiResponsesClient extends LLMClient {
           item.type !== "image_url" &&
           contentItems.length > 0
         ) {
-          inputList.push(
-            this._buildMessageEntry(msg.role, contentItems, lastPhase),
-          );
+          // Every turn goes back as a typed message item — the Responses API's EasyInputMessage
+          // shape, where type "message" is valid for any role. A vLLM-style Responses server
+          // answers a bare { role: "assistant", content: [...] } item with a 400 on the turn that
+          // replays it and takes the typed form for every role; OpenAI, DeepSeek and MiniMax accept
+          // either shape. Nothing beyond that minimal shape goes out: an id or a status the server
+          // never sent would be an invention.
+          const entry: Record<string, unknown> = {
+            type: "message",
+            role: msg.role,
+            content: contentItems,
+          };
+          if (lastPhase !== null) {
+            entry.phase = lastPhase;
+          }
+          inputList.push(entry);
           contentItems = [];
         }
 
@@ -248,9 +233,12 @@ export class OpenaiResponsesClient extends LLMClient {
               lastPhase !== phase &&
               contentItems.length > 0
             ) {
-              inputList.push(
-                this._buildMessageEntry(msg.role, contentItems, lastPhase),
-              );
+              inputList.push({
+                type: "message",
+                role: msg.role,
+                content: contentItems,
+                phase: lastPhase,
+              });
               contentItems = [];
             }
             lastPhase = phase;
@@ -330,9 +318,15 @@ export class OpenaiResponsesClient extends LLMClient {
       }
 
       if (contentItems.length > 0) {
-        inputList.push(
-          this._buildMessageEntry(msg.role, contentItems, lastPhase),
-        );
+        const entry: Record<string, unknown> = {
+          type: "message",
+          role: msg.role,
+          content: contentItems,
+        };
+        if (lastPhase !== null) {
+          entry.phase = lastPhase;
+        }
+        inputList.push(entry);
       }
     }
 
