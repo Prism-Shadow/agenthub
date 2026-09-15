@@ -84,7 +84,14 @@ def _messages(case: MessageOrderCase) -> list[dict[str, Any]]:
 
 
 def _responses_signature(model_input: list[dict[str, Any]]) -> list[str]:
-    return [item.get("type") or f"message:{item['role']}" for item in model_input]
+    # the generic client sends an assistant turn as a typed message item and a user turn with no
+    # type at all; both are labelled by role, so one order fits every client
+    labels = []
+    for item in model_input:
+        kind = item.get("type")
+        labels.append(f"message:{item['role']}" if not kind or kind == "message" else kind)
+
+    return labels
 
 
 def _messages_signature(model_input: list[dict[str, Any]]) -> list[str]:
@@ -160,3 +167,26 @@ async def test_message_transform_keeps_content_item_order(case: MessageOrderCase
     if case.protocol in ("responses", "chat"):
         tool_result = model_input[4]["output"] if case.protocol == "responses" else model_input[2]["content"]
         assert tool_result == "20 degrees."
+
+
+# The generic Responses client only: gpt6, deepseek_v4 and minimax_m3 keep transforms of their own.
+def test_openai_responses_replays_an_assistant_turn_as_a_message_item():
+    client = AutoLLMClient(model="gpt-5.6", api_key="test-key", client_type="openai-responses")
+    assert client._client.__class__.__name__ == "OpenaiResponsesClient"  # noqa: SLF001
+
+    history = [
+        {"role": "user", "content_items": [{"type": "text", "text": "Hello."}]},
+        {"role": "assistant", "content_items": [{"type": "text", "text": "Hi there."}]},
+        {"role": "user", "content_items": [{"type": "text", "text": "And now?"}]},
+    ]
+    model_input = client._client.transform_uni_message_to_model_input(history)  # noqa: SLF001
+
+    # a vLLM-style Responses server rejects a bare {"role": "assistant"} input item on the turn
+    # that replays it; a user turn is accepted as it stands, so it carries no type
+    assert model_input == [
+        {"role": "user", "content": [{"type": "input_text", "text": "Hello."}]},
+        {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Hi there."}]},
+        {"role": "user", "content": [{"type": "input_text", "text": "And now?"}]},
+    ]
+    assert "type" not in model_input[0]
+    assert "type" not in model_input[2]

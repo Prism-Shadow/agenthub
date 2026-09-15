@@ -157,7 +157,15 @@ function messagesFor(testCase: MessageOrderCase): UniMessage[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function signature(testCase: MessageOrderCase, modelInput: any[]): string[] {
   if (testCase.protocol === "responses") {
-    return modelInput.map((item) => item.type ?? `message:${item.role}`);
+    return modelInput.map((item) => {
+      // the generic client sends an assistant turn as a typed message item and a user turn
+      // with no type at all; both are labelled by role, so one order fits every client
+      if (!item.type || item.type === "message") {
+        return `message:${item.role}`;
+      }
+
+      return item.type;
+    });
   }
 
   if (testCase.protocol === "messages") {
@@ -195,29 +203,27 @@ function signature(testCase: MessageOrderCase, modelInput: any[]): string[] {
   });
 }
 
+interface RoutedClient {
+  constructor: { name: string };
+  transformUniMessageToModelInput(
+    messages: UniMessage[],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<any[]> | any[];
+}
+
+function routedClient(model: string, clientType?: string): RoutedClient {
+  const client = new AutoLLMClient({ model, apiKey: "test-key", clientType });
+  return (client as unknown as { _client: RoutedClient })._client;
+}
+
 describe.each(MESSAGE_ORDER_CASES)(
   "Message transform order for $expectedClient",
   (testCase) => {
     test("keeps the order of the content items", async () => {
-      const client = new AutoLLMClient({
-        model: testCase.model,
-        apiKey: "test-key",
-        clientType: testCase.clientType,
-      });
-      const routedClient = (
-        client as unknown as {
-          _client: {
-            constructor: { name: string };
-            transformUniMessageToModelInput(
-              messages: UniMessage[],
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ): Promise<any[]> | any[];
-          };
-        }
-      )._client;
-      expect(routedClient.constructor.name).toBe(testCase.expectedClient);
+      const client = routedClient(testCase.model, testCase.clientType);
+      expect(client.constructor.name).toBe(testCase.expectedClient);
 
-      const modelInput = await routedClient.transformUniMessageToModelInput(
+      const modelInput = await client.transformUniMessageToModelInput(
         messagesFor(testCase),
       );
 
@@ -236,3 +242,35 @@ describe.each(MESSAGE_ORDER_CASES)(
     });
   },
 );
+
+// The generic Responses client only: gpt6, deepseek_v4 and minimax_m3 keep transforms of
+// their own.
+describe("Message transform shape for OpenaiResponsesClient", () => {
+  test("replays an assistant turn as a message item", async () => {
+    const client = routedClient("gpt-5.6", "openai-responses");
+    expect(client.constructor.name).toBe("OpenaiResponsesClient");
+
+    const modelInput = await client.transformUniMessageToModelInput([
+      { role: "user", content_items: [{ type: "text", text: "Hello." }] },
+      {
+        role: "assistant",
+        content_items: [{ type: "text", text: "Hi there." }],
+      },
+      { role: "user", content_items: [{ type: "text", text: "And now?" }] },
+    ]);
+
+    // a vLLM-style Responses server rejects a bare { role: "assistant" } input item on the
+    // turn that replays it; a user turn is accepted as it stands, so it carries no type
+    expect(modelInput).toEqual([
+      { role: "user", content: [{ type: "input_text", text: "Hello." }] },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Hi there." }],
+      },
+      { role: "user", content: [{ type: "input_text", text: "And now?" }] },
+    ]);
+    expect(modelInput[0]).not.toHaveProperty("type");
+    expect(modelInput[2]).not.toHaveProperty("type");
+  });
+});

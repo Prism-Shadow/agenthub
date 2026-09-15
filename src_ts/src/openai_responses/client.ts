@@ -116,6 +116,31 @@ export class OpenaiResponsesClient extends LLMClient {
   }
 
   /**
+   * Build the input item that carries the content parts collected for a message.
+   */
+  private _buildMessageEntry(
+    role: string,
+    contentItems: unknown[],
+    phase: string | null,
+  ): Record<string, unknown> {
+    // an assistant turn goes back as an output-style message item: a vLLM-style Responses
+    // server answers a bare { role: "assistant", content: [...] } input item with a 400 on
+    // the second turn of a conversation (verified live 2026-09-15 against the
+    // Atria-Dawn-Preview endpoint), while OpenAI, DeepSeek and MiniMax accept either shape.
+    // Nothing beyond that minimal shape goes out: an id or a status the server never sent
+    // would be an invention.
+    const entry: Record<string, unknown> =
+      role === "assistant"
+        ? { type: "message", role, content: contentItems }
+        : { role, content: contentItems };
+    if (phase !== null) {
+      entry.phase = phase;
+    }
+
+    return entry;
+  }
+
+  /**
    * Transform universal configuration to OpenAI Responses-compatible configuration.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -206,13 +231,9 @@ export class OpenaiResponsesClient extends LLMClient {
           item.type !== "image_url" &&
           contentItems.length > 0
         ) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const entry: any = { role: msg.role, content: contentItems };
-          if (lastPhase !== null) {
-            entry.phase = lastPhase;
-          }
-
-          inputList.push(entry);
+          inputList.push(
+            this._buildMessageEntry(msg.role, contentItems, lastPhase),
+          );
           contentItems = [];
         }
 
@@ -225,11 +246,9 @@ export class OpenaiResponsesClient extends LLMClient {
               lastPhase !== phase &&
               contentItems.length > 0
             ) {
-              inputList.push({
-                role: msg.role,
-                content: contentItems,
-                phase: lastPhase,
-              });
+              inputList.push(
+                this._buildMessageEntry(msg.role, contentItems, lastPhase),
+              );
               contentItems = [];
             }
             lastPhase = phase;
@@ -309,12 +328,9 @@ export class OpenaiResponsesClient extends LLMClient {
       }
 
       if (contentItems.length > 0) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const entry: any = { role: msg.role, content: contentItems };
-        if (lastPhase !== null) {
-          entry.phase = lastPhase;
-        }
-        inputList.push(entry);
+        inputList.push(
+          this._buildMessageEntry(msg.role, contentItems, lastPhase),
+        );
       }
     }
 
