@@ -123,16 +123,18 @@ export class OpenaiResponsesClient extends LLMClient {
     contentItems: unknown[],
     phase: string | null,
   ): Record<string, unknown> {
-    // an assistant turn goes back as an output-style message item: a vLLM-style Responses
-    // server answers a bare { role: "assistant", content: [...] } input item with a 400 on
-    // the second turn of a conversation (verified live 2026-09-15 against the
-    // Atria-Dawn-Preview endpoint), while OpenAI, DeepSeek and MiniMax accept either shape.
-    // Nothing beyond that minimal shape goes out: an id or a status the server never sent
-    // would be an invention.
-    const entry: Record<string, unknown> =
-      role === "assistant"
-        ? { type: "message", role, content: contentItems }
-        : { role, content: contentItems };
+    // every turn goes back as a typed message item, the Responses API's EasyInputMessage
+    // shape (type "message" is valid for any role). A vLLM-style Responses server answers a
+    // bare { role: "assistant", content: [...] } item with a 400 on the second turn of a
+    // conversation, and takes the typed form for user and assistant alike (both verified
+    // live 2026-09-15 against the Atria-Dawn-Preview endpoint); OpenAI, DeepSeek and MiniMax
+    // accept either shape. Nothing beyond that minimal shape goes out: an id or a status the
+    // server never sent would be an invention.
+    const entry: Record<string, unknown> = {
+      type: "message",
+      role,
+      content: contentItems,
+    };
     if (phase !== null) {
       entry.phase = phase;
     }

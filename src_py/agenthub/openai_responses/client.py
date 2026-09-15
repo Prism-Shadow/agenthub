@@ -87,17 +87,14 @@ class OpenaiResponsesClient(LLMClient):
 
     def _build_message_entry(self, role: str, content_items: list[Any], phase: str | None) -> dict[str, Any]:
         """Build the input item that carries the content parts collected for a message."""
-        # an assistant turn goes back as an output-style message item: a vLLM-style Responses
-        # server answers a bare {"role": "assistant", "content": [...]} input item with a 400 on
-        # the second turn of a conversation (verified live 2026-09-15 against the
-        # Atria-Dawn-Preview endpoint), while OpenAI, DeepSeek and MiniMax accept either shape.
-        # Nothing beyond that minimal shape goes out: an id or a status the server never sent
-        # would be an invention.
-        entry: dict[str, Any] = (
-            {"type": "message", "role": role, "content": content_items}
-            if role == "assistant"
-            else {"role": role, "content": content_items}
-        )
+        # every turn goes back as a typed message item, the Responses API's EasyInputMessage
+        # shape (type "message" is valid for any role). A vLLM-style Responses server answers a
+        # bare {"role": "assistant", "content": [...]} item with a 400 on the second turn of a
+        # conversation, and takes the typed form for user and assistant alike (both verified
+        # live 2026-09-15 against the Atria-Dawn-Preview endpoint); OpenAI, DeepSeek and MiniMax
+        # accept either shape. Nothing beyond that minimal shape goes out: an id or a status the
+        # server never sent would be an invention.
+        entry: dict[str, Any] = {"type": "message", "role": role, "content": content_items}
         if phase is not None:
             entry["phase"] = phase
 

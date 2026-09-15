@@ -88,6 +88,16 @@ class DeepSeekV4Client(LLMClient):
             self.__class__.__name__, "tool_choice", "DeepSeek V4 only supports 'auto' and 'none' for tool_choice."
         )
 
+    def _build_message_entry(self, role: str, content_items: list[Any]) -> dict[str, Any]:
+        """Build the input item that carries the content parts collected for a message."""
+        # every turn goes back as a typed message item, the Responses API's documented
+        # EasyInputMessage shape (type "message" is valid for any role): a vLLM-style Responses
+        # server answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn
+        # that replays it and takes the typed form for every role, while OpenAI, DeepSeek and
+        # MiniMax accept either shape. Nothing beyond that minimal shape goes out: an id or a
+        # status the server never sent would be an invention.
+        return {"type": "message", "role": role, "content": content_items}
+
     def transform_uni_config_to_model_config(self, config: UniConfig) -> dict[str, Any]:
         """
         Transform universal configuration to DeepSeek-specific configuration.
@@ -166,7 +176,7 @@ class DeepSeekV4Client(LLMClient):
                 # whose output does not follow it with "No tool output found for tool call"
                 # (verified live 2026-08-21)
                 if item["type"] not in ("text", "image_url") and content_items:
-                    input_list.append({"role": msg["role"], "content": content_items})
+                    input_list.append(self._build_message_entry(msg["role"], content_items))
                     content_items = []
 
                 if item["type"] == "text":
@@ -223,7 +233,7 @@ class DeepSeekV4Client(LLMClient):
                     raise ValueError(f"Unknown item: {item}")
 
             if content_items:
-                input_list.append({"role": msg["role"], "content": content_items})
+                input_list.append(self._build_message_entry(msg["role"], content_items))
 
         return input_list
 

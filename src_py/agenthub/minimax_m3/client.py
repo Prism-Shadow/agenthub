@@ -86,6 +86,16 @@ class MiniMaxM3Client(LLMClient):
             "MiniMax Responses API does not support required or named tool selection.",
         )
 
+    def _build_message_entry(self, role: str, content_items: list[Any]) -> dict[str, Any]:
+        """Build the input item that carries the content parts collected for a message."""
+        # every turn goes back as a typed message item, the Responses API's documented
+        # EasyInputMessage shape (type "message" is valid for any role): a vLLM-style Responses
+        # server answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn
+        # that replays it and takes the typed form for every role, while OpenAI, DeepSeek and
+        # MiniMax accept either shape. Nothing beyond that minimal shape goes out: an id or a
+        # status the server never sent would be an invention.
+        return {"type": "message", "role": role, "content": content_items}
+
     def transform_uni_config_to_model_config(self, config: UniConfig) -> dict[str, Any]:
         """Transform universal configuration to MiniMax's Responses API payload."""
         minimax_config: dict[str, Any] = {"model": self._model, "store": False}
@@ -137,7 +147,7 @@ class MiniMaxM3Client(LLMClient):
                 # anything that is not message content becomes an input item of its own, so the
                 # text collected so far is flushed first to keep the order the model produced
                 if item["type"] not in ("text", "image_url") and content_items:
-                    input_list.append({"role": message["role"], "content": content_items})
+                    input_list.append(self._build_message_entry(message["role"], content_items))
                     content_items = []
 
                 if item["type"] == "text":
@@ -188,7 +198,7 @@ class MiniMaxM3Client(LLMClient):
                     raise ValueError(f"Unknown item: {item}")
 
             if content_items:
-                input_list.append({"role": message["role"], "content": content_items})
+                input_list.append(self._build_message_entry(message["role"], content_items))
 
         return input_list
 
