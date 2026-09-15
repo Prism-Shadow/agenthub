@@ -166,7 +166,13 @@ class DeepSeekV4Client(LLMClient):
                 # whose output does not follow it with "No tool output found for tool call"
                 # (verified live 2026-08-21)
                 if item["type"] not in ("text", "image_url") and content_items:
-                    input_list.append({"role": msg["role"], "content": content_items})
+                    # Every turn goes back as a typed message item — the Responses API's EasyInputMessage
+                    # shape, where type "message" is valid for any role. A vLLM-style Responses server
+                    # answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn that
+                    # replays it and takes the typed form for every role; OpenAI, DeepSeek and MiniMax accept
+                    # either shape. Nothing beyond that minimal shape goes out: an id or a status the server
+                    # never sent would be an invention.
+                    input_list.append({"type": "message", "role": msg["role"], "content": content_items})
                     content_items = []
 
                 if item["type"] == "text":
@@ -223,7 +229,7 @@ class DeepSeekV4Client(LLMClient):
                     raise ValueError(f"Unknown item: {item}")
 
             if content_items:
-                input_list.append({"role": msg["role"], "content": content_items})
+                input_list.append({"type": "message", "role": msg["role"], "content": content_items})
 
         return input_list
 

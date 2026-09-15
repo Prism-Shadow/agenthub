@@ -157,7 +157,16 @@ function messagesFor(testCase: MessageOrderCase): UniMessage[] {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function signature(testCase: MessageOrderCase, modelInput: any[]): string[] {
   if (testCase.protocol === "responses") {
-    return modelInput.map((item) => item.type ?? `message:${item.role}`);
+    return modelInput.map((item) => {
+      // every Responses client sends a turn as a typed message item, and an item carrying
+      // no type at all is a message too; both are labelled by role, so one order fits
+      // every client
+      if (!item.type || item.type === "message") {
+        return `message:${item.role}`;
+      }
+
+      return item.type;
+    });
   }
 
   if (testCase.protocol === "messages") {
@@ -195,29 +204,27 @@ function signature(testCase: MessageOrderCase, modelInput: any[]): string[] {
   });
 }
 
+interface RoutedClient {
+  constructor: { name: string };
+  transformUniMessageToModelInput(
+    messages: UniMessage[],
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ): Promise<any[]> | any[];
+}
+
+function routedClient(model: string, clientType?: string): RoutedClient {
+  const client = new AutoLLMClient({ model, apiKey: "test-key", clientType });
+  return (client as unknown as { _client: RoutedClient })._client;
+}
+
 describe.each(MESSAGE_ORDER_CASES)(
   "Message transform order for $expectedClient",
   (testCase) => {
     test("keeps the order of the content items", async () => {
-      const client = new AutoLLMClient({
-        model: testCase.model,
-        apiKey: "test-key",
-        clientType: testCase.clientType,
-      });
-      const routedClient = (
-        client as unknown as {
-          _client: {
-            constructor: { name: string };
-            transformUniMessageToModelInput(
-              messages: UniMessage[],
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            ): Promise<any[]> | any[];
-          };
-        }
-      )._client;
-      expect(routedClient.constructor.name).toBe(testCase.expectedClient);
+      const client = routedClient(testCase.model, testCase.clientType);
+      expect(client.constructor.name).toBe(testCase.expectedClient);
 
-      const modelInput = await routedClient.transformUniMessageToModelInput(
+      const modelInput = await client.transformUniMessageToModelInput(
         messagesFor(testCase),
       );
 
@@ -232,6 +239,56 @@ describe.each(MESSAGE_ORDER_CASES)(
             ? modelInput[4].output
             : modelInput[2].content,
         ).toBe("20 degrees.");
+      }
+    });
+  },
+);
+
+// The generic client and the three routed ones share the replayed shape, so the cases are
+// the Responses rows of the order suite.
+const RESPONSES_SHAPE_CASES = MESSAGE_ORDER_CASES.filter(
+  (testCase) => testCase.protocol === "responses",
+);
+
+describe.each(RESPONSES_SHAPE_CASES)(
+  "Message transform shape for $expectedClient",
+  (testCase) => {
+    test("replays every turn as a message item", async () => {
+      const client = routedClient(testCase.model, testCase.clientType);
+      expect(client.constructor.name).toBe(testCase.expectedClient);
+
+      const modelInput = await client.transformUniMessageToModelInput([
+        { role: "user", content_items: [{ type: "text", text: "Hello." }] },
+        {
+          role: "assistant",
+          content_items: [{ type: "text", text: "Hi there." }],
+        },
+        { role: "user", content_items: [{ type: "text", text: "And now?" }] },
+      ]);
+
+      // every turn is a typed message item — the EasyInputMessage shape, which a vLLM-style
+      // Responses server requires for the replayed assistant turn and takes for a user turn
+      // too. Every client on this protocol emits input_text for a user part and output_text
+      // for an assistant one.
+      expect(modelInput).toEqual([
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Hello." }],
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "Hi there." }],
+        },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "And now?" }],
+        },
+      ]);
+      for (const item of modelInput) {
+        expect(Object.keys(item).sort()).toEqual(["content", "role", "type"]);
       }
     });
   },

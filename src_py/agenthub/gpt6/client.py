@@ -156,10 +156,15 @@ class GPT6Client(LLMClient):
                 # anything that is not message content becomes an input item of its own, so the
                 # text collected so far is flushed first to keep the order the model produced
                 if item["type"] not in ("text", "image_url") and content_items:
-                    entry = {"role": msg["role"], "content": content_items}
+                    # Every turn goes back as a typed message item — the Responses API's EasyInputMessage
+                    # shape, where type "message" is valid for any role. A vLLM-style Responses server
+                    # answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn that
+                    # replays it and takes the typed form for every role; OpenAI, DeepSeek and MiniMax accept
+                    # either shape. Nothing beyond that minimal shape goes out: an id or a status the server
+                    # never sent would be an invention.
+                    entry = {"type": "message", "role": msg["role"], "content": content_items}
                     if last_phase is not None:
                         entry["phase"] = last_phase
-
                     input_list.append(entry)
                     content_items = []
 
@@ -167,7 +172,9 @@ class GPT6Client(LLMClient):
                     phase = (item.get("fidelity") or {}).get("phase")
                     if msg["role"] == "assistant" and phase:  # split different phases
                         if last_phase is not None and last_phase != phase and content_items:
-                            input_list.append({"role": msg["role"], "content": content_items, "phase": last_phase})
+                            input_list.append(
+                                {"type": "message", "role": msg["role"], "content": content_items, "phase": last_phase}
+                            )
                             content_items = []
 
                         last_phase = phase
@@ -231,10 +238,9 @@ class GPT6Client(LLMClient):
                     raise ValueError(f"Unknown item: {item}")
 
             if content_items:
-                entry = {"role": msg["role"], "content": content_items}
-                if last_phase is not None:  # add phase if not None
+                entry = {"type": "message", "role": msg["role"], "content": content_items}
+                if last_phase is not None:
                     entry["phase"] = last_phase
-
                 input_list.append(entry)
 
         return input_list

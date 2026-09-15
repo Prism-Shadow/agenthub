@@ -217,7 +217,17 @@ export class DeepSeekV4Client extends LLMClient {
           item.type !== "image_url" &&
           contentItems.length > 0
         ) {
-          inputList.push({ role: msg.role, content: [...contentItems] });
+          // Every turn goes back as a typed message item — the Responses API's EasyInputMessage
+          // shape, where type "message" is valid for any role. A vLLM-style Responses server
+          // answers a bare { role: "assistant", content: [...] } item with a 400 on the turn that
+          // replays it and takes the typed form for every role; OpenAI, DeepSeek and MiniMax accept
+          // either shape. Nothing beyond that minimal shape goes out: an id or a status the server
+          // never sent would be an invention.
+          inputList.push({
+            type: "message",
+            role: msg.role,
+            content: [...contentItems],
+          });
           contentItems.length = 0;
         }
 
@@ -294,7 +304,11 @@ export class DeepSeekV4Client extends LLMClient {
       }
 
       if (contentItems.length > 0) {
-        inputList.push({ role: msg.role, content: contentItems });
+        inputList.push({
+          type: "message",
+          role: msg.role,
+          content: contentItems,
+        });
       }
     }
 
