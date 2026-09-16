@@ -19,20 +19,14 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionCreateParamsStreaming,
 } from "openai/resources/chat/completions";
-import { LLMClient } from "../baseClient";
+import { ClientPart, LLMClient } from "../baseClient";
+import { UnsupportedParameterError } from "../errors";
 import {
-  parseToolCallArguments,
-  UnsupportedParameterError,
-} from "../errors";
-import {
-  EventType,
   FinishReason,
-  PartialContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
-  UniEvent,
   UniMessage,
   UsageMetadata,
 } from "../types";
@@ -273,9 +267,9 @@ export class KimiK3Client extends LLMClient {
       const thinkingFields = new Set<string | undefined>();
 
       for (const item of msg.content_items) {
-        if (item.type === "text") {
+        if (item.type === "text.done") {
           contentParts.push({ type: "text", text: item.text });
-        } else if (item.type === "image_url") {
+        } else if (item.type === "image_url.done") {
           const base64Image = await this._convertImageUrlToBase64(
             item.image_url,
             signal,
@@ -284,10 +278,10 @@ export class KimiK3Client extends LLMClient {
             type: "image_url",
             image_url: { url: base64Image },
           });
-        } else if (item.type === "thinking") {
+        } else if (item.type === "thinking.done") {
           thinking += item.thinking;
           thinkingFields.add(item.fidelity?.reasoning_field);
-        } else if (item.type === "tool_call") {
+        } else if (item.type === "tool_call.done") {
           toolCalls.push({
             id: item.tool_call_id,
             type: "function",
@@ -296,7 +290,7 @@ export class KimiK3Client extends LLMClient {
               arguments: JSON.stringify(item.arguments, null, 0),
             },
           });
-        } else if (item.type === "tool_result") {
+        } else if (item.type === "tool_result.done") {
           if (!item.tool_call_id) {
             throw new Error("tool_call_id is required for tool result.");
           }
@@ -370,13 +364,15 @@ export class KimiK3Client extends LLMClient {
   }
 
   /**
-   * Transform Kimi K3 model output to universal event format.
+   * Transform one Kimi K3 streaming chunk into client parts.
+   *
+   * Chat Completions gives an item no identity, so each delta is keyed by the wire field
+   * that carried it; _streamingResponseInternal turns those into one key per item.
    */
-  transformModelOutputToUniEvent(modelOutput: ChatCompletionChunk): UniEvent {
-    let eventType: EventType | null = null;
-    const contentItems: PartialContentItem[] = [];
-    let usageMetadata: UsageMetadata | null = null;
-    let finishReason: FinishReason | null = null;
+  transformModelOutputToClientParts(
+    modelOutput: ChatCompletionChunk,
+  ): ClientPart[] {
+    const parts: ClientPart[] = [];
 
     // gateways inject content-free heartbeat chunks on long generations, whose
     // choices arrive as undefined rather than an empty list
@@ -384,66 +380,82 @@ export class KimiK3Client extends LLMClient {
       const choice = modelOutput.choices[0];
       const delta = choice?.delta;
 
-      if (delta?.content) {
-        eventType = "delta";
-        contentItems.push({ type: "text", text: delta.content });
-      }
-
       // the thinking field name differs by server: vLLM & siliconflow use
       // reasoning_content while openrouter uses reasoning; record the wire
       // field that carried each delta so a replay can reproduce exactly the
-      // field the upstream produced
+      // field the upstream produced. The reasoning goes before the content
+      // because a chunk may end the reasoning and begin the answer.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const reasoningContent = (delta as any)?.reasoning_content;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const reasoning = (delta as any)?.reasoning;
       if (reasoningContent && reasoning) {
-        eventType = "delta";
         // ambiguous origin: record no fidelity so a replay sends both fields back
-        contentItems.push({ type: "thinking", thinking: reasoningContent });
+        parts.push({
+          type: "delta",
+          key: "reasoning_content",
+          item: { type: "thinking.delta", thinking: reasoningContent },
+        });
       } else if (reasoningContent) {
-        eventType = "delta";
-        contentItems.push({
-          type: "thinking",
-          thinking: reasoningContent,
-          fidelity: { reasoning_field: "reasoning_content" },
+        parts.push({
+          type: "delta",
+          key: "reasoning_content",
+          item: {
+            type: "thinking.delta",
+            thinking: reasoningContent,
+            fidelity: { reasoning_field: "reasoning_content" },
+          },
         });
       } else if (reasoning) {
-        eventType = "delta";
-        contentItems.push({
-          type: "thinking",
-          thinking: reasoning,
-          fidelity: { reasoning_field: "reasoning" },
+        parts.push({
+          type: "delta",
+          key: "reasoning",
+          item: {
+            type: "thinking.delta",
+            thinking: reasoning,
+            fidelity: { reasoning_field: "reasoning" },
+          },
+        });
+      }
+
+      if (delta?.content) {
+        parts.push({
+          type: "delta",
+          key: "content",
+          item: { type: "text.delta", text: delta.content },
         });
       }
 
       if (delta?.tool_calls) {
-        eventType = "delta";
         for (const toolCall of delta.tool_calls) {
-          contentItems.push({
-            type: "partial_tool_call",
-            name: toolCall.function?.name || "",
-            arguments: toolCall.function?.arguments || "",
-            tool_call_id: toolCall.id || "",
+          parts.push({
+            type: "delta",
+            key: "tool_calls",
+            item: {
+              type: "tool_call.delta",
+              name: toolCall.function?.name || "",
+              arguments: toolCall.function?.arguments || "",
+              tool_call_id: toolCall.id || "",
+            },
           });
         }
       }
 
       if (choice?.finish_reason) {
-        eventType = eventType || "stop";
         const finishReasonMapping: { [key: string]: FinishReason } = {
           stop: "stop",
           length: "length",
           tool_calls: "tool_call",
           content_filter: "stop",
         };
-        finishReason = finishReasonMapping[choice.finish_reason] || "unknown";
+        parts.push({
+          type: "finish",
+          finish_reason: finishReasonMapping[choice.finish_reason] || "unknown",
+        });
       }
     }
 
     if (modelOutput.usage) {
-      eventType = eventType || "stop";
-
       const cachedTokens =
         modelOutput.usage.prompt_tokens_details?.cached_tokens || null;
       const reasoningTokens =
@@ -458,25 +470,22 @@ export class KimiK3Client extends LLMClient {
           ? modelOutput.usage.completion_tokens - reasoningTokens
           : modelOutput.usage.completion_tokens;
 
-      usageMetadata = {
+      const usageMetadata: UsageMetadata = {
         cached_tokens: cachedTokens,
         prompt_tokens: promptTokens,
         thoughts_tokens: reasoningTokens,
         response_tokens: responseTokens,
       };
-      usageMetadata = fixOpenrouterUsageMetadata(
-        usageMetadata,
-        this._client.baseURL,
-      );
+      parts.push({
+        type: "finish",
+        usage_metadata: fixOpenrouterUsageMetadata(
+          usageMetadata,
+          this._client.baseURL,
+        ),
+      });
     }
 
-    return {
-      role: "assistant",
-      event_type: eventType as EventType,
-      content_items: contentItems,
-      usage_metadata: usageMetadata,
-      finish_reason: finishReason,
-    };
+    return parts;
   }
 
   /**
@@ -486,7 +495,7 @@ export class KimiK3Client extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniEvent> {
+  }): AsyncGenerator<ClientPart> {
     const kimiConfig = this.transformUniConfigToModelConfig(options.config);
     const kimiMessages = await this.transformUniMessageToModelInput(
       options.messages,
@@ -510,102 +519,28 @@ export class KimiK3Client extends LLMClient {
       signal: options.signal,
     });
 
-    const partialToolCall: {
-      name?: string;
-      arguments?: string;
-      tool_call_id?: string;
-    } = {};
-    let partialUsage: {
-      finish_reason?: FinishReason | null;
-      usage_metadata?: UsageMetadata | null;
-    } = {};
-
+    // Chat Completions never signals that an item ended either: an item runs until a delta
+    // arrives from another wire field or names the next tool call
+    let itemIndex = -1;
+    let openField: string | null = null;
     for await (const chunk of stream) {
-      const event = this.transformModelOutputToUniEvent(chunk);
-      // the finish reason and usage metadata should be accumulated
-      partialUsage.finish_reason =
-        event.finish_reason || partialUsage.finish_reason;
-      partialUsage.usage_metadata =
-        event.usage_metadata || partialUsage.usage_metadata;
-      if (event.event_type === "delta") {
-        for (const item of event.content_items) {
-          if (item.type === "partial_tool_call") {
-            if (!partialToolCall.name) {
-              // start a new partial tool call
-              partialToolCall.name = item.name;
-              partialToolCall.arguments = item.arguments;
-              partialToolCall.tool_call_id = item.tool_call_id;
-            } else if (item.name) {
-              // finish the previous partial tool call
-              yield {
-                role: "assistant",
-                event_type: "delta",
-                content_items: [
-                  {
-                    type: "tool_call",
-                    name: partialToolCall.name,
-                    arguments: parseToolCallArguments(
-                      partialToolCall.arguments,
-                      this.constructor.name,
-                      partialToolCall.name || "",
-                      partialToolCall.tool_call_id || "",
-                    ),
-                    tool_call_id: partialToolCall.tool_call_id || "",
-                  },
-                ],
-                usage_metadata: null,
-                finish_reason: null,
-              };
-              // start a new partial tool call
-              partialToolCall.name = item.name;
-              partialToolCall.arguments = item.arguments;
-              partialToolCall.tool_call_id = item.tool_call_id;
-            } else {
-              // update partial tool call
-              partialToolCall.arguments =
-                (partialToolCall.arguments || "") + item.arguments;
-            }
-          }
-        }
-        yield event;
-      } else if (event.event_type === "stop") {
-        if (partialToolCall.name) {
-          // finish the partial tool call
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "tool_call",
-                name: partialToolCall.name,
-                arguments: parseToolCallArguments(
-                  partialToolCall.arguments,
-                  this.constructor.name,
-                  partialToolCall.name || "",
-                  partialToolCall.tool_call_id || "",
-                ),
-                tool_call_id: partialToolCall.tool_call_id || "",
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
-          partialToolCall.name = undefined;
-          partialToolCall.arguments = undefined;
-          partialToolCall.tool_call_id = undefined;
+      for (const part of this.transformModelOutputToClientParts(chunk)) {
+        if (part.type !== "delta") {
+          yield part;
+          continue;
         }
 
-        if (partialUsage.finish_reason && partialUsage.usage_metadata) {
-          yield {
-            role: "assistant",
-            event_type: "stop",
-            content_items: [],
-            usage_metadata: partialUsage.usage_metadata,
-            finish_reason: partialUsage.finish_reason,
-          };
-          partialUsage.finish_reason = null;
-          partialUsage.usage_metadata = null;
+        if (
+          part.key !== openField ||
+          (part.item.type === "tool_call.delta" && part.item.name)
+        ) {
+          if (openField !== null) {
+            yield { type: "done", key: String(itemIndex) };
+          }
+          itemIndex += 1;
+          openField = part.key;
         }
+        yield { ...part, key: String(itemIndex) };
       }
     }
   }

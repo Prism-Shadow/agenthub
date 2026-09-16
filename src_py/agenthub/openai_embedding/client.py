@@ -17,9 +17,9 @@ from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
-from ..base_client import LLMClient
+from ..base_client import ClientPart, LLMClient
 from ..errors import UnsupportedParameterError
-from ..types import UniConfig, UniEvent, UniMessage
+from ..types import UniConfig, UniMessage
 
 
 class OpenaiEmbeddingClient(LLMClient):
@@ -58,38 +58,48 @@ class OpenaiEmbeddingClient(LLMClient):
         for msg in messages:
             msg_text = ""
             for item in msg["content_items"]:
-                if item["type"] != "text":
+                if item["type"] != "text.done":
                     raise ValueError("OpenAI embeddings only support text content items.")
                 msg_text += item["text"]
             texts.append(msg_text or " ")
         return texts
 
-    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
-        """Transform OpenAI Embeddings response to universal event format."""
+    def transform_model_output_to_client_parts(self, model_output: Any) -> list[ClientPart]:
+        """Transform an OpenAI Embeddings response into client parts, one complete item per vector."""
+        parts: list[ClientPart] = []
+        for i, item in enumerate(model_output.data):
+            key = f"embedding:{i}"
+            parts.append(
+                {"type": "delta", "key": key, "item": {"type": "embedding.delta", "embedding": item.embedding}}
+            )
+            parts.append({"type": "done", "key": key})
+
         usage = getattr(model_output, "usage", None)
-        return {
-            "role": "assistant",
-            "event_type": "stop",
-            "content_items": [{"type": "embedding", "embedding": item.embedding} for item in model_output.data],
-            "usage_metadata": {
-                "cached_tokens": None,
-                "prompt_tokens": usage.prompt_tokens if usage else None,
-                "thoughts_tokens": None,
-                "response_tokens": None,
-            },
-            "finish_reason": "stop",
-        }
+        parts.append(
+            {
+                "type": "finish",
+                "usage_metadata": {
+                    "cached_tokens": None,
+                    "prompt_tokens": usage.prompt_tokens if usage else None,
+                    "thoughts_tokens": None,
+                    "response_tokens": None,
+                },
+                "finish_reason": "stop",
+            }
+        )
+        return parts
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         """Generate embeddings using OpenAI Embeddings-compatible API."""
         params = self.transform_uni_config_to_model_config(config)
         params["input"] = self.transform_uni_message_to_model_input(messages)
         result = await self._client.embeddings.create(**params)
-        yield self.transform_model_output_to_uni_event(result)
+        for part in self.transform_model_output_to_client_parts(result):
+            yield part
 
     async def list_models(self) -> list[str]:
         """

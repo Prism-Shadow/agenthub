@@ -22,17 +22,13 @@ import httpx
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
 
-from ..base_client import LLMClient
-from ..errors import UnsupportedParameterError, parse_tool_call_arguments
+from ..base_client import ClientPart, LLMClient
+from ..errors import UnsupportedParameterError
 from ..types import (
-    EventType,
-    FinishReason,
-    PartialContentItem,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
     UniConfig,
-    UniEvent,
     UniMessage,
     UsageMetadata,
 )
@@ -191,15 +187,15 @@ class KimiK3Client(LLMClient):
             thinking = ""
             thinking_fields: set[str | None] = set()
             for item in msg["content_items"]:
-                if item["type"] == "text":
+                if item["type"] == "text.done":
                     content_parts.append({"type": "text", "text": item["text"]})
-                elif item["type"] == "image_url":
+                elif item["type"] == "image_url.done":
                     base64_image = await self._convert_image_url_to_base64(item["image_url"])
                     content_parts.append({"type": "image_url", "image_url": {"url": base64_image}})
-                elif item["type"] == "thinking":
+                elif item["type"] == "thinking.done":
                     thinking += item["thinking"]
                     thinking_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
-                elif item["type"] == "tool_call":
+                elif item["type"] == "tool_call.done":
                     tool_calls.append(
                         {
                             "id": item["tool_call_id"],
@@ -210,7 +206,7 @@ class KimiK3Client(LLMClient):
                             },
                         }
                     )
-                elif item["type"] == "tool_result":
+                elif item["type"] == "tool_result.done":
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
@@ -259,20 +255,20 @@ class KimiK3Client(LLMClient):
 
         return openai_messages
 
-    def transform_model_output_to_uni_event(self, model_output: ChatCompletionChunk) -> UniEvent:
+    def transform_model_output_to_client_parts(self, model_output: ChatCompletionChunk) -> list[ClientPart]:
         """
-        Transform Kimi K3 model output to universal event format.
+        Transform one Kimi K3 streaming chunk into client parts.
+
+        Chat Completions gives an item no identity, so each delta is keyed by the wire field that
+        carried it; _streaming_response_internal turns those into one key per item.
 
         Args:
             model_output: OpenAI streaming chunk
 
         Returns:
-            Universal event dictionary
+            The parts the chunk carries, none when it carries nothing universal
         """
-        event_type: EventType | None = None
-        content_items: list[PartialContentItem] = []
-        usage_metadata: UsageMetadata | None = None
-        finish_reason: FinishReason | None = None
+        parts: list[ClientPart] = []
 
         # gateways inject content-free heartbeat chunks on long generations, whose choices
         # the SDK leaves as None rather than an empty list
@@ -280,59 +276,78 @@ class KimiK3Client(LLMClient):
             choice = model_output.choices[0]
             delta = choice.delta
 
-            if delta.content:
-                event_type = "delta"
-                content_items.append({"type": "text", "text": delta.content})
-
             # the thinking field name differs by server: vLLM & siliconflow use reasoning_content
             # while openrouter uses reasoning; record the wire field that carried each delta
-            # so a replay can reproduce exactly the field the upstream produced
+            # so a replay can reproduce exactly the field the upstream produced. The reasoning
+            # goes before the content because a chunk may end the reasoning and begin the answer.
             reasoning_content = getattr(delta, "reasoning_content", None)
             reasoning = getattr(delta, "reasoning", None)
             if reasoning_content and reasoning:
-                event_type = "delta"
                 # ambiguous origin: record no fidelity so a replay sends both fields back
-                content_items.append({"type": "thinking", "thinking": reasoning_content})
-            elif reasoning_content:
-                event_type = "delta"
-                content_items.append(
+                parts.append(
                     {
-                        "type": "thinking",
-                        "thinking": reasoning_content,
-                        "fidelity": {"reasoning_field": "reasoning_content"},
+                        "type": "delta",
+                        "key": "reasoning_content",
+                        "item": {"type": "thinking.delta", "thinking": reasoning_content},
+                    }
+                )
+            elif reasoning_content:
+                parts.append(
+                    {
+                        "type": "delta",
+                        "key": "reasoning_content",
+                        "item": {
+                            "type": "thinking.delta",
+                            "thinking": reasoning_content,
+                            "fidelity": {"reasoning_field": "reasoning_content"},
+                        },
                     }
                 )
             elif reasoning:
-                event_type = "delta"
-                content_items.append(
-                    {"type": "thinking", "thinking": reasoning, "fidelity": {"reasoning_field": "reasoning"}}
+                parts.append(
+                    {
+                        "type": "delta",
+                        "key": "reasoning",
+                        "item": {
+                            "type": "thinking.delta",
+                            "thinking": reasoning,
+                            "fidelity": {"reasoning_field": "reasoning"},
+                        },
+                    }
+                )
+
+            if delta.content:
+                parts.append(
+                    {"type": "delta", "key": "content", "item": {"type": "text.delta", "text": delta.content}}
                 )
 
             if delta.tool_calls:
-                event_type = "delta"
                 for tool_call in delta.tool_calls:
-                    content_items.append(
+                    parts.append(
                         {
-                            "type": "partial_tool_call",
-                            "name": tool_call.function.name or "",
-                            "arguments": tool_call.function.arguments or "",
-                            "tool_call_id": tool_call.id or "",
+                            "type": "delta",
+                            "key": "tool_calls",
+                            "item": {
+                                "type": "tool_call.delta",
+                                "name": tool_call.function.name or "",
+                                "arguments": tool_call.function.arguments or "",
+                                "tool_call_id": tool_call.id or "",
+                            },
                         }
                     )
 
             if choice.finish_reason:
-                event_type = event_type or "stop"
                 finish_reason_mapping = {
                     "stop": "stop",
                     "length": "length",
                     "tool_calls": "tool_call",
                     "content_filter": "stop",
                 }
-                finish_reason = finish_reason_mapping.get(choice.finish_reason, "unknown")
+                parts.append(
+                    {"type": "finish", "finish_reason": finish_reason_mapping.get(choice.finish_reason, "unknown")}
+                )
 
         if model_output.usage:
-            event_type = event_type or "stop"  # deal with separate usage data
-
             if model_output.usage.prompt_tokens_details:
                 cached_tokens = model_output.usage.prompt_tokens_details.cached_tokens
             else:
@@ -353,27 +368,26 @@ class KimiK3Client(LLMClient):
             else:
                 response_tokens = model_output.usage.completion_tokens
 
-            usage_metadata = {
+            usage_metadata: UsageMetadata = {
                 "cached_tokens": cached_tokens,
                 "prompt_tokens": prompt_tokens,
                 "thoughts_tokens": reasoning_tokens,
                 "response_tokens": response_tokens,
             }
-            usage_metadata = fix_openrouter_usage_metadata(usage_metadata, str(self._client.base_url))
+            parts.append(
+                {
+                    "type": "finish",
+                    "usage_metadata": fix_openrouter_usage_metadata(usage_metadata, str(self._client.base_url)),
+                }
+            )
 
-        return {
-            "role": "assistant",
-            "event_type": event_type,
-            "content_items": content_items,
-            "usage_metadata": usage_metadata,
-            "finish_reason": finish_reason,
-        }
+        return parts
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         """Stream generate using Kimi SDK with unified conversion methods."""
         kimi_config = self.transform_uni_config_to_model_config(config)
         kimi_messages = await self.transform_uni_message_to_model_input(messages)
@@ -385,88 +399,24 @@ class KimiK3Client(LLMClient):
         # Stream generate
         stream = await self._client.chat.completions.create(**kimi_config, messages=kimi_messages)
 
-        partial_tool_call = {}
-        partial_usage = {}
+        # Chat Completions never signals that an item ended either: an item runs until a delta
+        # arrives from another wire field or names the next tool call
+        item_index = -1
+        open_field = None
         async for chunk in stream:
-            event = self.transform_model_output_to_uni_event(chunk)
-            # the finish reason and usage metadata should be accumulated
-            partial_usage["finish_reason"] = event["finish_reason"] or partial_usage.get("finish_reason")
-            partial_usage["usage_metadata"] = event["usage_metadata"] or partial_usage.get("usage_metadata")
-            if event["event_type"] == "delta":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        if not partial_tool_call:
-                            # start new partial tool call
-                            partial_tool_call = {
-                                "name": item["name"],
-                                "arguments": item["arguments"],
-                                "tool_call_id": item["tool_call_id"],
-                            }
-                        elif item["name"]:
-                            # finish previous partial tool call
-                            yield {
-                                "role": "assistant",
-                                "event_type": "delta",
-                                "content_items": [
-                                    {
-                                        "type": "tool_call",
-                                        "name": partial_tool_call["name"],
-                                        "arguments": parse_tool_call_arguments(
-                                            partial_tool_call["arguments"],
-                                            self.__class__.__name__,
-                                            partial_tool_call["name"],
-                                            partial_tool_call["tool_call_id"],
-                                        ),
-                                        "tool_call_id": partial_tool_call["tool_call_id"],
-                                    }
-                                ],
-                                "usage_metadata": None,
-                                "finish_reason": None,
-                            }
-                            # start new partial tool call
-                            partial_tool_call = {
-                                "name": item["name"],
-                                "arguments": item["arguments"],
-                                "tool_call_id": item["tool_call_id"],
-                            }
-                        else:
-                            # update partial tool call
-                            partial_tool_call["arguments"] += item["arguments"]
+            for part in self.transform_model_output_to_client_parts(chunk):
+                if part["type"] != "delta":
+                    yield part
+                    continue
 
-                yield event
-            elif event["event_type"] == "stop":
-                if partial_tool_call:
-                    # finish partial tool call
-                    yield {
-                        "role": "assistant",
-                        "event_type": "delta",
-                        "content_items": [
-                            {
-                                "type": "tool_call",
-                                "name": partial_tool_call["name"],
-                                "arguments": parse_tool_call_arguments(
-                                    partial_tool_call["arguments"],
-                                    self.__class__.__name__,
-                                    partial_tool_call["name"],
-                                    partial_tool_call["tool_call_id"],
-                                ),
-                                "tool_call_id": partial_tool_call["tool_call_id"],
-                            }
-                        ],
-                        "usage_metadata": None,
-                        "finish_reason": None,
-                    }
-                    partial_tool_call = {}
+                if part["key"] != open_field or (part["item"]["type"] == "tool_call.delta" and part["item"]["name"]):
+                    if open_field is not None:
+                        yield {"type": "done", "key": str(item_index)}
 
-                if partial_usage.get("finish_reason") and partial_usage.get("usage_metadata"):
-                    yield {
-                        "role": "assistant",
-                        "event_type": "stop",
-                        "content_items": [],
-                        "usage_metadata": partial_usage["usage_metadata"],
-                        "finish_reason": partial_usage["finish_reason"],
-                    }
-                    partial_usage = {}
+                    item_index += 1
+                    open_field = part["key"]
+
+                yield {**part, "key": str(item_index)}
 
     async def list_models(self) -> list[str]:
         """

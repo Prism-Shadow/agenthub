@@ -19,17 +19,13 @@ from typing import Any, AsyncIterator
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaMessageParam, BetaRawMessageStreamEvent
 
-from ..base_client import LLMClient
-from ..errors import UnsupportedParameterError, parse_tool_call_arguments
+from ..base_client import ClientPart, LLMClient
+from ..errors import UnsupportedParameterError
 from ..types import (
-    EventType,
-    FinishReason,
-    PartialContentItem,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
     UniConfig,
-    UniEvent,
     UniMessage,
     UsageMetadata,
 )
@@ -180,11 +176,11 @@ class AntMessagesClient(LLMClient):
         for msg in messages:
             content_blocks = []
             for item in msg["content_items"]:
-                if item["type"] == "text":
+                if item["type"] == "text.done":
                     content_blocks.append({"type": "text", "text": item["text"]})
-                elif item["type"] == "image_url":
+                elif item["type"] == "image_url.done":
                     content_blocks.append(self._convert_image_url_to_source(item["image_url"]))
-                elif item["type"] == "thinking":
+                elif item["type"] == "thinking.done":
                     if item["thinking"] == REDACTED_THINKING:
                         content_blocks.append({"type": "redacted_thinking", "data": item["fidelity"]["signature"]})
                     else:
@@ -196,7 +192,7 @@ class AntMessagesClient(LLMClient):
                             thinking_block["signature"] = signature
 
                         content_blocks.append(thinking_block)
-                elif item["type"] == "tool_call":
+                elif item["type"] == "tool_call.done":
                     content_blocks.append(
                         {
                             "type": "tool_use",
@@ -205,7 +201,7 @@ class AntMessagesClient(LLMClient):
                             "input": item["arguments"],
                         }
                     )
-                elif item["type"] == "tool_result":
+                elif item["type"] == "tool_result.done":
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
@@ -224,77 +220,111 @@ class AntMessagesClient(LLMClient):
 
         return ant_messages
 
-    def transform_model_output_to_uni_event(self, model_output: BetaRawMessageStreamEvent) -> UniEvent:
+    def transform_model_output_to_client_parts(self, model_output: BetaRawMessageStreamEvent) -> list[ClientPart]:
         """
-        Transform a Messages API streaming event to universal event format.
-
-        NOTE: the Messages API always has only one content item per event.
+        Transform one Messages API stream event into client parts, keyed by content block index.
 
         Args:
             model_output: Messages API streaming event
 
         Returns:
-            Universal event dictionary
+            The parts the event carries, none when it carries nothing universal
         """
-        event_type: EventType | None = None
-        content_items: list[PartialContentItem] = []
-        usage_metadata: UsageMetadata | None = None
-        finish_reason: FinishReason | None = None
-
         ant_event_type = model_output.type
         if ant_event_type == "content_block_start":
-            event_type = "start"
+            key = str(model_output.index)
             block = model_output.content_block
             if block.type == "tool_use":
-                content_items.append(
-                    {"type": "partial_tool_call", "name": block.name, "arguments": "", "tool_call_id": block.id}
-                )
+                return [
+                    {
+                        "type": "delta",
+                        "key": key,
+                        "item": {
+                            "type": "tool_call.delta",
+                            "name": block.name,
+                            "arguments": "",
+                            "tool_call_id": block.id,
+                        },
+                    }
+                ]
             elif block.type == "redacted_thinking":
-                content_items.append(
-                    {"type": "thinking", "thinking": REDACTED_THINKING, "fidelity": {"signature": block.data}}
-                )
+                return [
+                    {
+                        "type": "delta",
+                        "key": key,
+                        "item": {
+                            "type": "thinking.delta",
+                            "thinking": REDACTED_THINKING,
+                            "fidelity": {"signature": block.data},
+                        },
+                    }
+                ]
+
+            return []
 
         elif ant_event_type == "content_block_delta":
-            event_type = "delta"
+            key = str(model_output.index)
             delta = model_output.delta
             if delta.type == "thinking_delta":
-                content_items.append({"type": "thinking", "thinking": delta.thinking})
+                return [{"type": "delta", "key": key, "item": {"type": "thinking.delta", "thinking": delta.thinking}}]
             elif delta.type == "text_delta":
-                content_items.append({"type": "text", "text": delta.text})
+                return [{"type": "delta", "key": key, "item": {"type": "text.delta", "text": delta.text}}]
             elif delta.type == "input_json_delta":
-                content_items.append(
-                    {"type": "partial_tool_call", "name": "", "arguments": delta.partial_json, "tool_call_id": ""}
-                )
+                return [
+                    {
+                        "type": "delta",
+                        "key": key,
+                        "item": {
+                            "type": "tool_call.delta",
+                            "name": "",
+                            "arguments": delta.partial_json,
+                            "tool_call_id": "",
+                        },
+                    }
+                ]
             elif delta.type == "signature_delta":
-                content_items.append({"type": "thinking", "thinking": "", "fidelity": {"signature": delta.signature}})
+                # the signature closes the thinking block it belongs to
+                return [
+                    {
+                        "type": "delta",
+                        "key": key,
+                        "item": {"type": "thinking.delta", "thinking": "", "fidelity": {"signature": delta.signature}},
+                    }
+                ]
+
+            return []
 
         elif ant_event_type == "content_block_stop":
-            event_type = "stop"
+            return [{"type": "done", "key": str(model_output.index)}]
 
         elif ant_event_type == "message_start":
-            event_type = "start"
-            message = model_output.message
-            if getattr(message, "usage", None):
-                cache_creation_tokens = message.usage.cache_creation_input_tokens or 0
-                usage_metadata = {
-                    "cached_tokens": message.usage.cache_read_input_tokens,
-                    "prompt_tokens": message.usage.input_tokens + cache_creation_tokens,
-                    "thoughts_tokens": None,
-                    "response_tokens": None,
+            usage = getattr(model_output.message, "usage", None)
+            if not usage:
+                return []
+
+            cache_creation_tokens = usage.cache_creation_input_tokens or 0
+            return [
+                {
+                    "type": "finish",
+                    "usage_metadata": {
+                        "cached_tokens": usage.cache_read_input_tokens,
+                        "prompt_tokens": usage.input_tokens + cache_creation_tokens,
+                        "thoughts_tokens": None,
+                        "response_tokens": None,
+                    },
                 }
+            ]
 
         elif ant_event_type == "message_delta":
-            event_type = "stop"
-            delta = model_output.delta
-            if getattr(delta, "stop_reason", None):
-                stop_reason_mapping = {
-                    "end_turn": "stop",
-                    "max_tokens": "length",
-                    "stop_sequence": "stop",
-                    "tool_use": "tool_call",
-                }
-                finish_reason = stop_reason_mapping.get(delta.stop_reason, "unknown")
+            stop_reason_mapping = {
+                "end_turn": "stop",
+                "max_tokens": "length",
+                "stop_sequence": "stop",
+                "tool_use": "tool_call",
+            }
+            stop_reason = getattr(model_output.delta, "stop_reason", None)
 
+            usage_metadata: UsageMetadata | None = None
             usage = getattr(model_output, "usage", None)
             if usage:
                 # gateways report zero usage in message_start and the full counts here, so the
@@ -306,20 +336,28 @@ class AntMessagesClient(LLMClient):
 
                 output_details = getattr(usage, "output_tokens_details", None)
                 thinking_tokens = getattr(output_details, "thinking_tokens", None) if output_details else None
-                usage_metadata = {
-                    "cached_tokens": usage.cache_read_input_tokens,
-                    "prompt_tokens": prompt_tokens,
-                    "thoughts_tokens": thinking_tokens,
-                    "response_tokens": usage.output_tokens - (thinking_tokens or 0),
+                usage_metadata = fix_openrouter_usage_metadata(
+                    {
+                        "cached_tokens": usage.cache_read_input_tokens,
+                        "prompt_tokens": prompt_tokens,
+                        "thoughts_tokens": thinking_tokens,
+                        "response_tokens": usage.output_tokens - (thinking_tokens or 0),
+                    },
+                    str(self._client.base_url),
+                )
+
+            return [
+                {
+                    "type": "finish",
+                    "finish_reason": stop_reason_mapping.get(stop_reason, "unknown") if stop_reason else None,
+                    "usage_metadata": usage_metadata,
                 }
+            ]
 
-        elif ant_event_type == "message_stop":
-            event_type = "stop"
-
-        elif ant_event_type in ["text", "thinking", "signature", "input_json", "ping"]:
+        elif ant_event_type in ["message_stop", "text", "thinking", "signature", "input_json", "ping"]:
             # the SDK drops the "ping" heartbeat at the SSE layer; it reaches here only from
             # gateways that relabel it onto another event
-            event_type = "unused"
+            return []
 
         elif is_debug_enabled():
             raise ValueError(f"Unknown output: {model_output}")
@@ -327,21 +365,13 @@ class AntMessagesClient(LLMClient):
         else:
             # a gateway injects its own events (heartbeats, cost tickers) into the stream, and
             # killing a long generation over one costs more than dropping it
-            event_type = "unused"
-
-        return {
-            "role": "assistant",
-            "event_type": event_type,
-            "content_items": content_items,
-            "usage_metadata": usage_metadata,
-            "finish_reason": finish_reason,
-        }
+            return []
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         """Stream generate using an Anthropic Messages-compatible API with unified conversion methods."""
         # Use unified config conversion
         ant_config = self.transform_uni_config_to_model_config(config)
@@ -349,89 +379,10 @@ class AntMessagesClient(LLMClient):
         # Use unified message conversion
         ant_messages = self.transform_uni_message_to_model_input(messages)
 
-        # Stream generate
-        partial_tool_call = {}
-        partial_usage = {}
         stream = await self._client.beta.messages.create(**ant_config, messages=ant_messages)
         async for event in stream:
-            event = self.transform_model_output_to_uni_event(event)
-            if event["event_type"] == "start":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        # initialize partial_tool_call
-                        partial_tool_call = {
-                            "name": item["name"],
-                            "arguments": "",
-                            "tool_call_id": item["tool_call_id"],
-                        }
-
-                if event["content_items"]:
-                    yield event
-
-                if event["usage_metadata"] is not None:
-                    # initialize partial_usage
-                    partial_usage = {
-                        "prompt_tokens": event["usage_metadata"]["prompt_tokens"],
-                        "cached_tokens": event["usage_metadata"]["cached_tokens"],
-                    }
-
-            elif event["event_type"] == "delta":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        # update partial_tool_call
-                        partial_tool_call["arguments"] += item["arguments"]
-
-                yield event
-
-            elif event["event_type"] == "stop":
-                if "name" in partial_tool_call and "arguments" in partial_tool_call:
-                    # finish partial_tool_call
-                    yield {
-                        "role": "assistant",
-                        "event_type": "delta",
-                        "content_items": [
-                            {
-                                "type": "tool_call",
-                                "name": partial_tool_call["name"],
-                                "arguments": parse_tool_call_arguments(
-                                    partial_tool_call["arguments"],
-                                    self.__class__.__name__,
-                                    partial_tool_call["name"],
-                                    partial_tool_call["tool_call_id"],
-                                ),
-                                "tool_call_id": partial_tool_call["tool_call_id"],
-                            }
-                        ],
-                        "usage_metadata": None,
-                        "finish_reason": None,
-                    }
-                    partial_tool_call = {}
-
-                if event["usage_metadata"] is not None:
-                    # finish partial_usage: the message_delta counts win over message_start
-                    delta_usage = event["usage_metadata"]
-                    usage_metadata = {
-                        "prompt_tokens": (
-                            delta_usage["prompt_tokens"]
-                            if delta_usage["prompt_tokens"] is not None
-                            else partial_usage.get("prompt_tokens")
-                        ),
-                        "cached_tokens": (
-                            delta_usage["cached_tokens"]
-                            if delta_usage["cached_tokens"] is not None
-                            else partial_usage.get("cached_tokens")
-                        ),
-                        "thoughts_tokens": delta_usage["thoughts_tokens"],
-                        "response_tokens": delta_usage["response_tokens"],
-                    }
-                    yield {
-                        "role": "assistant",
-                        "event_type": "stop",
-                        "content_items": [],
-                        "usage_metadata": fix_openrouter_usage_metadata(usage_metadata, str(self._client.base_url)),
-                        "finish_reason": event["finish_reason"],
-                    }
-                    partial_usage = {}
+            for part in self.transform_model_output_to_client_parts(event):
+                yield part
 
     async def list_models(self) -> list[str]:
         """
