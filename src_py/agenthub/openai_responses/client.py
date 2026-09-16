@@ -19,19 +19,14 @@ from typing import Any, AsyncIterator
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 
-from ..base_client import LLMClient
-from ..errors import UnsupportedParameterError, parse_tool_call_arguments
+from ..base_client import ClientPart, LLMClient
+from ..errors import UnsupportedParameterError
 from ..types import (
-    EventType,
-    FinishReason,
-    PartialContentItem,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
     UniConfig,
-    UniEvent,
     UniMessage,
-    UsageMetadata,
 )
 from ..utils import is_debug_enabled, openai_image_detail
 
@@ -153,7 +148,7 @@ class OpenaiResponsesClient(LLMClient):
                 # text collected so far is flushed first to keep the original order: a server that
                 # merges a function call into the adjacent assistant message rejects a call whose
                 # output does not follow it (DeepSeek answers "No tool output found for tool call")
-                if item["type"] not in ("text", "image_url") and content_items:
+                if item["type"] not in ("text.done", "image_url.done") and content_items:
                     # Every turn goes back as a typed message item — the Responses API's EasyInputMessage
                     # shape, where type "message" is valid for any role. A vLLM-style Responses server
                     # answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn that
@@ -166,7 +161,7 @@ class OpenaiResponsesClient(LLMClient):
                     input_list.append(entry)
                     content_items = []
 
-                if item["type"] == "text":
+                if item["type"] == "text.done":
                     phase = (item.get("fidelity") or {}).get("phase")
                     if msg["role"] == "assistant" and phase:  # split different phases
                         if last_phase is not None and last_phase != phase and content_items:
@@ -181,9 +176,9 @@ class OpenaiResponsesClient(LLMClient):
                         content_items.append({"type": "input_text", "text": item["text"]})
                     else:
                         content_items.append({"type": "output_text", "text": item["text"]})
-                elif item["type"] == "image_url":
+                elif item["type"] == "image_url.done":
                     content_items.append(self._convert_image_url(item["image_url"]))
-                elif item["type"] == "thinking":
+                elif item["type"] == "thinking.done":
                     # the wire shape differs by server: OpenAI-style servers stream summaries and
                     # demand the summary key back (with encrypted_content preserved), while
                     # DeepSeek/Z.AI/MiniMax-style servers accept a reasoning item rebuilt from the
@@ -201,7 +196,7 @@ class OpenaiResponsesClient(LLMClient):
                             reasoning[key] = fidelity[key]
 
                     input_list.append(reasoning)
-                elif item["type"] == "tool_call":
+                elif item["type"] == "tool_call.done":
                     input_list.append(
                         {
                             "type": "function_call",
@@ -210,7 +205,7 @@ class OpenaiResponsesClient(LLMClient):
                             "arguments": json.dumps(item["arguments"], ensure_ascii=False),
                         }
                     )
-                elif item["type"] == "tool_result":
+                elif item["type"] == "tool_result.done":
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
@@ -241,97 +236,128 @@ class OpenaiResponsesClient(LLMClient):
 
         return input_list
 
-    def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
+    def transform_model_output_to_client_parts(self, model_output: ResponseStreamEvent) -> list[ClientPart]:
         """
-        Transform OpenAI Responses-compatible streaming event to universal event format.
+        Transform one OpenAI Responses-compatible streaming event into client parts, keyed by output item id.
 
         Args:
             model_output: OpenAI Responses API streaming event
 
         Returns:
-            Universal event dictionary
+            The parts the event carries, none when it carries nothing universal
         """
-        event_type: EventType | None = None
-        content_items: list[PartialContentItem] = []
-        usage_metadata: UsageMetadata | None = None
-        finish_reason: FinishReason | None = None
-
         openai_event_type = model_output.type
         if openai_event_type == "response.output_text.delta":
-            event_type = "delta"
-            content_items.append({"type": "text", "text": model_output.delta})
+            return [
+                {
+                    "type": "delta",
+                    "key": getattr(model_output, "item_id", None),
+                    "item": {"type": "text.delta", "text": model_output.delta},
+                }
+            ]
 
         elif openai_event_type in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
-            event_type = "delta"
-            content_items.append({"type": "thinking", "thinking": model_output.delta})
+            return [
+                {
+                    "type": "delta",
+                    "key": getattr(model_output, "item_id", None),
+                    "item": {"type": "thinking.delta", "thinking": model_output.delta},
+                }
+            ]
 
         elif openai_event_type == "response.output_item.added":
-            if model_output.item.type == "function_call":
-                event_type = "start"
-                content_items.append(
+            # every item is announced with a delta, empty unless it carries the call or the phase,
+            # so a fragment a server sends without its item id belongs to the item announced last
+            item = model_output.item
+            if item.type == "function_call":
+                return [
                     {
-                        "type": "partial_tool_call",
-                        "name": model_output.item.name,
-                        "arguments": "",
-                        "tool_call_id": model_output.item.call_id,
-                        "item_id": model_output.item.id,
+                        "type": "delta",
+                        # a server that sends no item id still sends the call id
+                        "key": item.id or item.call_id,
+                        "item": {
+                            "type": "tool_call.delta",
+                            "name": item.name,
+                            "arguments": "",
+                            "tool_call_id": item.call_id,
+                        },
                     }
-                )
-            elif model_output.item.type == "message" and getattr(model_output.item, "phase", None):
-                event_type = "delta"
-                content_items.append({"type": "text", "text": "", "fidelity": {"phase": model_output.item.phase}})
-            else:
-                event_type = "unused"
+                ]
+            elif item.type == "message":
+                phase = getattr(item, "phase", None)
+                return [
+                    {
+                        "type": "delta",
+                        "key": getattr(item, "id", None),
+                        "item": {"type": "text.delta", "text": "", "fidelity": {"phase": phase}}
+                        if phase
+                        else {"type": "text.delta", "text": ""},
+                    }
+                ]
+            elif item.type == "reasoning":
+                return [
+                    {
+                        "type": "delta",
+                        "key": getattr(item, "id", None),
+                        "item": {"type": "thinking.delta", "thinking": ""},
+                    }
+                ]
+
+            return []
 
         elif openai_event_type == "response.output_item.done":
-            if model_output.item.type == "reasoning":
+            item = model_output.item
+            if item.type == "reasoning":
                 # record the wire shape of the completed reasoning item so a replay reproduces
                 # the channel that carried the thinking plus the fields the server demands back
-                event_type = "delta"
                 fidelity = {}
-                if getattr(model_output.item, "summary", None):
+                if getattr(item, "summary", None):
                     fidelity["channel"] = "summary"
                 for key in ("encrypted_content", "signature", "format"):
-                    if getattr(model_output.item, key, None) is not None:
-                        fidelity[key] = getattr(model_output.item, key)
+                    if getattr(item, key, None) is not None:
+                        fidelity[key] = getattr(item, key)
 
-                content_items.append({"type": "thinking", "thinking": "", "fidelity": fidelity})
-            else:
-                event_type = "unused"
+                return [
+                    {
+                        "type": "delta",
+                        "key": getattr(item, "id", None),
+                        "item": {"type": "thinking.delta", "thinking": "", "fidelity": fidelity},
+                    },
+                    {"type": "done", "key": getattr(item, "id", None)},
+                ]
+            elif item.type == "function_call":
+                return [{"type": "done", "key": item.id or item.call_id}]
+            elif item.type == "message":
+                return [{"type": "done", "key": getattr(item, "id", None)}]
+
+            return []
 
         elif openai_event_type == "response.function_call_arguments.delta":
-            event_type = "delta"
-            content_items.append(
+            return [
                 {
-                    "type": "partial_tool_call",
-                    "name": "",
-                    "arguments": model_output.delta,
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
+                    "type": "delta",
+                    "key": getattr(model_output, "item_id", None),
+                    "item": {
+                        "type": "tool_call.delta",
+                        "name": "",
+                        "arguments": model_output.delta,
+                        "tool_call_id": "",
+                    },
                 }
-            )
+            ]
 
         elif openai_event_type == "response.function_call_arguments.done":
-            # a stop naming the item closes that call
-            event_type = "stop"
-            content_items.append(
-                {
-                    "type": "partial_tool_call",
-                    "name": "",
-                    "arguments": "",
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
-                }
-            )
+            # the call's output_item.done completes it instead: its item still names the call where
+            # a server leaves the item id off this event, and a call whose output_item.done never
+            # arrives is completed when the stream ends
+            return []
 
         elif openai_event_type in ("response.completed", "response.incomplete"):
-            event_type = "stop"
             finish_reason_mapping = {
                 "completed": "stop",
                 "incomplete": "length",
             }
-            finish_reason = finish_reason_mapping.get(model_output.response.status, "unknown")
-
+            usage_metadata = None
             if model_output.response.usage:
                 # some servers drop the detail blocks (e.g. MiniMax on truncation), so default to zero
                 input_details = model_output.response.usage.input_tokens_details
@@ -345,6 +371,14 @@ class OpenaiResponsesClient(LLMClient):
                     "response_tokens": model_output.response.usage.output_tokens - reasoning_tokens,
                 }
 
+            return [
+                {
+                    "type": "finish",
+                    "usage_metadata": usage_metadata,
+                    "finish_reason": finish_reason_mapping.get(model_output.response.status, "unknown"),
+                }
+            ]
+
         elif openai_event_type in (
             "response.created",
             "response.in_progress",
@@ -357,7 +391,7 @@ class OpenaiResponsesClient(LLMClient):
             "response.content_part.done",
             "keepalive",  # gateway heartbeat on long generations; carries no content
         ):
-            event_type = "unused"
+            return []
 
         elif is_debug_enabled():
             raise ValueError(f"Unknown output: {model_output}")
@@ -365,21 +399,13 @@ class OpenaiResponsesClient(LLMClient):
         else:
             # a gateway injects its own events (heartbeats, cost tickers) into the stream, and
             # killing a long generation over one costs more than dropping it
-            event_type = "unused"
-
-        return {
-            "role": "assistant",
-            "event_type": event_type,
-            "content_items": content_items,
-            "usage_metadata": usage_metadata,
-            "finish_reason": finish_reason,
-        }
+            return []
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         """Stream generate using an OpenAI Responses-compatible API with unified conversion methods."""
         # Use unified config conversion
         openai_config = self.transform_uni_config_to_model_config(config)
@@ -387,64 +413,38 @@ class OpenaiResponsesClient(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
-        # server sends none): a gateway may open several before closing any of them.
-        open_tool_calls: dict[str, dict] = {}
-        last_opened = ""
-
-        def key_of(item_id: str | None) -> str:
-            return item_id if item_id in open_tool_calls else last_opened
+        # A server may leave the item ids out. A part without one belongs to the item announced or
+        # streamed last while that item is open and of the same kind, and starts an item of its own
+        # otherwise; an argument fragment whose id names no announced call counts as one without.
+        announced_calls: set[str] = set()
+        last_key = ""
+        last_type = ""
+        unkeyed_items = 0
 
         # Stream generate
         stream = await self._client.responses.create(**openai_config, input=input_list, stream=True)
         async for model_event in stream:
-            event = self.transform_model_output_to_uni_event(model_event)
-            fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
-            if event["event_type"] == "start":
-                for item in fragments:
-                    last_opened = item.get("item_id") or item["tool_call_id"]
-                    open_tool_calls[last_opened] = {
-                        "name": item["name"],
-                        "tool_call_id": item["tool_call_id"],
-                        "arguments": "",
-                    }
-                yield event
-            elif event["event_type"] == "delta":
-                for item in fragments:
-                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
-                    if tool_call is not None:
-                        tool_call["arguments"] += item["arguments"]
-                yield event
-            elif event["event_type"] == "stop":
-                # a stop that names calls closes them; the end of the response closes whatever
-                # a gateway never closed on its own
-                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
-                for key in closing:
-                    tool_call = open_tool_calls.pop(key, None)
-                    if tool_call is None:
+            for part in self.transform_model_output_to_client_parts(model_event):
+                if part["type"] == "delta":
+                    item = part["item"]
+                    if item["type"] == "tool_call.delta" and item["tool_call_id"]:
+                        announced_calls.add(part["key"])
+                    elif not part["key"] or (item["type"] == "tool_call.delta" and part["key"] not in announced_calls):
+                        if last_type == item["type"]:
+                            part["key"] = last_key
+                        else:
+                            part["key"] = f"unkeyed-{unkeyed_items}"
+                            unkeyed_items += 1
+                    last_key = part["key"]
+                    last_type = item["type"]
+                elif part["type"] == "done":
+                    if not part["key"] and not last_key:
                         continue
-                    yield {
-                        "role": "assistant",
-                        "event_type": "delta",
-                        "content_items": [
-                            {
-                                "type": "tool_call",
-                                "name": tool_call["name"],
-                                "arguments": parse_tool_call_arguments(
-                                    tool_call["arguments"],
-                                    self.__class__.__name__,
-                                    tool_call["name"],
-                                    tool_call["tool_call_id"],
-                                ),
-                                "tool_call_id": tool_call["tool_call_id"],
-                            }
-                        ],
-                        "usage_metadata": None,
-                        "finish_reason": None,
-                    }
-
-                if event["finish_reason"] or event["usage_metadata"]:
-                    yield event
+                    part["key"] = part["key"] or last_key
+                    if part["key"] == last_key:
+                        last_key = ""
+                        last_type = ""
+                yield part
 
     async def list_models(self) -> list[str]:
         """

@@ -18,18 +18,14 @@ import type {
   ResponseStreamEvent,
   ResponseCreateParamsStreaming,
 } from "openai/resources/responses/responses";
-import { LLMClient } from "../baseClient";
-import { parseToolCallArguments, UnsupportedParameterError } from "../errors";
+import { ClientPart, LLMClient } from "../baseClient";
+import { UnsupportedParameterError } from "../errors";
 import {
-  EventType,
   FinishReason,
-  PartialContentItem,
-  PartialToolCallContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
-  UniEvent,
   UniMessage,
   UsageMetadata,
 } from "../types";
@@ -213,8 +209,8 @@ export class DeepSeekV4Client extends LLMClient {
         // whose output does not follow it with "No tool output found for tool call"
         // (verified live 2026-08-21)
         if (
-          item.type !== "text" &&
-          item.type !== "image_url" &&
+          item.type !== "text.done" &&
+          item.type !== "image_url.done" &&
           contentItems.length > 0
         ) {
           // Every turn goes back as a typed message item — the Responses API's EasyInputMessage
@@ -231,13 +227,13 @@ export class DeepSeekV4Client extends LLMClient {
           contentItems.length = 0;
         }
 
-        if (item.type === "text") {
+        if (item.type === "text.done") {
           if (msg.role === "user") {
             contentItems.push({ type: "input_text", text: item.text });
           } else {
             contentItems.push({ type: "output_text", text: item.text });
           }
-        } else if (item.type === "image_url") {
+        } else if (item.type === "image_url.done") {
           if (!supportsImage) {
             throw new Error(
               `DeepSeek ${this._model} does not support image inputs.`,
@@ -245,7 +241,7 @@ export class DeepSeekV4Client extends LLMClient {
           }
 
           contentItems.push({ type: "input_image", image_url: item.image_url });
-        } else if (item.type === "thinking") {
+        } else if (item.type === "thinking.done") {
           // DeepSeek carries the chain of thought as plain reasoning_text and ignores the
           // summary and encrypted_content channels, so the item is rebuilt from the text
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -257,14 +253,14 @@ export class DeepSeekV4Client extends LLMClient {
           }
 
           inputList.push(reasoning);
-        } else if (item.type === "tool_call") {
+        } else if (item.type === "tool_call.done") {
           inputList.push({
             type: "function_call",
             call_id: item.tool_call_id,
             name: item.name,
             arguments: JSON.stringify(item.arguments),
           });
-        } else if (item.type === "tool_result") {
+        } else if (item.type === "tool_result.done") {
           if (!item.tool_call_id) {
             throw new Error("tool_call_id is required for tool result.");
           }
@@ -316,67 +312,100 @@ export class DeepSeekV4Client extends LLMClient {
   }
 
   /**
-   * Transform DeepSeek streaming event to universal event format.
+   * Transform one DeepSeek stream event into client parts, keyed by output item id.
    */
-  transformModelOutputToUniEvent(modelOutput: ResponseStreamEvent): UniEvent {
-    let eventType: EventType | null = null;
-    const contentItems: PartialContentItem[] = [];
-    let usageMetadata: UsageMetadata | null = null;
-    let finishReason: FinishReason | null = null;
-
+  transformModelOutputToClientParts(
+    modelOutput: ResponseStreamEvent,
+  ): ClientPart[] {
     const deepseekEventType = modelOutput.type;
     if (deepseekEventType === "response.output_text.delta") {
-      eventType = "delta";
-      contentItems.push({ type: "text", text: modelOutput.delta });
+      return [
+        {
+          type: "delta",
+          key: modelOutput.item_id,
+          item: { type: "text.delta", text: modelOutput.delta },
+        },
+      ];
     } else if (deepseekEventType === "response.reasoning_text.delta") {
-      eventType = "delta";
-      contentItems.push({ type: "thinking", thinking: modelOutput.delta });
+      return [
+        {
+          type: "delta",
+          key: modelOutput.item_id,
+          item: { type: "thinking.delta", thinking: modelOutput.delta },
+        },
+      ];
     } else if (deepseekEventType === "response.output_item.added") {
+      // every item is announced with a delta, empty unless it carries the call, so a fragment
+      // a server sends without its item id belongs to the item announced last
       const item = modelOutput.item;
       if (item.type === "function_call") {
-        eventType = "start";
-        contentItems.push({
-          type: "partial_tool_call",
-          name: item.name,
-          arguments: "",
-          tool_call_id: item.call_id,
-          item_id: item.id,
-        });
-      } else {
-        eventType = "unused";
+        return [
+          {
+            type: "delta",
+            // a server that sends no item id still sends the call id
+            key: item.id || item.call_id,
+            item: {
+              type: "tool_call.delta",
+              name: item.name,
+              arguments: "",
+              tool_call_id: item.call_id,
+            },
+          },
+        ];
+      } else if (item.type === "message") {
+        return [
+          {
+            type: "delta",
+            key: item.id,
+            item: { type: "text.delta", text: "" },
+          },
+        ];
+      } else if (item.type === "reasoning") {
+        return [
+          {
+            type: "delta",
+            key: item.id,
+            item: { type: "thinking.delta", thinking: "" },
+          },
+        ];
       }
+      return [];
+    } else if (deepseekEventType === "response.output_item.done") {
+      const item = modelOutput.item;
+      if (item.type === "function_call") {
+        return [{ type: "done", key: item.id || item.call_id }];
+      } else if (item.type === "message" || item.type === "reasoning") {
+        return [{ type: "done", key: item.id }];
+      }
+      return [];
     } else if (deepseekEventType === "response.function_call_arguments.delta") {
-      eventType = "delta";
-      contentItems.push({
-        type: "partial_tool_call",
-        name: "",
-        arguments: modelOutput.delta,
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
-      });
+      return [
+        {
+          type: "delta",
+          key: modelOutput.item_id,
+          item: {
+            type: "tool_call.delta",
+            name: "",
+            arguments: modelOutput.delta,
+            tool_call_id: "",
+          },
+        },
+      ];
     } else if (deepseekEventType === "response.function_call_arguments.done") {
-      // a stop naming the item closes that call
-      eventType = "stop";
-      contentItems.push({
-        type: "partial_tool_call",
-        name: "",
-        arguments: "",
-        tool_call_id: "",
-        item_id: modelOutput.item_id,
-      });
+      // the call's output_item.done completes it instead: its item still names the call where
+      // a server leaves the item id off this event, and a call whose output_item.done never
+      // arrives is completed when the stream ends
+      return [];
     } else if (
       deepseekEventType === "response.completed" ||
       deepseekEventType === "response.incomplete"
     ) {
-      eventType = "stop";
       const response = modelOutput.response;
       const finishReasonMapping: { [key: string]: FinishReason } = {
         completed: "stop",
         incomplete: "length",
       };
-      if (response.status) {
-        finishReason = finishReasonMapping[response.status] || "unknown";
-      }
+      let usageMetadata: UsageMetadata | null = null;
       if (response.usage) {
         const cachedTokens =
           response.usage.input_tokens_details?.cached_tokens || 0;
@@ -390,11 +419,19 @@ export class DeepSeekV4Client extends LLMClient {
           response_tokens: response.usage.output_tokens - reasoningTokens,
         };
       }
+      return [
+        {
+          type: "finish",
+          usage_metadata: usageMetadata,
+          finish_reason: response.status
+            ? finishReasonMapping[response.status] || "unknown"
+            : null,
+        },
+      ];
     } else if (
       [
         "response.created",
         "response.in_progress",
-        "response.output_item.done",
         "response.output_text.done",
         "response.reasoning_text.done",
         "response.content_part.added",
@@ -403,22 +440,14 @@ export class DeepSeekV4Client extends LLMClient {
         "keepalive",
       ].includes(deepseekEventType)
     ) {
-      eventType = "unused";
+      return [];
     } else if (isDebugEnabled()) {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     } else {
       // a gateway injects its own events (heartbeats, cost tickers) into the stream, and
       // killing a long generation over one costs more than dropping it
-      eventType = "unused";
+      return [];
     }
-
-    return {
-      role: "assistant",
-      event_type: eventType,
-      content_items: contentItems,
-      usage_metadata: usageMetadata,
-      finish_reason: finishReason,
-    };
   }
 
   /**
@@ -428,22 +457,20 @@ export class DeepSeekV4Client extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniEvent> {
+  }): AsyncGenerator<ClientPart> {
     const deepseekConfig = this.transformUniConfigToModelConfig(options.config);
     const inputList = this.transformUniMessageToModelInput(
       options.messages,
       options.signal,
     );
 
-    // Calls still streaming, keyed by the item id their fragments carry (the call id when a
-    // server sends none): a gateway may open several before closing any of them.
-    const openToolCalls = new Map<
-      string,
-      { name: string; tool_call_id: string; arguments: string }
-    >();
-    let lastOpened = "";
-    const keyOf = (itemId?: string) =>
-      itemId && openToolCalls.has(itemId) ? itemId : lastOpened;
+    // A server may leave the item ids out. A part without one belongs to the item announced or
+    // streamed last while that item is open and of the same kind, and starts an item of its own
+    // otherwise; an argument fragment whose id names no announced call counts as one without.
+    const announcedCalls = new Set<string>();
+    let lastKey = "";
+    let lastType = "";
+    let unkeyedItems = 0;
 
     const params: ResponseCreateParamsStreaming = {
       ...deepseekConfig,
@@ -455,66 +482,31 @@ export class DeepSeekV4Client extends LLMClient {
       signal: options.signal,
     });
     for await (const event of stream) {
-      const uniEvent = this.transformModelOutputToUniEvent(event);
-      const fragments = uniEvent.content_items.filter(
-        (item): item is PartialToolCallContentItem =>
-          item.type === "partial_tool_call",
-      );
-      if (uniEvent.event_type === "start") {
-        for (const item of fragments) {
-          lastOpened = item.item_id || item.tool_call_id;
-          openToolCalls.set(lastOpened, {
-            name: item.name,
-            tool_call_id: item.tool_call_id,
-            arguments: "",
-          });
-        }
-        yield uniEvent;
-      } else if (uniEvent.event_type === "delta") {
-        for (const item of fragments) {
-          const toolCall = openToolCalls.get(keyOf(item.item_id));
-          if (toolCall) {
-            toolCall.arguments += item.arguments;
+      for (const part of this.transformModelOutputToClientParts(event)) {
+        if (part.type === "delta") {
+          const item = part.item;
+          if (item.type === "tool_call.delta" && item.tool_call_id) {
+            announcedCalls.add(part.key);
+          } else if (
+            !part.key ||
+            (item.type === "tool_call.delta" && !announcedCalls.has(part.key))
+          ) {
+            part.key =
+              lastType === item.type ? lastKey : `unkeyed-${unkeyedItems++}`;
           }
-        }
-        yield uniEvent;
-      } else if (uniEvent.event_type === "stop") {
-        // a stop that names calls closes them; the end of the response closes whatever a
-        // gateway never closed on its own
-        const closing =
-          fragments.length > 0
-            ? fragments.map((item) => keyOf(item.item_id))
-            : [...openToolCalls.keys()];
-        for (const key of closing) {
-          const toolCall = openToolCalls.get(key);
-          if (!toolCall) {
+          lastKey = part.key;
+          lastType = item.type;
+        } else if (part.type === "done") {
+          if (!part.key && !lastKey) {
             continue;
           }
-          openToolCalls.delete(key);
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "tool_call",
-                name: toolCall.name,
-                arguments: parseToolCallArguments(
-                  toolCall.arguments,
-                  this.constructor.name,
-                  toolCall.name,
-                  toolCall.tool_call_id,
-                ),
-                tool_call_id: toolCall.tool_call_id,
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
+          part.key = part.key || lastKey;
+          if (part.key === lastKey) {
+            lastKey = "";
+            lastType = "";
+          }
         }
-
-        if (uniEvent.finish_reason || uniEvent.usage_metadata) {
-          yield uniEvent;
-        }
+        yield part;
       }
     }
   }
