@@ -15,12 +15,13 @@
 import { expect, describe, test, afterEach } from "@jest/globals";
 import {
   AutoLLMClient,
-  TextContentItem,
+  EventContentItem,
+  TextDeltaItem,
   UniConfig,
   UniEvent,
   UniMessage,
 } from "../src";
-import { LLMClient } from "../src/baseClient";
+import { assertStreamGrammar } from "./streamGrammar";
 
 type StreamClient = {
   streamingResponse(options: {
@@ -104,7 +105,7 @@ const GEMINI_STREAM_CASES: StreamCase[] = [
 const messages: UniMessage[] = [
   {
     role: "user",
-    content_items: [{ type: "text", text: "Create a memo." }],
+    content_items: [{ type: "text.done", text: "Create a memo." }],
   },
 ];
 
@@ -244,6 +245,7 @@ function messagesStartEvent(): unknown {
 function messagesTextDeltaEvent(text: string): unknown {
   return {
     type: "content_block_delta",
+    index: 0,
     delta: { type: "text_delta", text: text },
   };
 }
@@ -339,11 +341,10 @@ async function collectEvents(
 }
 
 function collectedTexts(events: UniEvent[]): string[] {
-  return events.flatMap((event) =>
-    event.content_items
-      .filter((item): item is TextContentItem => item.type === "text")
-      .map((item) => item.text),
-  );
+  return events
+    .flatMap((event): EventContentItem[] => event.content_items)
+    .filter((item): item is TextDeltaItem => item.type === "text.delta")
+    .map((item) => item.text);
 }
 
 afterEach(() => {
@@ -368,6 +369,7 @@ describe.each(RESPONSES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -376,11 +378,19 @@ describe.each(RESPONSES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        installFakeResponsesStream(client, [unknownEvent(), responsesTextDeltaEvent("Here is"), responsesCompletedEvent()]);
+        expect(
+          client.transformModelOutputToClientParts(unknownEvent()),
+        ).toEqual([]);
+        installFakeResponsesStream(client, [
+          unknownEvent(),
+          responsesTextDeltaEvent("Here is"),
+          responsesCompletedEvent(),
+        ]);
 
         const events = await collectEvents(
           client.streamingResponse({ messages, config: {} }),
         );
+        assertStreamGrammar(events);
         expect(collectedTexts(events)).toEqual(["Here is"]);
         expect(events[events.length - 1].finish_reason).toBe("stop");
       },
@@ -399,6 +409,7 @@ describe.each(RESPONSES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -408,7 +419,10 @@ describe.each(RESPONSES_STREAM_CASES)(
       async (_label, unknownEvent) => {
         process.env.AGENTHUB_DEBUG = "1";
         const client = createAutoClient(testCase);
-        installFakeResponsesStream(client, [unknownEvent(), responsesCompletedEvent()]);
+        installFakeResponsesStream(client, [
+          unknownEvent(),
+          responsesCompletedEvent(),
+        ]);
 
         await expect(
           collectEvents(client.streamingResponse({ messages, config: {} })),
@@ -436,6 +450,7 @@ describe.each(CHAT_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -461,6 +476,7 @@ describe.each(MESSAGES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -469,11 +485,20 @@ describe.each(MESSAGES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        installFakeMessagesStream(client, [unknownEvent(), messagesStartEvent(), messagesTextDeltaEvent("Here is"), messagesStopEvent()]);
+        expect(
+          client.transformModelOutputToClientParts(unknownEvent()),
+        ).toEqual([]);
+        installFakeMessagesStream(client, [
+          unknownEvent(),
+          messagesStartEvent(),
+          messagesTextDeltaEvent("Here is"),
+          messagesStopEvent(),
+        ]);
 
         const events = await collectEvents(
           client.streamingResponse({ messages, config: {} }),
         );
+        assertStreamGrammar(events);
         expect(collectedTexts(events)).toEqual(["Here is"]);
         expect(events[events.length - 1].finish_reason).toBe("stop");
       },
@@ -494,6 +519,7 @@ describe.each(MESSAGES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -503,7 +529,11 @@ describe.each(MESSAGES_STREAM_CASES)(
       async (_label, unknownEvent) => {
         process.env.AGENTHUB_DEBUG = "1";
         const client = createAutoClient(testCase);
-        installFakeMessagesStream(client, [unknownEvent(), messagesStartEvent(), messagesStopEvent()]);
+        installFakeMessagesStream(client, [
+          unknownEvent(),
+          messagesStartEvent(),
+          messagesStopEvent(),
+        ]);
 
         await expect(
           collectEvents(client.streamingResponse({ messages, config: {} })),
@@ -567,9 +597,8 @@ describe.each(GEMINI_STREAM_CASES)(
   },
 );
 
-
-// Every client, driven over the ignorable events its own protocol carries.
-const UNUSED_EVENT_CASES: Array<{
+// Every client, driven over a stream opening with an ignorable event of its own protocol.
+const IGNORABLE_EVENT_CASES: Array<{
   testCase: StreamCase;
   install: (client: StreamClient, events: unknown[]) => void;
   stream: () => unknown[];
@@ -586,7 +615,11 @@ const UNUSED_EVENT_CASES: Array<{
   ...CHAT_STREAM_CASES.map((testCase) => ({
     testCase,
     install: installFakeChatStream,
-    stream: () => [chatKeepaliveChunk(1), chatTextChunk("Here is"), chatStopChunk()],
+    stream: () => [
+      chatKeepaliveChunk(1),
+      chatTextChunk("Here is"),
+      chatStopChunk(),
+    ],
   })),
   ...MESSAGES_STREAM_CASES.map((testCase) => ({
     testCase,
@@ -601,93 +634,32 @@ const UNUSED_EVENT_CASES: Array<{
   ...GEMINI_STREAM_CASES.map((testCase) => ({
     testCase,
     install: installFakeGeminiStream,
-    stream: () => [geminiKeepaliveChunk(), geminiTextChunk("Here is"), geminiStopChunk()],
+    stream: () => [
+      geminiKeepaliveChunk(),
+      geminiTextChunk("Here is"),
+      geminiStopChunk(),
+    ],
   })),
 ];
 
-/** A client that lets its own "unused" bookkeeping escape, which no client may do. */
-class LeakyClient extends LLMClient {
-  protected _model = "leaky-1";
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  transformUniConfigToModelConfig(config: UniConfig): any {
-    return config;
-  }
-
-  transformUniMessageToModelInput(messages: UniMessage[]): UniMessage[] {
-    return messages;
-  }
-
-  transformModelOutputToUniEvent(modelOutput: UniEvent): UniEvent {
-    return modelOutput;
-  }
-
-  async *_streamingResponseInternal(): AsyncGenerator<UniEvent> {
-    yield {
-      role: "assistant",
-      event_type: "unused",
-      content_items: [],
-      usage_metadata: null,
-      finish_reason: null,
-    };
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: [{ type: "text", text: "Here is" }],
-      usage_metadata: null,
-      finish_reason: null,
-    };
-    yield {
-      role: "assistant",
-      event_type: "stop",
-      content_items: [],
-      usage_metadata: {
-        cached_tokens: 0,
-        prompt_tokens: 1,
-        thoughts_tokens: 0,
-        response_tokens: 1,
-      },
-      finish_reason: "stop",
-    };
-  }
-
-  async listModels(): Promise<string[]> {
-    return [this._model];
-  }
-}
-
-describe.each(UNUSED_EVENT_CASES)(
-  "Unused event handling for $testCase.clientType",
+describe.each(IGNORABLE_EVENT_CASES)(
+  "Ignorable event handling for $testCase.clientType",
   ({ testCase, install, stream }) => {
-    test("never yields an unused event", async () => {
-      // with the debug guard on, an "unused" event that reached the caller throws instead of passing
+    test("turns an ignorable event into no parts and streams only deltas and a stop", async () => {
+      // with the debug guard on, an event the client did not know would throw instead of passing
       process.env.AGENTHUB_DEBUG = "1";
       const client = createAutoClient(testCase);
+      const [ignorableEvent] = stream();
+      expect(client.transformModelOutputToClientParts(ignorableEvent)).toEqual(
+        [],
+      );
       install(client, stream());
 
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
-      expect(events.every((event) => event.event_type !== "unused")).toBe(true);
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is"]);
     });
   },
 );
-
-describe("Base client unused event guarantee", () => {
-  test("drops an escaped unused event", async () => {
-    const events = await collectEvents(
-      new LeakyClient().streamingResponse({ messages, config: {} }),
-    );
-
-    expect(events.map((event) => event.event_type)).toEqual(["delta", "stop"]);
-  });
-
-  test("rejects an escaped unused event with AGENTHUB_DEBUG set", async () => {
-    process.env.AGENTHUB_DEBUG = "1";
-
-    await expect(
-      collectEvents(new LeakyClient().streamingResponse({ messages, config: {} })),
-    ).rejects.toThrow("unused event");
-  });
-});

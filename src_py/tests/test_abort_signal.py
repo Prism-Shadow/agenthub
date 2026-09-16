@@ -19,8 +19,8 @@ from typing import Any, AsyncIterator
 import pytest
 
 from agenthub.abort_signal import AbortSignal, run_with_abort
-from agenthub.base_client import LLMClient
-from agenthub.types import UniConfig, UniEvent, UniMessage
+from agenthub.base_client import ClientPart, LLMClient
+from agenthub.types import UniConfig, UniMessage
 
 
 class SlowStreamingClient(LLMClient):
@@ -36,8 +36,8 @@ class SlowStreamingClient(LLMClient):
     def transform_uni_message_to_model_input(self, messages: list[UniMessage]) -> list[UniMessage]:
         return messages
 
-    def transform_model_output_to_uni_event(self, model_output: UniEvent) -> UniEvent:
-        return model_output
+    def transform_model_output_to_client_parts(self, model_output: ClientPart) -> list[ClientPart]:
+        return [model_output]
 
     async def list_models(self) -> list[str]:
         return []
@@ -46,7 +46,7 @@ class SlowStreamingClient(LLMClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         self.started.set()
         try:
             await asyncio.sleep(60)
@@ -54,9 +54,7 @@ class SlowStreamingClient(LLMClient):
             self.cleaned.set()
 
         yield {
-            "role": "assistant",
-            "event_type": "stop",
-            "content_items": [],
+            "type": "finish",
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": None,
@@ -64,7 +62,6 @@ class SlowStreamingClient(LLMClient):
                 "response_tokens": None,
             },
             "finish_reason": "stop",
-            "created_at": 0,
         }
 
 
@@ -79,8 +76,8 @@ class MultiEventStreamingClient(LLMClient):
     def transform_uni_message_to_model_input(self, messages: list[UniMessage]) -> list[UniMessage]:
         return messages
 
-    def transform_model_output_to_uni_event(self, model_output: UniEvent) -> UniEvent:
-        return model_output
+    def transform_model_output_to_client_parts(self, model_output: ClientPart) -> list[ClientPart]:
+        return [model_output]
 
     async def list_models(self) -> list[str]:
         return []
@@ -89,23 +86,14 @@ class MultiEventStreamingClient(LLMClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         for text in ("hello", " world"):
             await asyncio.sleep(0)
-            yield {
-                "role": "assistant",
-                "event_type": "delta",
-                "content_items": [{"type": "text", "text": text}],
-                "usage_metadata": None,
-                "finish_reason": None,
-                "created_at": 0,
-            }
+            yield {"type": "delta", "key": "0", "item": {"type": "text.delta", "text": text}}
 
         await asyncio.sleep(0)
         yield {
-            "role": "assistant",
-            "event_type": "stop",
-            "content_items": [],
+            "type": "finish",
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": 1,
@@ -113,7 +101,6 @@ class MultiEventStreamingClient(LLMClient):
                 "response_tokens": 2,
             },
             "finish_reason": "stop",
-            "created_at": 0,
         }
 
 
@@ -136,7 +123,7 @@ class StreamCreationTrackingClient(MultiEventStreamingClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         self.stream_created = True
         return super()._streaming_response_internal(messages, config)
 
@@ -259,7 +246,7 @@ async def test_run_with_abort_cancels_existing_task_when_signal_is_already_abort
 async def test_streaming_response_cancels_current_iteration_when_signal_aborts() -> None:
     client = SlowStreamingClient()
     signal = AbortSignal()
-    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text", "text": "hello"}]}]
+    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text.done", "text": "hello"}]}]
     stream = client.streaming_response(messages=messages, config={}, signal=signal)
 
     task = asyncio.create_task(anext(stream))
@@ -277,11 +264,12 @@ async def test_streaming_response_cancels_current_iteration_when_signal_aborts()
 async def test_streaming_response_reuses_one_abort_waiter_for_whole_stream() -> None:
     client = MultiEventStreamingClient()
     signal = CountingAbortSignal()
-    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text", "text": "hello"}]}]
+    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text.done", "text": "hello"}]}]
 
     events = [event async for event in client.streaming_response(messages=messages, config={}, signal=signal)]
 
-    assert len(events) == 3
+    # two text deltas, the text done item, then the stop event
+    assert len(events) == 4
     assert signal.wait_count == 1
 
 
@@ -290,7 +278,7 @@ async def test_streaming_response_does_not_create_stream_when_signal_is_already_
     client = StreamCreationTrackingClient()
     signal = AbortSignal()
     signal.abort("stop")
-    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text", "text": "hello"}]}]
+    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text.done", "text": "hello"}]}]
 
     with pytest.raises(asyncio.CancelledError):
         async for _ in client.streaming_response(messages=messages, config={}, signal=signal):

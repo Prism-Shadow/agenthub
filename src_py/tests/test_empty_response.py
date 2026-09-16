@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+from stream_grammar import assert_stream_grammar
 
 from agenthub import AgentHubError, AutoLLMClient, EmptyResponseError, ToolCallArgumentParseError
 
@@ -159,7 +160,7 @@ def _reasoning_stream(
     return chunks
 
 
-MESSAGES = [{"role": "user", "content_items": [{"type": "text", "text": "Create a memo."}]}]
+MESSAGES = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
 
 
 @pytest.mark.asyncio
@@ -214,7 +215,8 @@ async def test_reasoning_clients_accept_response_with_text_content(case: Reasoni
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
-    texts = [item["text"] for event in events for item in event["content_items"] if item["type"] == "text"]
+    assert_stream_grammar(events)
+    texts = [item["text"] for event in events for item in event["content_items"] if item["type"] == "text.delta"]
     assert texts == ["Here is the memo."]
 
 

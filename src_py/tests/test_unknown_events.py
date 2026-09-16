@@ -17,10 +17,9 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+from stream_grammar import assert_stream_grammar
 
 from agenthub import AutoLLMClient
-from agenthub.base_client import LLMClient
-from agenthub.types import UniConfig, UniEvent, UniMessage
 
 
 @dataclass
@@ -56,7 +55,7 @@ GEMINI_STREAM_CASES = [
     StreamCase(expected_client="Gemini3_8Client", model="gemini-3.8-flash", client_type="gemini-3.8"),
 ]
 
-MESSAGES = [{"role": "user", "content_items": [{"type": "text", "text": "Create a memo."}]}]
+MESSAGES = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
 
 
 def _create_auto_client(case: StreamCase) -> AutoLLMClient:
@@ -180,7 +179,7 @@ def _messages_start_event() -> object:
 
 
 def _messages_text_delta_event(text: str) -> object:
-    return SimpleNamespace(type="content_block_delta", delta=SimpleNamespace(type="text_delta", text=text))
+    return SimpleNamespace(type="content_block_delta", index=0, delta=SimpleNamespace(type="text_delta", text=text))
 
 
 def _messages_stop_event() -> object:
@@ -267,7 +266,7 @@ UNKNOWN_EVENT_IDS = ["in-protocol", "error", "payload"]
 
 
 def _collected_texts(events: list[dict]) -> list[str]:
-    return [item["text"] for event in events for item in event["content_items"] if item["type"] == "text"]
+    return [item["text"] for event in events for item in event["content_items"] if item["type"] == "text.delta"]
 
 
 @pytest.mark.asyncio
@@ -288,6 +287,7 @@ async def test_responses_clients_skip_keepalive_heartbeats(case: StreamCase):
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is", " the memo."]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -308,6 +308,7 @@ async def test_responses_clients_skip_foreign_gateway_events(case: StreamCase):
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is", " the memo."]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -317,12 +318,14 @@ async def test_responses_clients_skip_foreign_gateway_events(case: StreamCase):
 @pytest.mark.parametrize("case", RESPONSES_STREAM_CASES, ids=[case.client_type for case in RESPONSES_STREAM_CASES])
 async def test_responses_clients_skip_unknown_events(case: StreamCase, event_factory: Callable[[], object]):
     client = _create_auto_client(case)
+    assert client.transform_model_output_to_client_parts(event_factory()) == []
     _install_fake_responses_stream(
         client,
         [event_factory(), *[_responses_text_delta_event("Here is"), _responses_completed_event()]],
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is"]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -362,6 +365,7 @@ async def test_chat_clients_skip_keepalive_heartbeats(case: StreamCase):
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is", " the memo."]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -385,6 +389,7 @@ async def test_messages_clients_skip_ping_heartbeats(case: StreamCase):
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is", " the memo."]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -407,6 +412,7 @@ async def test_messages_clients_skip_foreign_gateway_events(case: StreamCase):
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is", " the memo."]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -416,12 +422,14 @@ async def test_messages_clients_skip_foreign_gateway_events(case: StreamCase):
 @pytest.mark.parametrize("case", MESSAGES_STREAM_CASES, ids=[case.client_type for case in MESSAGES_STREAM_CASES])
 async def test_messages_clients_skip_unknown_events(case: StreamCase, event_factory: Callable[[], object]):
     client = _create_auto_client(case)
+    assert client.transform_model_output_to_client_parts(event_factory()) == []
     _install_fake_messages_stream(
         client,
         [event_factory(), *[_messages_start_event(), _messages_text_delta_event("Here is"), _messages_stop_event()]],
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is"]
     assert events[-1]["finish_reason"] == "stop"
 
@@ -494,8 +502,8 @@ async def test_gemini_client_rejects_unknown_parts_in_debug_mode(case: StreamCas
             pass
 
 
-# Every client, driven over the ignorable events its own protocol carries.
-UNUSED_EVENT_CASES = [
+# Every client, driven over a stream opening with an ignorable event of its own protocol.
+IGNORABLE_EVENT_CASES = [
     *[
         (
             case,
@@ -532,84 +540,21 @@ UNUSED_EVENT_CASES = [
 ]
 
 
-class _LeakyClient(LLMClient):
-    """A client that lets its own "unused" bookkeeping escape, which no client may do."""
-
-    _model = "leaky-1"
-
-    def transform_uni_config_to_model_config(self, config: UniConfig) -> UniConfig:
-        return config
-
-    def transform_uni_message_to_model_input(self, messages: list[UniMessage]) -> list[UniMessage]:
-        return messages
-
-    def transform_model_output_to_uni_event(self, model_output: UniEvent) -> UniEvent:
-        return model_output
-
-    async def list_models(self) -> list[str]:
-        return [self._model]
-
-    async def _streaming_response_internal(
-        self, messages: list[UniMessage], config: UniConfig
-    ) -> AsyncIterator[UniEvent]:
-        yield {
-            "role": "assistant",
-            "event_type": "unused",
-            "content_items": [],
-            "usage_metadata": None,
-            "finish_reason": None,
-        }
-        yield {
-            "role": "assistant",
-            "event_type": "delta",
-            "content_items": [{"type": "text", "text": "Here is"}],
-            "usage_metadata": None,
-            "finish_reason": None,
-        }
-        yield {
-            "role": "assistant",
-            "event_type": "stop",
-            "content_items": [],
-            "usage_metadata": {
-                "cached_tokens": 0,
-                "prompt_tokens": 1,
-                "thoughts_tokens": 0,
-                "response_tokens": 1,
-            },
-            "finish_reason": "stop",
-        }
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("case", "installer", "stream"),
-    UNUSED_EVENT_CASES,
-    ids=[case.client_type for case, _installer, _stream in UNUSED_EVENT_CASES],
+    IGNORABLE_EVENT_CASES,
+    ids=[case.client_type for case, _installer, _stream in IGNORABLE_EVENT_CASES],
 )
-async def test_clients_never_yield_unused_events(
+async def test_clients_turn_ignorable_events_into_no_parts(
     case: StreamCase, installer: Callable[[AutoLLMClient, list[object]], None], stream: list[object], monkeypatch
 ):
-    # with the debug guard on, an "unused" event that reached the caller raises instead of passing
+    # with the debug guard on, an event the client did not know would raise instead of passing
     monkeypatch.setenv("AGENTHUB_DEBUG", "1")
     client = _create_auto_client(case)
+    assert client.transform_model_output_to_client_parts(stream[0]) == []
     installer(client, stream)
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
-    assert all(event["event_type"] != "unused" for event in events)
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is"]
-
-
-@pytest.mark.asyncio
-async def test_base_client_drops_an_escaped_unused_event():
-    events = [event async for event in _LeakyClient().streaming_response(MESSAGES, {})]
-
-    assert [event["event_type"] for event in events] == ["delta", "stop"]
-
-
-@pytest.mark.asyncio
-async def test_base_client_rejects_an_escaped_unused_event_in_debug_mode(monkeypatch):
-    monkeypatch.setenv("AGENTHUB_DEBUG", "1")
-
-    with pytest.raises(ValueError, match="unused event"):
-        async for _event in _LeakyClient().streaming_response(MESSAGES, {}):
-            pass
