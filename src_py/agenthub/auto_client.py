@@ -16,7 +16,7 @@ import os
 from typing import Any, AsyncIterator
 
 from .abort_signal import AbortSignal
-from .base_client import LLMClient
+from .base_client import ClientPart, LLMClient
 from .types import UniConfig, UniEvent, UniMessage
 
 
@@ -161,15 +161,15 @@ class AutoLLMClient(LLMClient):
         """Delegate to underlying client's transform_uni_message_to_model_input."""
         return self._client.transform_uni_message_to_model_input(messages)
 
-    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
-        """Delegate to underlying client's transform_model_output_to_uni_event."""
-        return self._client.transform_model_output_to_uni_event(model_output)
+    def transform_model_output_to_client_parts(self, model_output: Any) -> list[ClientPart]:
+        """Delegate to underlying client's transform_model_output_to_client_parts."""
+        return self._client.transform_model_output_to_client_parts(model_output)
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[ClientPart]:
         raise NotImplementedError("Please use streaming_response instead.")
 
     async def streaming_response(
