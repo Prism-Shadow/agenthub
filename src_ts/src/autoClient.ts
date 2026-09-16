@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { LLMClient } from "./baseClient";
+import { ClientPart, LLMClient } from "./baseClient";
 import { Gemini3_8Client } from "./gemini3_8";
 import { Claude5Client } from "./claude5";
 import { GPT6Client } from "./gpt6";
@@ -91,7 +91,9 @@ export class AutoLLMClient extends LLMClient {
    * @returns Instance of the appropriate client
    * @throws Error when the requested client is not yet implemented
    */
-  private _clientClassForModel(clientType: string): LLMClientConstructor | null {
+  private _clientClassForModel(
+    clientType: string,
+  ): LLMClientConstructor | null {
     // every Gemini generation shares the unified client ("gemini-3" also matches the
     // gemini-3.8/gemini-3.7/gemini-3.6/gemini-3.5-flash-lite client types)
     if (
@@ -160,7 +162,9 @@ export class AutoLLMClient extends LLMClient {
     clientType?: string | null,
     defaultHeaders?: Record<string, string>,
   ): LLMClient {
-    const ClientClass = this._clientClassForModel(clientType || model.toLowerCase());
+    const ClientClass = this._clientClassForModel(
+      clientType || model.toLowerCase(),
+    );
     if (ClientClass === null) {
       throw new Error(
         `${clientType} is not supported. ` +
@@ -195,25 +199,18 @@ export class AutoLLMClient extends LLMClient {
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
   /**
-   * Delegate to underlying client's transformModelOutputToUniEvent.
+   * Delegate to underlying client's transformModelOutputToClientParts.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  transformModelOutputToUniEvent(modelOutput: any): UniEvent {
-    return this._client.transformModelOutputToUniEvent(modelOutput);
+  transformModelOutputToClientParts(modelOutput: any): ClientPart[] {
+    return this._client.transformModelOutputToClientParts(modelOutput);
   }
 
   /**
    * Not implemented - use streamingResponse instead.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  async *_streamingResponseInternal(_options: any): AsyncGenerator<UniEvent> {
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: [],
-      usage_metadata: null,
-      finish_reason: null,
-    };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, require-yield
+  async *_streamingResponseInternal(_options: any): AsyncGenerator<ClientPart> {
     throw new Error("Please use streamingResponse instead.");
   }
 
@@ -293,7 +290,8 @@ export class AutoLLMClient extends LLMClient {
     }
 
     return modelIds.filter(
-      (modelId) => this._clientClassForModel(modelId.toLowerCase()) === clientClass,
+      (modelId) =>
+        this._clientClassForModel(modelId.toLowerCase()) === clientClass,
     );
   }
 }

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { UsageMetadata } from "./types";
+
 function previewToolCallArguments(raw: string): string {
   const maxLength = 160;
   if (raw.length <= maxLength) {
@@ -76,8 +78,14 @@ export class UnsupportedOperationError extends AgentHubError {
 export class EmptyResponseError extends AgentHubError {
   readonly client: string;
   readonly finishReason: string | null;
+  // the tokens the rejected response still cost, since no stop event carries them
+  readonly usageMetadata: UsageMetadata | null;
 
-  constructor(args: { client: string; finishReason: string | null }) {
+  constructor(args: {
+    client: string;
+    finishReason: string | null;
+    usageMetadata?: UsageMetadata | null;
+  }) {
     super(
       `${args.client} returned no content other than thinking ` +
         `(finish_reason=${JSON.stringify(args.finishReason)}).`,
@@ -85,6 +93,25 @@ export class EmptyResponseError extends AgentHubError {
     this.name = "EmptyResponseError";
     this.client = args.client;
     this.finishReason = args.finishReason;
+    this.usageMetadata = args.usageMetadata ?? null;
+  }
+}
+
+/**
+ * Raised when a client produces a stream that breaks the streaming protocol: a fragment
+ * after its item was completed, a second different fidelity within one item, a tool call
+ * whose first fragment lacks its name or id, or a fragment of another kind under an item's key.
+ *
+ * It always reports a bug in the client rather than in the provider's output, so it is
+ * raised in every mode instead of being repaired into a stream that breaks the contract.
+ */
+export class StreamProtocolError extends AgentHubError {
+  readonly client: string;
+
+  constructor(args: { client: string; message: string }) {
+    super(`${args.client} broke the streaming protocol: ${args.message}`);
+    this.name = "StreamProtocolError";
+    this.client = args.client;
   }
 }
 

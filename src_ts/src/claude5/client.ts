@@ -19,23 +19,18 @@ import {
   BetaRawMessageStreamEvent,
 } from "@anthropic-ai/sdk/resources/beta/messages";
 import { Stream } from "@anthropic-ai/sdk/core/streaming";
-import { LLMClient } from "../baseClient";
+import { ClientPart, LLMClient } from "../baseClient";
 import {
-  parseToolCallArguments,
   UnsupportedOperationError,
   UnsupportedParameterError,
 } from "../errors";
 import {
-  EventType,
   FinishReason,
-  PartialContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
-  UniEvent,
   UniMessage,
-  UsageMetadata,
 } from "../types";
 import { isDebugEnabled } from "../utils";
 
@@ -315,14 +310,14 @@ export class Claude5Client extends LLMClient {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const contentBlocks: any[] = [];
       for (const item of msg.content_items) {
-        if (item.type === "text") {
+        if (item.type === "text.done") {
           contentBlocks.push({ type: "text", text: item.text });
-        } else if (item.type === "image_url") {
+        } else if (item.type === "image_url.done") {
           const imageUrl = item.image_url;
           contentBlocks.push(
             await this._convertImageUrlToSource(imageUrl, signal),
           );
-        } else if (item.type === "thinking") {
+        } else if (item.type === "thinking.done") {
           if (item.thinking === REDACTED_THINKING) {
             contentBlocks.push({
               type: "redacted_thinking",
@@ -335,14 +330,14 @@ export class Claude5Client extends LLMClient {
               signature: item.fidelity?.signature,
             });
           }
-        } else if (item.type === "tool_call") {
+        } else if (item.type === "tool_call.done") {
           contentBlocks.push({
             type: "tool_use",
             id: item.tool_call_id,
             name: item.name,
             input: item.arguments,
           });
-        } else if (item.type === "tool_result") {
+        } else if (item.type === "tool_result.done") {
           if (!item.tool_call_id) {
             throw new Error("tool_call_id is required for tool result.");
           }
@@ -378,118 +373,153 @@ export class Claude5Client extends LLMClient {
   }
 
   /**
-   * Transform Claude model output to universal event format.
+   * Transform one Claude stream event into client parts, keyed by content block index.
    */
-  transformModelOutputToUniEvent(
+  transformModelOutputToClientParts(
     modelOutput: BetaRawMessageStreamEvent,
-  ): UniEvent {
-    let eventType: EventType | null = null;
-    const contentItems: PartialContentItem[] = [];
-    let usageMetadata: UsageMetadata | null = null;
-    let finishReason: FinishReason | null = null;
-
+  ): ClientPart[] {
     const claudeEventType = modelOutput.type;
     if (claudeEventType === "content_block_start") {
-      eventType = "start";
+      const key = String(modelOutput.index);
       const block = modelOutput.content_block;
       if (block.type === "tool_use") {
-        contentItems.push({
-          type: "partial_tool_call",
-          name: block.name,
-          arguments: "",
-          tool_call_id: block.id,
-        });
+        return [
+          {
+            type: "delta",
+            key,
+            item: {
+              type: "tool_call.delta",
+              name: block.name,
+              arguments: "",
+              tool_call_id: block.id,
+            },
+          },
+        ];
       } else if (block.type === "redacted_thinking") {
-        contentItems.push({
-          type: "thinking",
-          thinking: REDACTED_THINKING,
-          fidelity: { signature: block.data },
-        });
+        return [
+          {
+            type: "delta",
+            key,
+            item: {
+              type: "thinking.delta",
+              thinking: REDACTED_THINKING,
+              fidelity: { signature: block.data },
+            },
+          },
+        ];
       }
+      return [];
     } else if (claudeEventType === "content_block_delta") {
-      eventType = "delta";
+      const key = String(modelOutput.index);
       const delta = modelOutput.delta;
       if (delta.type === "thinking_delta") {
-        contentItems.push({ type: "thinking", thinking: delta.thinking });
+        return [
+          {
+            type: "delta",
+            key,
+            item: { type: "thinking.delta", thinking: delta.thinking },
+          },
+        ];
       } else if (delta.type === "text_delta") {
-        contentItems.push({ type: "text", text: delta.text });
+        return [
+          {
+            type: "delta",
+            key,
+            item: { type: "text.delta", text: delta.text },
+          },
+        ];
       } else if (delta.type === "input_json_delta") {
-        contentItems.push({
-          type: "partial_tool_call",
-          name: "",
-          arguments: delta.partial_json,
-          tool_call_id: "",
-        });
+        return [
+          {
+            type: "delta",
+            key,
+            item: {
+              type: "tool_call.delta",
+              name: "",
+              arguments: delta.partial_json,
+              tool_call_id: "",
+            },
+          },
+        ];
       } else if (delta.type === "signature_delta") {
-        contentItems.push({
-          type: "thinking",
-          thinking: "",
-          fidelity: { signature: delta.signature },
-        });
+        // the signature closes the thinking block it belongs to
+        return [
+          {
+            type: "delta",
+            key,
+            item: {
+              type: "thinking.delta",
+              thinking: "",
+              fidelity: { signature: delta.signature },
+            },
+          },
+        ];
       }
+      return [];
     } else if (claudeEventType === "content_block_stop") {
-      eventType = "stop";
+      return [{ type: "done", key: String(modelOutput.index) }];
     } else if (claudeEventType === "message_start") {
-      eventType = "start";
-      const message = modelOutput.message;
-      if (message.usage) {
-        const cacheCreationTokens =
-          message.usage.cache_creation_input_tokens || 0;
-        usageMetadata = {
-          cached_tokens: message.usage.cache_read_input_tokens,
-          prompt_tokens: message.usage.input_tokens + cacheCreationTokens,
-          thoughts_tokens: null,
-          response_tokens: null,
-        };
+      const usage = modelOutput.message.usage;
+      if (!usage) {
+        return [];
       }
+      const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+      return [
+        {
+          type: "finish",
+          usage_metadata: {
+            cached_tokens: usage.cache_read_input_tokens || null,
+            prompt_tokens: usage.input_tokens + cacheCreationTokens,
+            thoughts_tokens: null,
+            response_tokens: null,
+          },
+        },
+      ];
     } else if (claudeEventType === "message_delta") {
-      eventType = "stop";
-      const delta = modelOutput.delta;
-      if (delta.stop_reason) {
-        const stopReasonMapping: { [key: string]: FinishReason } = {
-          end_turn: "stop",
-          max_tokens: "length",
-          stop_sequence: "stop",
-          tool_use: "tool_call",
-        };
-        finishReason = stopReasonMapping[delta.stop_reason] || "unknown";
-      }
-
-      const usage = modelOutput.usage;
-      if (usage) {
-        // In message_delta, we only update response_tokens
-        usageMetadata = {
-          cached_tokens: null,
-          prompt_tokens: null,
-          thoughts_tokens: null,
-          response_tokens: usage.output_tokens,
-        };
-      }
-    } else if (claudeEventType === "message_stop") {
-      eventType = "stop";
+      const stopReasonMapping: { [key: string]: FinishReason } = {
+        end_turn: "stop",
+        max_tokens: "length",
+        stop_sequence: "stop",
+        tool_use: "tool_call",
+      };
+      const stopReason = modelOutput.delta.stop_reason;
+      return [
+        {
+          type: "finish",
+          finish_reason: stopReason
+            ? stopReasonMapping[stopReason] || "unknown"
+            : null,
+          // message_delta reports the output tokens; the input side came with message_start
+          usage_metadata: modelOutput.usage
+            ? {
+                cached_tokens: null,
+                prompt_tokens: null,
+                thoughts_tokens: null,
+                response_tokens: modelOutput.usage.output_tokens,
+              }
+            : null,
+        },
+      ];
     } else if (
-      ["text", "thinking", "signature", "input_json", "ping"].includes(
-        claudeEventType,
-      )
+      [
+        "message_stop",
+        "text",
+        "thinking",
+        "signature",
+        "input_json",
+        "ping",
+      ].includes(claudeEventType)
     ) {
       // the SDK drops the "ping" heartbeat at the SSE layer; it reaches here only
       // from gateways that relabel it onto another event
-      eventType = "unused";
-        } else if (isDebugEnabled()) {
+      return [];
+    } else if (isDebugEnabled()) {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     } else {
       // a gateway injects its own events (heartbeats, cost tickers) into the stream, and
       // killing a long generation over one costs more than dropping it
-      eventType = "unused";
+      return [];
     }
-
-    return {
-      role: "assistant",
-      event_type: eventType,
-      content_items: contentItems,
-      usage_metadata: usageMetadata,
-      finish_reason: finishReason,
-    };
   }
 
   /**
@@ -499,7 +529,7 @@ export class Claude5Client extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniEvent> {
+  }): AsyncGenerator<ClientPart> {
     const claudeConfig = this.transformUniConfigToModelConfig(options.config);
     const claudeMessages = await this.transformUniMessageToModelInput(
       options.messages,
@@ -535,17 +565,6 @@ export class Claude5Client extends LLMClient {
       }
     }
 
-    // Stream generate
-    const partialToolCall: {
-      name?: string;
-      arguments?: string;
-      tool_call_id?: string;
-    } = {};
-    const partialUsage: {
-      prompt_tokens?: number | null;
-      cached_tokens?: number | null;
-    } = {};
-
     const stream = (await this._client.beta.messages.create(
       {
         ...claudeConfig,
@@ -557,80 +576,7 @@ export class Claude5Client extends LLMClient {
     )) as unknown as Stream<BetaRawMessageStreamEvent>;
 
     for await (const event of stream) {
-      const uniEvent = this.transformModelOutputToUniEvent(event);
-      if (uniEvent.event_type === "start") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.name = item.name;
-            partialToolCall.arguments = "";
-            partialToolCall.tool_call_id = item.tool_call_id;
-          }
-        }
-
-        if (uniEvent.content_items.length > 0) {
-          yield uniEvent;
-        }
-
-        if (uniEvent.usage_metadata !== null) {
-          partialUsage.prompt_tokens = uniEvent.usage_metadata.prompt_tokens;
-          partialUsage.cached_tokens = uniEvent.usage_metadata.cached_tokens;
-        }
-      } else if (uniEvent.event_type === "delta") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.arguments =
-              (partialToolCall.arguments || "") + item.arguments;
-          }
-        }
-
-        yield uniEvent;
-      } else if (uniEvent.event_type === "stop") {
-        if (partialToolCall.name && partialToolCall.arguments !== undefined) {
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "tool_call",
-                name: partialToolCall.name,
-                arguments: parseToolCallArguments(
-                  partialToolCall.arguments,
-                  this.constructor.name,
-                  partialToolCall.name || "",
-                  partialToolCall.tool_call_id || "",
-                ),
-                tool_call_id: partialToolCall.tool_call_id || "",
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
-          partialToolCall.name = undefined;
-          partialToolCall.arguments = undefined;
-          partialToolCall.tool_call_id = undefined;
-        }
-
-        if (
-          partialUsage.prompt_tokens !== undefined &&
-          partialUsage.prompt_tokens !== null &&
-          uniEvent.usage_metadata !== null
-        ) {
-          yield {
-            role: "assistant",
-            event_type: "stop",
-            content_items: [],
-            usage_metadata: {
-              prompt_tokens: partialUsage.prompt_tokens,
-              thoughts_tokens: null,
-              response_tokens: uniEvent.usage_metadata.response_tokens,
-              cached_tokens: partialUsage.cached_tokens || null,
-            },
-            finish_reason: uniEvent.finish_reason,
-          };
-          partialUsage.prompt_tokens = undefined;
-          partialUsage.cached_tokens = undefined;
-        }
-      }
+      yield* this.transformModelOutputToClientParts(event);
     }
   }
 
