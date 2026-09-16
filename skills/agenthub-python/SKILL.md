@@ -57,12 +57,15 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "What's the weather in London?"}]
+            "content_items": [{"type": "text.done", "text": "What's the weather in London?"}]
         },
         config=config
     ):
+        if event["event_type"] == "stop":
+            # Always the last event, exactly once: the response has finished.
+            print(event["finish_reason"], event["usage_metadata"])
         for item in event["content_items"]:
-            if item["type"] == "tool_call":  # collected as the stream arrives; no second pass
+            if item["type"] == "tool_call.done":  # the complete call; tool_call.delta items are fragments
                 tool_call = item
 
     if tool_call:
@@ -74,7 +77,7 @@ async def main():
                 "role": "user",
                 "content_items": [
                     {
-                        "type": "tool_result",
+                        "type": "tool_result.done",
                         "text": result,
                         "tool_call_id": tool_call["tool_call_id"]
                     }
@@ -83,11 +86,11 @@ async def main():
             config=config
         ):
             print(event)
-            # Streams the final answer token by token, then a stop event carrying usage:
-            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': 'The'}], 'usage_metadata': None, 'finish_reason': None}
-            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': ' weather'}], 'usage_metadata': None, 'finish_reason': None}
-            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': ' is'}], 'usage_metadata': None, 'finish_reason': None}
-            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': ' 22 C.'}], 'usage_metadata': None, 'finish_reason': None}
+            # Streams the answer as text.delta fragments, closes it with text.done, then one stop event carrying usage:
+            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': 'The'}], 'usage_metadata': None, 'finish_reason': None}
+            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': ' weather'}], 'usage_metadata': None, 'finish_reason': None}
+            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': ' is 22 C.'}], 'usage_metadata': None, 'finish_reason': None}
+            # {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.done', 'text': 'The weather is 22 C.'}], 'usage_metadata': None, 'finish_reason': None}
             # {'role': 'assistant', 'event_type': 'stop', 'content_items': [], 'usage_metadata': {'cached_tokens': 0, 'prompt_tokens': 12, 'thoughts_tokens': 0, 'response_tokens': 8}, 'finish_reason': 'stop'}
 
 
@@ -98,15 +101,17 @@ asyncio.run(main())
 
 Agent loop rules:
 
-- Send every tool result with the exact `tool_call_id` from its originating `tool_call`. Do not invent, normalize, or reuse IDs across unrelated tool calls.
-- If streamed tool-call arguments cannot be parsed, AgentHub raises `ToolCallArgumentParseError`. Do not execute the tool from partial arguments; let the agent runtime retry or re-prompt the model.
-- Preserve `thinking` and `inline_thinking` items. Do not strip or modify `fidelity` fields.
-- Do not accumulate `usage_metadata` across events. Take the latest `usage_metadata` as the usage of the current request.
+- Read tool calls from `tool_call.done` items. `tool_call.delta` items are argument fragments for live display only.
+- Send every tool result with the exact `tool_call_id` from its originating `tool_call.done`. Do not invent, normalize, or reuse IDs across unrelated tool calls.
+- If streamed tool-call arguments cannot be parsed, AgentHub raises `ToolCallArgumentParseError` in place of the `tool_call.done`. Do not execute the tool from partial arguments; let the agent runtime retry or re-prompt the model.
+- Read usage and the finish reason from the `stop` event: it is always the last event, arrives exactly once, and always carries both. `delta` events carry `None` for both. A thinking-only response raises `EmptyResponseError` instead of the `stop` event; its `usage_metadata` still reports the tokens.
+- Write message items with the `.done` types (`text.done`, `tool_result.done`, …). Types without the suffix are still accepted, with a deprecation warning, until 0.6.0.
+- Preserve `thinking.done` and `inline_thinking.done` items. Do not strip or modify `fidelity` fields.
 - For embedding models, each `UniMessage` in the `messages` array produces **one embedding vector**. Within a single message, all items in `content_items` are aggregated into a single embedding. Set `embedding_config.dimensions` in the config to control vector size.
 
 ## Reference
 
 - [Model selection](reference/models.md) — model IDs, API keys, base URLs, and OpenAI-compatible routing.
-- [Data models](reference/data-models.md) — `UniConfig`, `UniMessage`, `UniEvent`, and the tool-call streaming protocol.
+- [Data models](reference/data-models.md) — `UniConfig`, `UniMessage`, `UniEvent`, the streaming protocol, and errors.
 - [APIs](reference/api.md) — client initialization and method signatures.
 - [Tracer & Playground](reference/integrations.md) — local tracing UI and the manual chat playground.

@@ -25,10 +25,10 @@ client = AutoLLMClient(model="custom-model", client_type="openai-chat")
 
 ```python
 async def streaming_response(messages: list[UniMessage], config: UniConfig) -> AsyncIterator[UniEvent]:
-    """Stream one stateless response from a full message list."""
+    """Stream one stateless response from a full message list: delta events, then one stop event."""
 
 async def streaming_response_stateful(message: UniMessage, config: UniConfig) -> AsyncIterator[UniEvent]:
-    """Stream one stateful response and update client history."""
+    """Stream one stateful response and update client history before yielding the stop event."""
 
 def get_history() -> list[UniMessage]:
     """Return a copy of stateful history."""
@@ -49,6 +49,10 @@ def list_supported_models(currency: Literal["USD", "CNY"] = "USD") -> list[Suppo
     constructor (model, base_url, client_type) - plus input/output modalities
     (Text/Image/Video/Audio/Embed), context_window, and per-million-token pricing in the
     requested currency (official list prices, converted at 7 CNY/USD)."""
+
+def normalize_legacy_messages(messages: list[UniMessage]) -> list[UniMessage]:
+    """Convert messages saved before 0.5.0 to the `.done` item types; messages already
+    current are returned as they are. Removed in 0.6.0."""
 ```
 
 ## Errors
@@ -57,3 +61,5 @@ All AgentHub errors subclass `AgentHubError` (a `ValueError`). Unsupported `UniC
 values (e.g. `temperature` or `tool_choice` on models that reject them) raise
 `UnsupportedParameterError`, which carries `client` and `parameter` attributes. Thinking
 levels never raise: every client maps each `ThinkingLevel` to the closest supported level.
+Errors raised while streaming (`ToolCallArgumentParseError`, `EmptyResponseError`,
+`StreamProtocolError`) are listed in [Data models](data-models.md#errors).

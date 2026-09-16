@@ -458,12 +458,12 @@ async def test_legacy_content_item_types_are_converted_before_a_request_and_in_s
     }
 
     client = ScriptedClient(REPLY)
-    with pytest.warns(DeprecationWarning, match="0.6.0") as warnings_record:
+    with pytest.warns(FutureWarning, match="0.6.0") as warnings_record:
         async for _event in client.streaming_response(messages=[legacy_message], config={}):
             pass
         client.set_history([legacy_message])
 
-    assert len([warning for warning in warnings_record if warning.category is DeprecationWarning]) == 1
+    assert len([warning for warning in warnings_record if warning.category is FutureWarning]) == 1
     assert client.sent_messages[0][0]["content_items"] == [
         {"type": "text.done", "text": "hi"},
         {"type": "tool_result.done", "text": "22 C", "tool_call_id": "call_1"},

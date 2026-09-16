@@ -16,7 +16,7 @@ const config = { trace_id: "agent1/conversation_001" };
 for await (const event of client.streamingResponseStateful({
   message: {
     role: "user",
-    content_items: [{ type: "text", text: "Hello" }],
+    content_items: [{ type: "text.done", text: "Hello" }],
   },
   config,
 })) {
@@ -28,6 +28,8 @@ Default cache dir: `cache`, or `AGENTHUB_CACHE_DIR`. For `trace_id="agent1/conve
 
 - `cache/agent1/conversation_001.json`: Structured trace data with the full history and config.
 - `cache/agent1/conversation_001.txt`: Human-readable conversation transcript.
+
+Trace files saved before 0.5.0 still load: their legacy item types are converted to the `.done` types when read, until 0.6.0.
 
 Browse traces:
 

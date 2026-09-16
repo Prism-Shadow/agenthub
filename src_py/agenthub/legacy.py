@@ -60,7 +60,7 @@ def normalize_legacy_messages(messages: list[UniMessage]) -> list[UniMessage]:
             warnings.warn(
                 "Content item types without the .done suffix (text, tool_call, ...) are deprecated "
                 "and will stop being accepted in AgentHub 0.6.0; use text.done, tool_call.done, ...",
-                DeprecationWarning,
+                FutureWarning,
                 stacklevel=2,
             )
 

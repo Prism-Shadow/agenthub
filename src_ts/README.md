@@ -28,7 +28,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{ type: "text", text: "Hello!" }],
+      content_items: [{ type: "text.done", text: "Hello!" }],
     },
     config: {},
   })) {
@@ -38,6 +38,8 @@ async function main() {
 
 main().catch(console.error);
 ```
+
+Both streaming methods yield `delta` events, each carrying exactly one content item, then exactly one `stop` event, always last, carrying `usage_metadata` and `finish_reason`. Each item streams as one or more `.delta` fragments (`text.delta`, `tool_call.delta`, …) followed by its complete `.done` item (`text.done`, `tool_call.done`, …); items never interleave.
 
 ### History Management
 
@@ -52,6 +54,8 @@ client.clearHistory();
 client.setHistory(history);
 ```
 
+Messages hold complete items only, typed with a `.done` suffix. Item types without the suffix, saved before 0.5.0, are still accepted with a deprecation warning until 0.6.0; `normalizeLegacyMessages(messages)` converts stored messages.
+
 ### Tracer Usage
 
 Save and browse conversation history with a web interface:
@@ -65,8 +69,8 @@ const tracer = new Tracer("./cache");
 // Save conversation history
 const model = "gpt-5.5";
 const history = [
-  { role: "user", content_items: [{ type: "text", text: "Hello!" }] },
-  { role: "assistant", content_items: [{ type: "text", text: "Hi there!" }] },
+  { role: "user", content_items: [{ type: "text.done", text: "Hello!" }] },
+  { role: "assistant", content_items: [{ type: "text.done", text: "Hi there!" }] },
 ];
 const config = {};
 tracer.saveHistory(model, history, "session/conv_001", config);

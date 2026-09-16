@@ -134,7 +134,9 @@ AgentHub provides Codex/Claude Code skill files for assistants that need to help
 - `get_history()`: Returns the history of the stateful LLM client.
 - `set_history(history)`: Replaces the history of the stateful LLM client with a copy of the provided list.
 
-Streaming clients skip output they do not recognize, so a gateway's own frames cannot end a generation, and an event a client has nothing universal to emit for never reaches you. Set `AGENTHUB_DEBUG` to anything other than `0`, `false`, `no` or `off` to make both raise instead.
+Both streaming methods yield `delta` events, each carrying one content item, followed by exactly one `stop` event that carries the usage and the finish reason (see [UniEvent](#unievent)).
+
+Streaming clients skip output they do not recognize, so a gateway's own frames cannot end a generation. Set `AGENTHUB_DEBUG` to anything other than `0`, `false`, `no` or `off` to make it raise instead.
 
 ## Basic Usage
 
@@ -157,17 +159,18 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "Say 'Hello, World!'"}]
+            "content_items": [{"type": "text.done", "text": "Say 'Hello, World!'"}]
         },
         config={"temperature": 1.0}
     ):
         print(event)
 
 asyncio.run(main())
-# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': 'Hello'}], 'usage_metadata': None, 'finish_reason': None}
-# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': ','}], 'usage_metadata': None, 'finish_reason': None}
-# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': ' World'}], 'usage_metadata': None, 'finish_reason': None}
-# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': '!'}], 'usage_metadata': None, 'finish_reason': None}
+# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': 'Hello'}], 'usage_metadata': None, 'finish_reason': None}
+# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': ','}], 'usage_metadata': None, 'finish_reason': None}
+# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': ' World'}], 'usage_metadata': None, 'finish_reason': None}
+# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': '!'}], 'usage_metadata': None, 'finish_reason': None}
+# {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.done', 'text': 'Hello, World!'}], 'usage_metadata': None, 'finish_reason': None}
 # {'role': 'assistant', 'event_type': 'stop', 'content_items': [], 'usage_metadata': {'cached_tokens': 0, 'prompt_tokens': 12, 'thoughts_tokens': 0, 'response_tokens': 8}, 'finish_reason': 'stop'}
 ```
 
@@ -183,7 +186,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{ type: "text", text: "Say 'Hello, World!'" }]
+      content_items: [{ type: "text.done", text: "Say 'Hello, World!'" }]
     },
     config: {}
   })) {
@@ -192,10 +195,11 @@ async function main() {
 }
 
 main().catch(console.error);
-// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': 'Hello'}], 'usage_metadata': null, 'finish_reason': null}
-// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': ','}], 'usage_metadata': null, 'finish_reason': null}
-// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': ' World'}], 'usage_metadata': null, 'finish_reason': null}
-// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text', 'text': '!'}], 'usage_metadata': null, 'finish_reason': null}
+// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': 'Hello'}], 'usage_metadata': null, 'finish_reason': null}
+// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': ','}], 'usage_metadata': null, 'finish_reason': null}
+// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': ' World'}], 'usage_metadata': null, 'finish_reason': null}
+// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.delta', 'text': '!'}], 'usage_metadata': null, 'finish_reason': null}
+// {'role': 'assistant', 'event_type': 'delta', 'content_items': [{'type': 'text.done', 'text': 'Hello, World!'}], 'usage_metadata': null, 'finish_reason': null}
 // {'role': 'assistant', 'event_type': 'stop', 'content_items': [], 'usage_metadata': {'cached_tokens': 0, 'prompt_tokens': 12, 'thoughts_tokens': 0, 'response_tokens': 8}, 'finish_reason': 'stop'}
 ```
 
@@ -215,7 +219,7 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "Say 'Hello, World!'"}]
+            "content_items": [{"type": "text.done", "text": "Say 'Hello, World!'"}]
         },
         config={}
     ):
@@ -238,7 +242,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{"type": "text", "text": "Say 'Hello, World!'"}]
+      content_items: [{"type": "text.done", "text": "Say 'Hello, World!'"}]
     },
     config: {}
   })) {
@@ -268,7 +272,7 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "Say 'Hello, World!'"}]
+            "content_items": [{"type": "text.done", "text": "Say 'Hello, World!'"}]
         },
         config={}
     ):
@@ -291,7 +295,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{"type": "text", "text": "Say 'Hello, World!'"}]
+      content_items: [{"type": "text.done", "text": "Say 'Hello, World!'"}]
     },
     config: {}
   })) {
@@ -320,7 +324,7 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "Say 'Hello, World!'"}]
+            "content_items": [{"type": "text.done", "text": "Say 'Hello, World!'"}]
         },
         config={}
     ):
@@ -346,7 +350,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{ type: "text", text: "Say 'Hello, World!'" }],
+      content_items: [{ type: "text.done", text: "Say 'Hello, World!'" }],
     },
     config: {}
   })) {
@@ -376,7 +380,7 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "Hello world"}],
+            "content_items": [{"type": "text.done", "text": "Hello world"}],
         },
         config={},
     ):
@@ -402,7 +406,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{ type: "text", text: "Hello world" }],
+      content_items: [{ type: "text.done", text: "Hello world" }],
     },
     config: {},
   })) {
@@ -437,7 +441,7 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "Say 'Hello, World!'"}]
+            "content_items": [{"type": "text.done", "text": "Say 'Hello, World!'"}]
         },
         config={}
     ):
@@ -462,7 +466,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{ type: "text", text: "Say 'Hello, World!'" }],
+      content_items: [{ type: "text.done", text: "Say 'Hello, World!'" }],
     },
     config: {},
   })) {
@@ -493,7 +497,7 @@ async def main():
     async for event in client.streaming_response_stateful(
         message={
             "role": "user",
-            "content_items": [{"type": "text", "text": "Say 'Hello, World!'"}]
+            "content_items": [{"type": "text.done", "text": "Say 'Hello, World!'"}]
         },
         config={}
     ):
@@ -518,7 +522,7 @@ async function main() {
   for await (const event of client.streamingResponseStateful({
     message: {
       role: "user",
-      content_items: [{ type: "text", text: "Say 'Hello, World!'" }],
+      content_items: [{ type: "text.done", text: "Say 'Hello, World!'" }],
     },
     config: {},
   })) {
@@ -577,7 +581,7 @@ Example UniConfig:
 
 ### UniMessage
 
-UniMessage is an object that contains the input for LLMs.
+UniMessage is an object that contains the input for LLMs. Its content items are complete items, typed with a `.done` suffix.
 
 Example UniMessage:
 
@@ -585,44 +589,37 @@ Example UniMessage:
 {
   "role": "user | assistant",
   "content_items": [
-    {"type": "text", "text": "How are you doing?"},
-    {"type": "image_url", "image_url": "https://example.com/image.jpg"},
-    {"type": "inline_data", "mime_type": "image/jpeg", "data": "base64-encoded-image"},
-    {"type": "thinking", "thinking": "I am thinking.", "fidelity": {"signature": "0x123456"}},
-    {"type": "inline_thinking", "mime_type": "image/jpeg", "data": "base64-encoded-image"},
-    {"type": "tool_call", "name": "math", "arguments": {"expression": "2 + 3"}, "tool_call_id": "123"},
-    {"type": "tool_result", "text": "2 + 3 = 5", "images": [], "tool_call_id": "123"}
+    {"type": "text.done", "text": "How are you doing?"},
+    {"type": "image_url.done", "image_url": "https://example.com/image.jpg"},
+    {"type": "inline_data.done", "mime_type": "image/jpeg", "data": "base64-encoded-image"},
+    {"type": "thinking.done", "thinking": "I am thinking.", "fidelity": {"signature": "0x123456"}},
+    {"type": "inline_thinking.done", "mime_type": "image/jpeg", "data": "base64-encoded-image"},
+    {"type": "tool_call.done", "name": "math", "arguments": {"expression": "2 + 3"}, "tool_call_id": "123"},
+    {"type": "tool_result.done", "text": "2 + 3 = 5", "images": [], "tool_call_id": "123"}
   ]
 }
 ```
 
+Messages saved before 0.5.0 use item types without the `.done` suffix. They are still accepted, and converted with a deprecation warning, until 0.6.0; `normalize_legacy_messages` / `normalizeLegacyMessages` converts stored data.
+
 ### UniEvent
 
-UniEvent is an object that contains streaming output of LLMs.
+UniEvent is an object that contains streaming output of LLMs. A stream is a run of `delta` events, each carrying exactly one content item, closed by exactly one `stop` event that carries no items but always the usage and the finish reason. Each item streams as one or more `.delta` fragments followed by its complete `.done` item, and items never interleave.
 
-Example UniEvent:
+Example UniEvents for a tool call:
 
-```json
-{
-  "role": "assistant",
-  "event_type": "delta",
-  "content_items": [
-    {"type": "partial_tool_call", "name": "math", "arguments": "", "tool_call_id": "123"}
-  ],
-  "usage_metadata": {
-    "cached_tokens": null,
-    "prompt_tokens": 10,
-    "thoughts_tokens": null,
-    "response_tokens": 1
-  },
-  "finish_reason": null,
-  "created_at": 1694502400000
-}
+```jsonl
+{"role": "assistant", "event_type": "delta", "content_items": [{"type": "tool_call.delta", "name": "math", "arguments": "{\"expression\": ", "tool_call_id": "123"}], "usage_metadata": null, "finish_reason": null, "created_at": 1694502400000}
+{"role": "assistant", "event_type": "delta", "content_items": [{"type": "tool_call.delta", "name": "", "arguments": "\"2 + 3\"}", "tool_call_id": ""}], "usage_metadata": null, "finish_reason": null, "created_at": 1694502400010}
+{"role": "assistant", "event_type": "delta", "content_items": [{"type": "tool_call.done", "name": "math", "arguments": {"expression": "2 + 3"}, "tool_call_id": "123"}], "usage_metadata": null, "finish_reason": null, "created_at": 1694502400010}
+{"role": "assistant", "event_type": "stop", "content_items": [], "usage_metadata": {"cached_tokens": null, "prompt_tokens": 10, "thoughts_tokens": null, "response_tokens": 12}, "finish_reason": "tool_call", "created_at": 1694502400020}
 ```
+
+Read complete items, such as tool calls, from the `.done` items, and the usage from the `stop` event.
 
 ## Token Usage
 
-AgentHub provides detailed token usage information through the `usage_metadata` field in streaming events.
+AgentHub provides detailed token usage information through the `usage_metadata` field of the `stop` event, the last event of every stream.
 
 The `usage_metadata` object contains four fields:
 - `cached_tokens`: Cached input tokens
@@ -651,7 +648,7 @@ We provide a tracer to help you monitor and debug your LLM executions. You can e
 async for event in client.streaming_response_stateful(
     message={
         "role": "user",
-        "content_items": [{"type": "text", "text": "Say 'Hello, World!'"}]
+        "content_items": [{"type": "text.done", "text": "Say 'Hello, World!'"}]
     },
     config={"trace_id": "unique-trace-id"}
 ):
