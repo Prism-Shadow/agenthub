@@ -3,7 +3,7 @@
 - **Date:** 2026-09-16
 - **Type:** feature
 - **Scope:** `legacy`, `base_client`, `integration`
-- **PR:** TBD
+- **PR:** [#223](https://github.com/Prism-Shadow/agenthub/pull/223)
 
 [English](2026-09-16-backward-compatibility.md)
 

@@ -3,7 +3,7 @@
 - **Date:** 2026-09-16
 - **Type:** feature
 - **Scope:** `types`, `base_client`, `errors`, `integration`, `skills`
-- **PR:** TBD
+- **PR:** [#223](https://github.com/Prism-Shadow/agenthub/pull/223)
 - **Breaking:** yes — every content item type gained a `.delta` or `.done` suffix, the `start` and `unused` event types and the `partial_tool_call` item were removed, and clients return client parts instead of events
 
 [中文版](2026-09-16-streaming-protocol-v2.zh.md)

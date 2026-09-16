@@ -3,7 +3,7 @@
 - **Date:** 2026-09-16
 - **Type:** feature
 - **Scope:** `types`, `base_client`, `errors`, `integration`, `skills`
-- **PR:** TBD
+- **PR:** [#223](https://github.com/Prism-Shadow/agenthub/pull/223)
 - **Breaking:** yes — 每种内容项类型都加上了 `.delta` 或 `.done` 后缀，`start` 与 `unused` 事件类型以及 `partial_tool_call` 内容项被移除，客户端改为返回 client part 而不再返回事件
 
 [English](2026-09-16-streaming-protocol-v2.md)

@@ -3,7 +3,7 @@
 - **Date:** 2026-09-16
 - **Type:** feature
 - **Scope:** `gemini3_8`, `tests`, `llmsdk_docs`
-- **PR:** TBD
+- **PR:** [#223](https://github.com/Prism-Shadow/agenthub/pull/223)
 - **Breaking:** yes — Gemini SDK 升级到新的主版本（`@google/genai` 2.x、`google-genai` 2.x），调用工具的 Gemini 轮次改以 `tool_call` 而不是 `stop` 结束，Gemini 上的 `fast_mode` 改为请求 priority 服务层级而不再抛出异常
 
 [English](2026-09-16-gemini-interactions-api.md)

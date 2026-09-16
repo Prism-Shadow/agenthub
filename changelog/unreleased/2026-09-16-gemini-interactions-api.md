@@ -3,7 +3,7 @@
 - **Date:** 2026-09-16
 - **Type:** feature
 - **Scope:** `gemini3_8`, `tests`, `llmsdk_docs`
-- **PR:** TBD
+- **PR:** [#223](https://github.com/Prism-Shadow/agenthub/pull/223)
 - **Breaking:** yes — the Gemini SDKs moved to a new major version (`@google/genai` 2.x, `google-genai` 2.x), a Gemini turn that calls tools now finishes with `tool_call` instead of `stop`, and `fast_mode` on Gemini sends the priority tier instead of raising
 
 [中文版](2026-09-16-gemini-interactions-api.zh.md)
