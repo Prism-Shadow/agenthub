@@ -35,7 +35,7 @@ const history: UniMessage[] = [
     role: "user",
     content_items: [
       {
-        type: "text",
+        type: "text.done",
         text: "Hello, how are you?",
       },
     ],
@@ -44,7 +44,7 @@ const history: UniMessage[] = [
     role: "assistant",
     content_items: [
       {
-        type: "text",
+        type: "text.done",
         text: "I'm doing well, thank you! How can I help you today?",
       },
     ],
