@@ -259,8 +259,9 @@ class UniConfig(TypedDict):
     tool_choice: NotRequired[ToolChoice]
     system_prompt: NotRequired[str]
     prompt_caching: NotRequired[PromptCaching]
-    # fast processing at premium pricing: OpenAI-protocol clients send service_tier="priority",
-    # Anthropic-protocol clients send speed="fast"; clients without a fast tier reject it
+    # fast processing at premium pricing: OpenAI-protocol and Gemini clients send
+    # service_tier="priority", Anthropic-protocol clients send speed="fast"; clients without a
+    # fast tier reject it
     fast_mode: NotRequired[bool]
     image_config: NotRequired[ImageConfig]
     tts_config: NotRequired[list[SpeakerConfig]]

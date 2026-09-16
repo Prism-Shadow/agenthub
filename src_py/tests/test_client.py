@@ -625,10 +625,9 @@ async def test_tool_result_mixed_with_text(model: Model):
     """A user message mixing a tool result with follow-up text.
 
     An agent resends an interrupted turn's tool output together with the user's next
-    prompt. Vertex AI rejects a Gemini content that mixes function_response parts with
-    any other kind (HTTP 400 "Requests ending with a model turn are not supported"), so
-    the Gemini client splits them into separate contents; the model must still see both
-    halves.
+    prompt. Protocols that carry tool results and user text as separate entries (Gemini's
+    function_result and user_input steps, say) split the message; the model must still see
+    both halves.
     """
     if not model.support_text:
         pytest.skip(f"Text generation is not supported by {model.name}.")

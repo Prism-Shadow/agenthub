@@ -266,8 +266,9 @@ export interface UniConfig {
   tool_choice?: ToolChoice;
   system_prompt?: string;
   prompt_caching?: PromptCaching;
-  // fast processing at premium pricing: OpenAI-protocol clients send service_tier="priority",
-  // Anthropic-protocol clients send speed="fast"; clients without a fast tier reject it
+  // fast processing at premium pricing: OpenAI-protocol and Gemini clients send
+  // service_tier="priority", Anthropic-protocol clients send speed="fast"; clients without a
+  // fast tier reject it
   fast_mode?: boolean;
   image_config?: ImageConfig;
   tts_config?: SpeakerConfig[];

@@ -28,8 +28,6 @@ class MessageOrderCase:
     client_type: str | None
     protocol: str
     expected: list[str]
-    # Claude replays the signature as text, Gemini as the bytes it streamed
-    thought_signature: str | bytes = "sig-1"
 
 
 # A turn where the model thought, spoke, and then called a tool. Every protocol that can
@@ -37,7 +35,8 @@ class MessageOrderCase:
 # preceded is what DeepSeek answers with "No tool output found for tool call".
 RESPONSES_ORDER = ["message:user", "reasoning", "message:assistant", "function_call", "function_call_output"]
 MESSAGES_ORDER = ["user:text", "assistant:thinking,text,tool_use", "user:tool_result"]
-GEMINI_ORDER = ["user:text", "model:thinking,text,function_call", "user:function_response"]
+# the Interactions API sends every item as a step of its own kind, a thought first in its turn
+GEMINI_ORDER = ["user_input", "thought", "model_output", "function_call", "function_result"]
 # Chat Completions has no interleaving to keep: the text lands in content, the call in
 # tool_calls of the same message, and the thinking in its own reasoning field.
 CHAT_ORDER = ["user:text", "assistant:text,tool_calls,thinking", "tool:call_1"]
@@ -49,14 +48,14 @@ MESSAGE_ORDER_CASES = [
     MessageOrderCase("MiniMaxM3Client", "MiniMax-M3", "minimax-m3", "responses", RESPONSES_ORDER),
     MessageOrderCase("Claude5Client", "claude-sonnet-5", None, "messages", MESSAGES_ORDER),
     MessageOrderCase("AntMessagesClient", "claude-sonnet-5", "ant-messages", "messages", MESSAGES_ORDER),
-    MessageOrderCase("Gemini3_8Client", "gemini-3.8-flash", None, "gemini", GEMINI_ORDER, b"sig-1"),
+    MessageOrderCase("Gemini3_8Client", "gemini-3.8-flash", None, "gemini", GEMINI_ORDER),
     MessageOrderCase("OpenaiChatClient", "gpt-5.6", "openai-chat", "chat", CHAT_ORDER),
     MessageOrderCase("GLM5_3Client", "glm-5.3", None, "chat", CHAT_ORDER),
     MessageOrderCase("KimiK3Client", "kimi-k3", None, "chat", CHAT_ORDER),
 ]
 
 
-def _messages(case: MessageOrderCase) -> list[dict[str, Any]]:
+def _messages() -> list[dict[str, Any]]:
     return [
         {"role": "user", "content_items": [{"type": "text.done", "text": "What is the weather in Paris?"}]},
         {
@@ -65,7 +64,7 @@ def _messages(case: MessageOrderCase) -> list[dict[str, Any]]:
                 {
                     "type": "thinking.done",
                     "thinking": "I should call the tool.",
-                    "fidelity": {"signature": case.thought_signature},
+                    "fidelity": {"signature": "sig-1"},
                 },
                 {"type": "text.done", "text": "Let me check that for you."},
                 {
@@ -98,23 +97,8 @@ def _messages_signature(model_input: list[dict[str, Any]]) -> list[str]:
     return [f"{message['role']}:" + ",".join(block["type"] for block in message["content"]) for message in model_input]
 
 
-def _gemini_signature(model_input: list[Any]) -> list[str]:
-    labels = []
-    for content in model_input:
-        kinds = []
-        for part in content.parts:
-            if part.function_call is not None:
-                kinds.append("function_call")
-            elif part.function_response is not None:
-                kinds.append("function_response")
-            elif part.thought:
-                kinds.append("thinking")
-            else:
-                kinds.append("text")
-
-        labels.append(f"{content.role}:" + ",".join(kinds))
-
-    return labels
+def _gemini_signature(model_input: list[dict[str, Any]]) -> list[str]:
+    return [step["type"] for step in model_input]
 
 
 def _chat_signature(model_input: list[dict[str, Any]]) -> list[str]:
@@ -155,18 +139,20 @@ async def test_message_transform_keeps_content_item_order(case: MessageOrderCase
     client = AutoLLMClient(model=case.model, api_key="test-key", client_type=case.client_type)
     assert client._client.__class__.__name__ == case.expected_client  # noqa: SLF001
 
-    model_input = client._client.transform_uni_message_to_model_input(_messages(case))  # noqa: SLF001
+    model_input = client._client.transform_uni_message_to_model_input(_messages())  # noqa: SLF001
     if inspect.isawaitable(model_input):
         model_input = await model_input
 
     assert _SIGNATURES[case.protocol](model_input) == case.expected
 
-    # every Responses and Chat Completions client sends a text-only tool result as a plain
-    # string rather than a one-part content list; the messages and gemini protocols have no
-    # such position
-    if case.protocol in ("responses", "chat"):
-        tool_result = model_input[4]["output"] if case.protocol == "responses" else model_input[2]["content"]
-        assert tool_result == "20 degrees."
+    # every Responses, Chat Completions and Interactions client sends a text-only tool result as a
+    # plain string rather than a one-part content list; the messages protocol has no such position
+    if case.protocol == "responses":
+        assert model_input[4]["output"] == "20 degrees."
+    elif case.protocol == "chat":
+        assert model_input[2]["content"] == "20 degrees."
+    elif case.protocol == "gemini":
+        assert model_input[4]["result"] == "20 degrees."
 
 
 # The generic client and the three routed ones share the replayed shape, so the cases are the

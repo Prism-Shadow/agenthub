@@ -898,10 +898,9 @@ if (AVAILABLE_MODELS.length > 0) {
     });
 
     // A user message mixing a tool result with follow-up text: an agent resending an
-    // interrupted turn's tool output together with the user's next prompt. Vertex AI
-    // rejects a Gemini content that mixes functionResponse parts with any other kind
-    // (HTTP 400 "Requests ending with a model turn are not supported"), so the Gemini
-    // client splits them into separate contents; the model must still see both halves.
+    // interrupted turn's tool output together with the user's next prompt. Protocols that
+    // carry tool results and user text as separate entries (Gemini's function_result and
+    // user_input steps, say) split the message; the model must still see both halves.
     modelTest(
       "should handle tool result mixed with text",
       60000,

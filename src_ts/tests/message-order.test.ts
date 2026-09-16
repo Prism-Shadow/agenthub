@@ -21,8 +21,6 @@ interface MessageOrderCase {
   clientType?: string;
   protocol: "responses" | "messages" | "gemini" | "chat";
   expected: string[];
-  // Claude replays the signature as text, Gemini as the bytes it streamed
-  thoughtSignature?: string | Buffer;
 }
 
 // A turn where the model thought, spoke, and then called a tool. Every protocol that can
@@ -40,10 +38,13 @@ const MESSAGES_ORDER = [
   "assistant:thinking,text,tool_use",
   "user:tool_result",
 ];
+// the Interactions API sends every item as a step of its own kind, a thought first in its turn
 const GEMINI_ORDER = [
-  "user:text",
-  "model:thinking,text,function_call",
-  "user:function_response",
+  "user_input",
+  "thought",
+  "model_output",
+  "function_call",
+  "function_result",
 ];
 // Chat Completions has no interleaving to keep: the text lands in content, the call in
 // tool_calls of the same message, and the thinking in its own reasoning field.
@@ -99,7 +100,6 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
     model: "gemini-3.8-flash",
     protocol: "gemini",
     expected: GEMINI_ORDER,
-    thoughtSignature: Buffer.from("sig-1"),
   },
   {
     expectedClient: "OpenaiChatClient",
@@ -122,7 +122,7 @@ const MESSAGE_ORDER_CASES: MessageOrderCase[] = [
   },
 ];
 
-function messagesFor(testCase: MessageOrderCase): UniMessage[] {
+function messagesFor(): UniMessage[] {
   return [
     {
       role: "user",
@@ -136,7 +136,7 @@ function messagesFor(testCase: MessageOrderCase): UniMessage[] {
         {
           type: "thinking.done",
           thinking: "I should call the tool.",
-          fidelity: { signature: testCase.thoughtSignature ?? "sig-1" },
+          fidelity: { signature: "sig-1" },
         },
         { type: "text.done", text: "Let me check that for you." },
         {
@@ -185,16 +185,7 @@ function signature(testCase: MessageOrderCase, modelInput: any[]): string[] {
   }
 
   if (testCase.protocol === "gemini") {
-    return modelInput.map((content) => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const kinds = content.parts.map((part: any) => {
-        if (part.functionCall) return "function_call";
-        if (part.functionResponse) return "function_response";
-        if (part.thought) return "thinking";
-        return "text";
-      });
-      return `${content.role}:${kinds.join(",")}`;
-    });
+    return modelInput.map((step) => step.type);
   }
 
   return modelInput.map((message) => {
@@ -230,21 +221,20 @@ describe.each(MESSAGE_ORDER_CASES)(
       const client = routedClient(testCase.model, testCase.clientType);
       expect(client.constructor.name).toBe(testCase.expectedClient);
 
-      const modelInput = await client.transformUniMessageToModelInput(
-        messagesFor(testCase),
-      );
+      const modelInput =
+        await client.transformUniMessageToModelInput(messagesFor());
 
       expect(signature(testCase, modelInput)).toEqual(testCase.expected);
 
-      // every Responses and Chat Completions client sends a text-only tool result as
-      // a plain string rather than a one-part content list; the messages and gemini
-      // protocols have no such position
-      if (testCase.protocol === "responses" || testCase.protocol === "chat") {
-        expect(
-          testCase.protocol === "responses"
-            ? modelInput[4].output
-            : modelInput[2].content,
-        ).toBe("20 degrees.");
+      // every Responses, Chat Completions and Interactions client sends a text-only tool
+      // result as a plain string rather than a one-part content list; the messages protocol
+      // has no such position
+      if (testCase.protocol === "responses") {
+        expect(modelInput[4].output).toBe("20 degrees.");
+      } else if (testCase.protocol === "chat") {
+        expect(modelInput[2].content).toBe("20 degrees.");
+      } else if (testCase.protocol === "gemini") {
+        expect(modelInput[4].result).toBe("20 degrees.");
       }
     });
   },

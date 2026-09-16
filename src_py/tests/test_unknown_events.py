@@ -50,7 +50,7 @@ MESSAGES_STREAM_CASES = [
     StreamCase(expected_client="AntMessagesClient", model="claude-sonnet-5", client_type="ant-messages"),
 ]
 
-# Every client that parses the Gemini generateContent chunk shape.
+# Every client that parses the Gemini Interactions event shape.
 GEMINI_STREAM_CASES = [
     StreamCase(expected_client="Gemini3_8Client", model="gemini-3.8-flash", client_type="gemini-3.8"),
 ]
@@ -77,14 +77,6 @@ class _FakeCreateEndpoint:
         return _stream_from_events(self._events)
 
 
-class _FakeGeminiModels:
-    def __init__(self, events: list[object]) -> None:
-        self._events = events
-
-    async def generate_content_stream(self, **_kwargs: object) -> AsyncIterator[object]:
-        return _stream_from_events(self._events)
-
-
 def _install_fake_responses_stream(client: AutoLLMClient, events: list[object]) -> None:
     client._client._client = SimpleNamespace(responses=_FakeCreateEndpoint(events))  # noqa: SLF001
 
@@ -104,7 +96,7 @@ def _install_fake_messages_stream(client: AutoLLMClient, events: list[object]) -
 
 
 def _install_fake_gemini_stream(client: AutoLLMClient, events: list[object]) -> None:
-    client._client._client = SimpleNamespace(aio=SimpleNamespace(models=_FakeGeminiModels(events)))  # noqa: SLF001
+    client._client._client = SimpleNamespace(aio=SimpleNamespace(interactions=_FakeCreateEndpoint(events)))  # noqa: SLF001
 
 
 # Heartbeats come from gateways in front of the provider (one-api-style proxies), never from
@@ -196,37 +188,38 @@ def _messages_stop_event() -> object:
     )
 
 
-def _gemini_keepalive_chunk() -> object:
-    # The SDK maps only the fields it knows onto the response, so a heartbeat reaches the
-    # client as a chunk carrying neither candidates nor usage.
-    return SimpleNamespace(candidates=None, usage_metadata=None)
+def _gemini_keepalive_event() -> object:
+    # A heartbeat carries no event_type, and the SDK's lenient parsing lands it on its error event
+    # with no error attached.
+    return SimpleNamespace(event_type="error", error=None, type="keepalive", sequence_number=1)
 
 
-def _gemini_unknown_part_chunk() -> object:
-    # a part the client recognizes by none of its fields, e.g. a modality added after this client
-    part = SimpleNamespace(function_call=None, thought=None, text=None, inline_data=None, thought_signature=None)
+def _gemini_status_update_event() -> object:
+    return SimpleNamespace(event_type="interaction.status_update", interaction_id="", status="in_progress")
+
+
+def _gemini_unknown_delta_event() -> object:
+    # a delta of a type the client does not know, e.g. a modality added after this client, which
+    # the SDK hands over as its UnknownStepDeltaData
     return SimpleNamespace(
-        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]), finish_reason=None)], usage_metadata=None
+        event_type="step.delta",
+        index=0,
+        delta=SimpleNamespace(type="UNKNOWN", raw={"type": "hologram"}, is_unknown=True),
     )
 
 
-def _gemini_text_chunk(text: str) -> object:
-    part = SimpleNamespace(function_call=None, thought=None, text=text, inline_data=None, thought_signature=None)
-    return SimpleNamespace(
-        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]), finish_reason=None)],
-        usage_metadata=None,
-    )
+def _gemini_text_delta_event(text: str) -> object:
+    return SimpleNamespace(event_type="step.delta", index=0, delta=SimpleNamespace(type="text", text=text))
 
 
-def _gemini_stop_chunk() -> object:
+def _gemini_completed_event() -> object:
     return SimpleNamespace(
-        # FinishReason is a string enum, so the raw value keys the client's mapping
-        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[]), finish_reason="STOP")],
-        usage_metadata=SimpleNamespace(
-            prompt_token_count=2,
-            cached_content_token_count=0,
-            thoughts_token_count=1,
-            candidates_token_count=3,
+        event_type="interaction.completed",
+        interaction=SimpleNamespace(
+            status="completed",
+            usage=SimpleNamespace(
+                total_input_tokens=2, total_cached_tokens=0, total_thought_tokens=1, total_output_tokens=3
+            ),
         ),
     )
 
@@ -460,42 +453,45 @@ async def test_gemini_client_skips_keepalive_heartbeats(case: StreamCase):
     _install_fake_gemini_stream(
         client,
         [
-            _gemini_keepalive_chunk(),
-            _gemini_text_chunk("Here is"),
-            _gemini_keepalive_chunk(),
-            _gemini_text_chunk(" the memo."),
-            _gemini_stop_chunk(),
-            _gemini_keepalive_chunk(),
+            _gemini_keepalive_event(),
+            _gemini_text_delta_event("Here is"),
+            _gemini_keepalive_event(),
+            _gemini_text_delta_event(" the memo."),
+            _gemini_completed_event(),
+            _gemini_keepalive_event(),
         ],
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is", " the memo."]
-    # a heartbeat must not surface as an empty event of its own
-    assert len(events) == 3
+    # a heartbeat must not surface as an event of its own: two text deltas, their done item, the stop
+    assert len(events) == 4
     assert events[-1]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", GEMINI_STREAM_CASES, ids=[case.client_type for case in GEMINI_STREAM_CASES])
-async def test_gemini_client_skips_unknown_parts(case: StreamCase):
+async def test_gemini_client_skips_unknown_deltas(case: StreamCase):
     client = _create_auto_client(case)
+    assert client.transform_model_output_to_client_parts(_gemini_unknown_delta_event()) == []
     _install_fake_gemini_stream(
         client,
-        [_gemini_unknown_part_chunk(), _gemini_text_chunk("Here is"), _gemini_stop_chunk()],
+        [_gemini_unknown_delta_event(), _gemini_text_delta_event("Here is"), _gemini_completed_event()],
     )
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
     assert _collected_texts(events) == ["Here is"]
     assert events[-1]["finish_reason"] == "stop"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("case", GEMINI_STREAM_CASES, ids=[case.client_type for case in GEMINI_STREAM_CASES])
-async def test_gemini_client_rejects_unknown_parts_in_debug_mode(case: StreamCase, monkeypatch):
+async def test_gemini_client_rejects_unknown_deltas_in_debug_mode(case: StreamCase, monkeypatch):
     monkeypatch.setenv("AGENTHUB_DEBUG", "1")
     client = _create_auto_client(case)
-    _install_fake_gemini_stream(client, [_gemini_unknown_part_chunk(), _gemini_stop_chunk()])
+    _install_fake_gemini_stream(client, [_gemini_unknown_delta_event(), _gemini_completed_event()])
 
     with pytest.raises(ValueError, match="Unknown output"):
         async for _event in client.streaming_response(MESSAGES, {}):
@@ -533,7 +529,7 @@ IGNORABLE_EVENT_CASES = [
         (
             case,
             _install_fake_gemini_stream,
-            [_gemini_keepalive_chunk(), _gemini_text_chunk("Here is"), _gemini_stop_chunk()],
+            [_gemini_status_update_event(), _gemini_text_delta_event("Here is"), _gemini_completed_event()],
         )
         for case in GEMINI_STREAM_CASES
     ],

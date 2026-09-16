@@ -27,7 +27,7 @@
 
 - `transform_model_output_to_uni_event` / `transformModelOutputToUniEvent` 被 `transform_model_output_to_client_parts` / `transformModelOutputToClientParts` 取代，后者返回 `ClientPart` 列表；`_streaming_response_internal` / `_streamingResponseInternal` 改为产出这些 part 而不是事件。part 分为 `delta`（服务商为该内容项给出的 key 之下的一个 `.delta` 项）、`done`（某个 key 下的内容项已完成）与 `finish`（`usage_metadata` 和/或 `finish_reason`）。没有任何通用内容的线路事件返回 `[]`。
 - 基类把 part 组装成事件：拼接片段、解析工具调用参数、逐字段合并分段到达的用量、在服务商的流结束时关闭仍未完成的内容项，并构造 `stop` 事件。各客户端中的工具调用累加器、参数解析、用量合并与合成 stop 的逻辑被移除，基类中针对 `unused` 事件的防护也一并移除。
-- key：`claude5` 与 `ant_messages` 使用 content block 的 index；`gpt6`、`openai_responses`、`deepseek_v4` 与 `minimax_m3` 使用输出 item 的 id；`openai_chat`、`openai_chat_vllm_adapter`、`glm5_3` 与 `kimi_k3` 使用序号，流式输出的种类变化或新的工具调用开始时序号递增，同时关闭前一个内容项；`openai_embedding` 使用 `embedding:<i>`。
+- key：`claude5` 与 `ant_messages` 使用 content block 的 index；`gpt6`、`openai_responses`、`deepseek_v4` 与 `minimax_m3` 使用输出 item 的 id；`openai_chat`、`openai_chat_vllm_adapter`、`glm5_3` 与 `kimi_k3` 使用序号，流式输出的种类变化或新的工具调用开始时序号递增，同时关闭前一个内容项；`gemini3_8` 使用 step 的 index 加上该 step 内同一内容种类连续段的序号（`<index>.<run>`）；`openai_embedding` 与 `gemini3_8` 的 embedding 使用 `embedding:<i>`。
 - fidelity 只附加一次，附在它完整可知的那个增量上：Claude 的 signature 附在一个空的 `thinking.delta` 上，Responses 的推理 fidelity 附在 `response.output_item.done` 时的一个空 `thinking.delta` 上，GPT 的 `phase` 附在 `response.output_item.added` 时的一个空 `text.delta` 上。Chat Completions 客户端给每个推理增量附加的 `reasoning_field` 只输出一次。
 
 ## 兼容性

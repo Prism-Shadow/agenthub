@@ -93,7 +93,7 @@ const MESSAGES_STREAM_CASES: StreamCase[] = [
   },
 ];
 
-// Every client that parses the Gemini generateContent chunk shape.
+// Every client that parses the Gemini Interactions event shape.
 const GEMINI_STREAM_CASES: StreamCase[] = [
   {
     expectedClient: "Gemini3_8Client",
@@ -158,7 +158,7 @@ function installFakeGeminiStream(
   events: unknown[],
 ): void {
   installFakeStream(client, {
-    models: { generateContentStream: async () => streamFromEvents(events) },
+    interactions: { create: async () => streamFromEvents(events) },
   });
 }
 
@@ -263,35 +263,44 @@ function messagesStopEvent(): unknown {
   };
 }
 
-function geminiKeepaliveChunk(): unknown {
-  // The SDK maps only the fields it knows onto the response, so a heartbeat reaches the
-  // client as a chunk carrying neither candidates nor usage.
-  return {};
+function geminiKeepaliveEvent(): unknown {
+  // The SDK passes a frame through as parsed, so a heartbeat reaches the client without the
+  // event_type every Interactions event carries.
+  return { type: "keepalive", sequence_number: 1 };
 }
 
-function geminiUnknownPartChunk(): unknown {
-  // a part the client recognizes by none of its fields, e.g. a modality added after this
-  // client: the SDK leaves what it does not know undefined rather than null
+function geminiStatusUpdateEvent(): unknown {
   return {
-    candidates: [{ content: { parts: [{}] }, finishReason: null }],
+    event_type: "interaction.status_update",
+    interaction_id: "",
+    status: "in_progress",
   };
 }
 
-function geminiTextChunk(text: string): unknown {
+function geminiUnknownDeltaEvent(): unknown {
+  // a delta of a type the client does not know, e.g. a modality added after this client
+  return { event_type: "step.delta", index: 0, delta: { type: "hologram" } };
+}
+
+function geminiTextDeltaEvent(text: string): unknown {
   return {
-    candidates: [{ content: { parts: [{ text: text }] }, finishReason: null }],
+    event_type: "step.delta",
+    index: 0,
+    delta: { type: "text", text: text },
   };
 }
 
-function geminiStopChunk(): unknown {
+function geminiCompletedEvent(): unknown {
   return {
-    // FinishReason is a string enum, so the raw value keys the client's mapping
-    candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
-    usageMetadata: {
-      promptTokenCount: 2,
-      cachedContentTokenCount: 0,
-      thoughtsTokenCount: 1,
-      candidatesTokenCount: 3,
+    event_type: "interaction.completed",
+    interaction: {
+      status: "completed",
+      usage: {
+        total_input_tokens: 2,
+        total_cached_tokens: 0,
+        total_thought_tokens: 1,
+        total_output_tokens: 3,
+      },
     },
   };
 }
@@ -546,27 +555,31 @@ describe.each(MESSAGES_STREAM_CASES)(
 describe.each(GEMINI_STREAM_CASES)(
   "Stream event handling for $clientType",
   (testCase) => {
-    test("skips an unknown part", async () => {
+    test("skips an unknown delta", async () => {
       const client = createAutoClient(testCase);
+      expect(
+        client.transformModelOutputToClientParts(geminiUnknownDeltaEvent()),
+      ).toEqual([]);
       installFakeGeminiStream(client, [
-        geminiUnknownPartChunk(),
-        geminiTextChunk("Here is"),
-        geminiStopChunk(),
+        geminiUnknownDeltaEvent(),
+        geminiTextDeltaEvent("Here is"),
+        geminiCompletedEvent(),
       ]);
 
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is"]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
 
-    test("rejects an unknown part with AGENTHUB_DEBUG set", async () => {
+    test("rejects an unknown delta with AGENTHUB_DEBUG set", async () => {
       process.env.AGENTHUB_DEBUG = "1";
       const client = createAutoClient(testCase);
       installFakeGeminiStream(client, [
-        geminiUnknownPartChunk(),
-        geminiStopChunk(),
+        geminiUnknownDeltaEvent(),
+        geminiCompletedEvent(),
       ]);
 
       await expect(
@@ -574,24 +587,26 @@ describe.each(GEMINI_STREAM_CASES)(
       ).rejects.toThrow("Unknown output");
     });
 
-    test("skips gateway keepalive heartbeats between stream chunks", async () => {
+    test("skips gateway keepalive heartbeats between stream events", async () => {
       const client = createAutoClient(testCase);
       expect(routedClientName(client)).toBe(testCase.expectedClient);
       installFakeGeminiStream(client, [
-        geminiKeepaliveChunk(),
-        geminiTextChunk("Here is"),
-        geminiKeepaliveChunk(),
-        geminiTextChunk(" the memo."),
-        geminiStopChunk(),
-        geminiKeepaliveChunk(),
+        geminiKeepaliveEvent(),
+        geminiTextDeltaEvent("Here is"),
+        geminiKeepaliveEvent(),
+        geminiTextDeltaEvent(" the memo."),
+        geminiCompletedEvent(),
+        geminiKeepaliveEvent(),
       ]);
 
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
-      // a heartbeat must not surface as an empty event of its own
-      expect(events).toHaveLength(3);
+      // a heartbeat must not surface as an event of its own: two text deltas, their done
+      // item, the stop
+      expect(events).toHaveLength(4);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
   },
@@ -635,9 +650,9 @@ const IGNORABLE_EVENT_CASES: Array<{
     testCase,
     install: installFakeGeminiStream,
     stream: () => [
-      geminiKeepaliveChunk(),
-      geminiTextChunk("Here is"),
-      geminiStopChunk(),
+      geminiStatusUpdateEvent(),
+      geminiTextDeltaEvent("Here is"),
+      geminiCompletedEvent(),
     ],
   })),
 ];
