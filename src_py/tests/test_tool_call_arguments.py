@@ -18,8 +18,10 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+from stream_grammar import assert_stream_grammar
 
 from agenthub import AutoLLMClient, ToolCallArgumentParseError
+from agenthub.types import UniEvent
 
 
 @dataclass
@@ -182,10 +184,22 @@ def _tool_stream(case: OpenAICompatibleToolStreamCase, tool_call_id: str, name: 
     return chunks
 
 
-async def _capture_tool_argument_error(stream: AsyncIterator[object]) -> ToolCallArgumentParseError:
+async def _capture_tool_argument_error(
+    stream: AsyncIterator[UniEvent], tool_call_id: str
+) -> ToolCallArgumentParseError:
+    events: list[UniEvent] = []
     with pytest.raises(ToolCallArgumentParseError) as exc_info:
-        async for _event in stream:
-            pass
+        async for event in stream:
+            events.append(event)
+
+    # arguments are parsed when the call's item is done: the call's deltas have already reached
+    # the caller, and neither its done item nor the stop event ever does
+    items = [item for event in events for item in event["content_items"]]
+    assert items[0]["type"] == "tool_call.delta"
+    assert items[0]["name"] == "exec_command"
+    assert items[0]["tool_call_id"] == tool_call_id
+    assert "tool_call.done" not in [item["type"] for item in items]
+    assert "stop" not in [event["event_type"] for event in events]
     return exc_info.value
 
 
@@ -201,22 +215,23 @@ async def test_openai_compatible_clients_combine_streamed_tool_call_arguments(
     client = _create_auto_client(case)
     _install_fake_stream(client, case, _tool_stream(case, "call_ok", "exec_command", '{"cmd":', '"echo ok"}'))
 
-    messages = [{"role": "user", "content_items": [{"type": "text", "text": "Create a memo."}]}]
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
     events = [event async for event in client.streaming_response(messages, {})]
-    tool_calls = [item for event in events for item in event["content_items"] if item["type"] == "tool_call"]
+    assert_stream_grammar(events)
+    tool_calls = [item for event in events for item in event["content_items"] if item["type"] == "tool_call.done"]
 
     assert tool_calls == [
         {
-            "type": "tool_call",
+            "type": "tool_call.done",
             "name": "exec_command",
             "arguments": {"cmd": "echo ok"},
             "tool_call_id": "call_ok",
         }
     ]
 
-    # the fragments announce the call before the complete item and concatenate to the arguments
-    # it carries, whether the client streamed them or delivered the item alone
-    fragments = [item for event in events for item in event["content_items"] if item["type"] == "partial_tool_call"]
+    # the deltas announce the call before its done item and concatenate to the arguments it
+    # carries, whether the client streamed them or delivered the item alone
+    fragments = [item for event in events for item in event["content_items"] if item["type"] == "tool_call.delta"]
     assert fragments[0]["name"] == "exec_command"
     assert fragments[0]["tool_call_id"] == "call_ok"
     assert json.loads("".join(fragment["arguments"] for fragment in fragments)) == tool_calls[0]["arguments"]
@@ -224,9 +239,9 @@ async def test_openai_compatible_clients_combine_streamed_tool_call_arguments(
         item["type"]
         for event in events
         for item in event["content_items"]
-        if item["type"] in ("partial_tool_call", "tool_call")
+        if item["type"] in ("tool_call.delta", "tool_call.done")
     ]
-    assert kinds.index("partial_tool_call") < kinds.index("tool_call")
+    assert kinds.index("tool_call.delta") < kinds.index("tool_call.done")
 
 
 @pytest.mark.asyncio
@@ -241,8 +256,8 @@ async def test_openai_compatible_clients_report_malformed_streamed_tool_call_arg
     client = _create_auto_client(case)
     _install_fake_stream(client, case, _tool_stream(case, "call_bad", "exec_command", '{"cmd":"python create_docx.py'))
 
-    messages = [{"role": "user", "content_items": [{"type": "text", "text": "Create a memo."}]}]
-    parse_error = await _capture_tool_argument_error(client.streaming_response(messages, {}))
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
+    parse_error = await _capture_tool_argument_error(client.streaming_response(messages, {}), "call_bad")
     assert parse_error.client == case.expected_client
     assert parse_error.tool_name == "exec_command"
     assert parse_error.tool_call_id == "call_bad"
@@ -267,8 +282,8 @@ async def test_openai_compatible_clients_report_non_object_streamed_tool_call_ar
     client = _create_auto_client(case)
     _install_fake_stream(client, case, _tool_stream(case, "call_array", "exec_command", "[]"))
 
-    messages = [{"role": "user", "content_items": [{"type": "text", "text": "Create a memo."}]}]
-    parse_error = await _capture_tool_argument_error(client.streaming_response(messages, {}))
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
+    parse_error = await _capture_tool_argument_error(client.streaming_response(messages, {}), "call_array")
     assert parse_error.client == case.expected_client
     assert parse_error.tool_name == "exec_command"
     assert parse_error.tool_call_id == "call_array"
@@ -354,19 +369,21 @@ async def test_openai_responses_clients_keep_interleaved_parallel_tool_calls(
     client = _create_auto_client(case)
     _install_fake_stream(client, case, _interleaved_parallel_call_stream())
 
-    messages = [{"role": "user", "content_items": [{"type": "text", "text": "Create a memo."}]}]
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
     events = [event async for event in client.streaming_response(messages, {})]
-    tool_calls = [item for event in events for item in event["content_items"] if item["type"] == "tool_call"]
+    # the grammar also proves the two calls reach the caller one after the other
+    assert_stream_grammar(events)
+    tool_calls = [item for event in events for item in event["content_items"] if item["type"] == "tool_call.done"]
 
     assert tool_calls == [
         {
-            "type": "tool_call",
+            "type": "tool_call.done",
             "name": "tool_first",
             "arguments": {"city": "Paris"},
             "tool_call_id": "call_first",
         },
         {
-            "type": "tool_call",
+            "type": "tool_call.done",
             "name": "tool_second",
             "arguments": {"city": "Paris"},
             "tool_call_id": "call_second",

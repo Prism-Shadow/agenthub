@@ -13,7 +13,8 @@
 // limitations under the License.
 
 import { expect, describe, test } from "@jest/globals";
-import { AutoLLMClient, TextContentItem, UniEvent, UniMessage } from "../src";
+import { AutoLLMClient, UniEvent, UniMessage } from "../src";
+import { assertStreamGrammar } from "./streamGrammar";
 
 type FakeOpenAICompatibleClient = {
   baseURL: string;
@@ -124,7 +125,7 @@ function stopChunk(finishReason: string = "stop"): unknown {
 function userMessage(): UniMessage {
   return {
     role: "user",
-    content_items: [{ type: "text", text: "Create a memo." }],
+    content_items: [{ type: "text.done", text: "Create a memo." }],
   };
 }
 
@@ -139,6 +140,7 @@ async function transformHistory(
 }
 
 async function runTurnAndReplay(client: AutoLLMClient): Promise<{
+  events: UniEvent[];
   historyMessage: UniMessage;
   replayedMessage: Record<string, unknown>;
   modelInput: Record<string, unknown>[];
@@ -150,6 +152,7 @@ async function runTurnAndReplay(client: AutoLLMClient): Promise<{
   })) {
     events.push(event);
   }
+  assertStreamGrammar(events);
 
   const history = client.getHistory();
   const modelInput = await transformHistory(client, history);
@@ -159,11 +162,16 @@ async function runTurnAndReplay(client: AutoLLMClient): Promise<{
     throw new Error("history or model input is empty");
   }
 
-  return { historyMessage, replayedMessage, modelInput };
+  return { events, historyMessage, replayedMessage, modelInput };
 }
 
 function thinkingItems(message: UniMessage): unknown[] {
-  return message.content_items.filter((item) => item.type === "thinking");
+  return message.content_items.filter((item) => item.type === "thinking.done");
+}
+
+/** Every item the events carried, in stream order. */
+function streamedItems(events: UniEvent[]) {
+  return events.flatMap((event) => event.content_items);
 }
 
 describe.each(REASONING_REPLAY_CASES)(
@@ -182,7 +190,7 @@ describe.each(REASONING_REPLAY_CASES)(
         await runTurnAndReplay(client);
       expect(thinkingItems(historyMessage)).toEqual([
         {
-          type: "thinking",
+          type: "thinking.done",
           thinking: "Let me think about the memo.",
           fidelity: { reasoning_field: "reasoning_content" },
         },
@@ -206,7 +214,7 @@ describe.each(REASONING_REPLAY_CASES)(
         await runTurnAndReplay(client);
       expect(thinkingItems(historyMessage)).toEqual([
         {
-          type: "thinking",
+          type: "thinking.done",
           thinking: "Let me think about the memo.",
           fidelity: { reasoning_field: "reasoning" },
         },
@@ -229,7 +237,7 @@ describe.each(REASONING_REPLAY_CASES)(
       const { historyMessage, replayedMessage } =
         await runTurnAndReplay(client);
       expect(thinkingItems(historyMessage)).toEqual([
-        { type: "thinking", thinking: "Let me think." },
+        { type: "thinking.done", thinking: "Let me think." },
       ]);
       expect(replayedMessage.reasoning_content).toBe("Let me think.");
       expect(replayedMessage.reasoning).toBe("Let me think.");
@@ -242,8 +250,8 @@ describe.each(REASONING_REPLAY_CASES)(
         {
           role: "assistant",
           content_items: [
-            { type: "thinking", thinking: "Let me think." },
-            { type: "text", text: "Here is the memo." },
+            { type: "thinking.done", thinking: "Let me think." },
+            { type: "text.done", text: "Here is the memo." },
           ],
         },
       ];
@@ -344,12 +352,29 @@ describe.each(RESPONSES_REASONING_CASES)(
         completedEvent(),
       ]);
 
-      const { historyMessage, modelInput } = await runTurnAndReplay(client);
+      const { events, historyMessage, modelInput } =
+        await runTurnAndReplay(client);
 
+      // the fidelity goes out once, on the empty delta the completed item yields, and the
+      // done item carries it
+      expect(
+        streamedItems(events).filter(
+          (item) => item.type === "thinking.delta" && item.fidelity,
+        ),
+      ).toEqual([
+        {
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: {
+            channel: "summary",
+            encrypted_content: FULL_ENCRYPTED_CONTENT,
+          },
+        },
+      ]);
       // one thinking item, carrying the streamed summary and the completed item's fields
       expect(thinkingItems(historyMessage)).toEqual([
         {
-          type: "thinking",
+          type: "thinking.done",
           thinking: SUMMARY_TEXT,
           fidelity: {
             channel: "summary",
@@ -376,43 +401,135 @@ describe.each(RESPONSES_REASONING_CASES)(
   },
 );
 
-function textDeltaEvent(text: string, phase?: string): UniEvent {
-  const item: TextContentItem = { type: "text", text };
-  if (phase !== undefined) {
-    item.fidelity = { phase };
-  }
-
+function messageItemAddedEvent(itemId: string, phase: string): unknown {
   return {
-    role: "assistant",
-    event_type: "delta",
-    content_items: [item],
-    usage_metadata: null,
-    finish_reason: null,
+    type: "response.output_item.added",
+    item: {
+      id: itemId,
+      type: "message",
+      role: "assistant",
+      status: "in_progress",
+      content: [],
+      phase,
+    },
   };
 }
 
-test("concatenation splits text items only on phase change", () => {
-  const client = createAutoClient(REASONING_REPLAY_CASES[0]);
-  const message = client.concatUniEventsToUniMessage([
-    textDeltaEvent("", "commentary"),
-    textDeltaEvent("I'll inspect the logs."),
-    textDeltaEvent("", "final_answer"),
-    textDeltaEvent("Root cause:"),
-    textDeltaEvent(" cache invalidation race."),
-    textDeltaEvent("", "final_answer"),
-    textDeltaEvent(" Remediation follows."),
-  ]);
+function messageTextDeltaEvent(itemId: string, text: string): unknown {
+  return {
+    type: "response.output_text.delta",
+    item_id: itemId,
+    content_index: 0,
+    delta: text,
+  };
+}
 
-  expect(message.content_items).toEqual([
-    {
-      type: "text",
-      text: "I'll inspect the logs.",
-      fidelity: { phase: "commentary" },
+function messageItemDoneEvent(
+  itemId: string,
+  phase: string,
+  text: string,
+): unknown {
+  return {
+    type: "response.output_item.done",
+    item: {
+      id: itemId,
+      type: "message",
+      role: "assistant",
+      status: "completed",
+      content: [{ type: "output_text", text, annotations: [] }],
+      phase,
     },
-    {
-      type: "text",
-      text: "Root cause: cache invalidation race. Remediation follows.",
-      fidelity: { phase: "final_answer" },
-    },
-  ]);
-});
+  };
+}
+
+// A message item's phase is known when the item is added, so it goes out once, on an empty
+// delta, and the item's done carries it. Nothing merges items after the fact: the message keeps
+// one text item per message item, and the replay starts a new message only where the phase
+// changes.
+describe.each(RESPONSES_REASONING_CASES)(
+  "Responses phase replay for $clientType",
+  (testCase) => {
+    test("every message item keeps its phase, and the replay splits only on a phase change", async () => {
+      const client = createAutoClient(testCase);
+      expect(
+        (client as unknown as { _client: object })._client.constructor.name,
+      ).toBe(testCase.expectedClient);
+      installFakeResponsesStream(client, [
+        messageItemAddedEvent("msg_1", "commentary"),
+        messageTextDeltaEvent("msg_1", "I'll inspect the logs."),
+        messageItemDoneEvent("msg_1", "commentary", "I'll inspect the logs."),
+        messageItemAddedEvent("msg_2", "final_answer"),
+        messageTextDeltaEvent("msg_2", "Root cause:"),
+        messageTextDeltaEvent("msg_2", " cache invalidation race."),
+        messageItemDoneEvent(
+          "msg_2",
+          "final_answer",
+          "Root cause: cache invalidation race.",
+        ),
+        messageItemAddedEvent("msg_3", "final_answer"),
+        messageTextDeltaEvent("msg_3", " Remediation follows."),
+        messageItemDoneEvent("msg_3", "final_answer", " Remediation follows."),
+        completedEvent(),
+      ]);
+
+      const { events, historyMessage, modelInput } =
+        await runTurnAndReplay(client);
+
+      const commentary = { phase: "commentary" };
+      const finalAnswer = { phase: "final_answer" };
+      expect(streamedItems(events)).toEqual([
+        { type: "text.delta", text: "", fidelity: commentary },
+        { type: "text.delta", text: "I'll inspect the logs." },
+        {
+          type: "text.done",
+          text: "I'll inspect the logs.",
+          fidelity: commentary,
+        },
+        { type: "text.delta", text: "", fidelity: finalAnswer },
+        { type: "text.delta", text: "Root cause:" },
+        { type: "text.delta", text: " cache invalidation race." },
+        {
+          type: "text.done",
+          text: "Root cause: cache invalidation race.",
+          fidelity: finalAnswer,
+        },
+        { type: "text.delta", text: "", fidelity: finalAnswer },
+        { type: "text.delta", text: " Remediation follows." },
+        {
+          type: "text.done",
+          text: " Remediation follows.",
+          fidelity: finalAnswer,
+        },
+      ]);
+
+      const doneItems = streamedItems(events).filter(
+        (item) => item.type === "text.done",
+      );
+      expect(historyMessage.content_items).toEqual(doneItems);
+      expect(client.concatUniEventsToUniMessage(events).content_items).toEqual(
+        doneItems,
+      );
+
+      expect(modelInput.slice(1)).toEqual([
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "I'll inspect the logs." }],
+          phase: "commentary",
+        },
+        {
+          type: "message",
+          role: "assistant",
+          content: [
+            {
+              type: "output_text",
+              text: "Root cause: cache invalidation race.",
+            },
+            { type: "output_text", text: " Remediation follows." },
+          ],
+          phase: "final_answer",
+        },
+      ]);
+    });
+  },
+);

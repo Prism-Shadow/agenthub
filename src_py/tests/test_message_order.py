@@ -58,18 +58,18 @@ MESSAGE_ORDER_CASES = [
 
 def _messages(case: MessageOrderCase) -> list[dict[str, Any]]:
     return [
-        {"role": "user", "content_items": [{"type": "text", "text": "What is the weather in Paris?"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "What is the weather in Paris?"}]},
         {
             "role": "assistant",
             "content_items": [
                 {
-                    "type": "thinking",
+                    "type": "thinking.done",
                     "thinking": "I should call the tool.",
                     "fidelity": {"signature": case.thought_signature},
                 },
-                {"type": "text", "text": "Let me check that for you."},
+                {"type": "text.done", "text": "Let me check that for you."},
                 {
-                    "type": "tool_call",
+                    "type": "tool_call.done",
                     "name": "get_weather",
                     "arguments": {"city": "Paris"},
                     "tool_call_id": "call_1",
@@ -78,7 +78,7 @@ def _messages(case: MessageOrderCase) -> list[dict[str, Any]]:
         },
         {
             "role": "user",
-            "content_items": [{"type": "tool_result", "text": "20 degrees.", "tool_call_id": "call_1"}],
+            "content_items": [{"type": "tool_result.done", "text": "20 degrees.", "tool_call_id": "call_1"}],
         },
     ]
 
@@ -184,9 +184,9 @@ def test_responses_replays_every_turn_as_a_message_item(case: MessageOrderCase):
     assert client._client.__class__.__name__ == case.expected_client  # noqa: SLF001
 
     history = [
-        {"role": "user", "content_items": [{"type": "text", "text": "Hello."}]},
-        {"role": "assistant", "content_items": [{"type": "text", "text": "Hi there."}]},
-        {"role": "user", "content_items": [{"type": "text", "text": "And now?"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "Hello."}]},
+        {"role": "assistant", "content_items": [{"type": "text.done", "text": "Hi there."}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "And now?"}]},
     ]
     model_input = client._client.transform_uni_message_to_model_input(history)  # noqa: SLF001
 

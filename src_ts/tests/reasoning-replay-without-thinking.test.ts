@@ -24,7 +24,7 @@ import { expect, test } from "@jest/globals";
 import {
   AutoLLMClient,
   ContentItem,
-  ThinkingContentItem,
+  ThinkingDoneItem,
   UniMessage,
 } from "../src";
 
@@ -57,12 +57,14 @@ async function transformHistory(
 function userText(): UniMessage {
   return {
     role: "user",
-    content_items: [{ type: "text", text: "What is the weather in Paris?" }],
+    content_items: [
+      { type: "text.done", text: "What is the weather in Paris?" },
+    ],
   };
 }
 
 function thinkingItem(text: string, reasoningField?: string): ContentItem {
-  const item: ThinkingContentItem = { type: "thinking", thinking: text };
+  const item: ThinkingDoneItem = { type: "thinking.done", thinking: text };
   if (reasoningField !== undefined) {
     item.fidelity = { reasoning_field: reasoningField };
   }
@@ -72,7 +74,7 @@ function thinkingItem(text: string, reasoningField?: string): ContentItem {
 
 function toolCallItem(toolCallId: string): ContentItem {
   return {
-    type: "tool_call",
+    type: "tool_call.done",
     name: "get_weather",
     arguments: { city: "Paris" },
     tool_call_id: toolCallId,
@@ -87,7 +89,7 @@ function toolResults(...toolCallIds: string[]): UniMessage {
   return {
     role: "user",
     content_items: toolCallIds.map((toolCallId): ContentItem => ({
-      type: "tool_result",
+      type: "tool_result.done",
       text: "20 degrees.",
       tool_call_id: toolCallId,
     })),
@@ -151,7 +153,7 @@ test("replay sends no reasoning field when no message ever thought", async () =>
   const history: UniMessage[] = [
     userText(),
     assistant(
-      { type: "text", text: "Let me check that for you." },
+      { type: "text.done", text: "Let me check that for you." },
       toolCallItem("call_1"),
     ),
     toolResults("call_1"),
@@ -175,7 +177,7 @@ test("replay sends no reasoning field for a message without tool calls", async (
       toolCallItem("call_1"),
     ),
     toolResults("call_1"),
-    assistant({ type: "text", text: "It is 20 degrees in Paris." }),
+    assistant({ type: "text.done", text: "It is 20 degrees in Paris." }),
   ];
 
   const messages = assistantMessages(await transformHistory(client, history));

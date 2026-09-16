@@ -126,19 +126,21 @@ function messagesFor(testCase: MessageOrderCase): UniMessage[] {
   return [
     {
       role: "user",
-      content_items: [{ type: "text", text: "What is the weather in Paris?" }],
+      content_items: [
+        { type: "text.done", text: "What is the weather in Paris?" },
+      ],
     },
     {
       role: "assistant",
       content_items: [
         {
-          type: "thinking",
+          type: "thinking.done",
           thinking: "I should call the tool.",
           fidelity: { signature: testCase.thoughtSignature ?? "sig-1" },
         },
-        { type: "text", text: "Let me check that for you." },
+        { type: "text.done", text: "Let me check that for you." },
         {
-          type: "tool_call",
+          type: "tool_call.done",
           name: "get_weather",
           arguments: { city: "Paris" },
           tool_call_id: "call_1",
@@ -148,7 +150,11 @@ function messagesFor(testCase: MessageOrderCase): UniMessage[] {
     {
       role: "user",
       content_items: [
-        { type: "tool_result", text: "20 degrees.", tool_call_id: "call_1" },
+        {
+          type: "tool_result.done",
+          text: "20 degrees.",
+          tool_call_id: "call_1",
+        },
       ],
     },
   ];
@@ -258,12 +264,18 @@ describe.each(RESPONSES_SHAPE_CASES)(
       expect(client.constructor.name).toBe(testCase.expectedClient);
 
       const modelInput = await client.transformUniMessageToModelInput([
-        { role: "user", content_items: [{ type: "text", text: "Hello." }] },
+        {
+          role: "user",
+          content_items: [{ type: "text.done", text: "Hello." }],
+        },
         {
           role: "assistant",
-          content_items: [{ type: "text", text: "Hi there." }],
+          content_items: [{ type: "text.done", text: "Hi there." }],
         },
-        { role: "user", content_items: [{ type: "text", text: "And now?" }] },
+        {
+          role: "user",
+          content_items: [{ type: "text.done", text: "And now?" }],
+        },
       ]);
 
       // every turn is a typed message item — the EasyInputMessage shape, which a vLLM-style

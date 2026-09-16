@@ -48,11 +48,11 @@ async def _transform_history(client: AutoLLMClient, history: list[dict[str, Any]
 
 
 def _user_text() -> dict[str, Any]:
-    return {"role": "user", "content_items": [{"type": "text", "text": "What is the weather in Paris?"}]}
+    return {"role": "user", "content_items": [{"type": "text.done", "text": "What is the weather in Paris?"}]}
 
 
 def _thinking_item(text: str, reasoning_field: str | None = None) -> dict[str, Any]:
-    item: dict[str, Any] = {"type": "thinking", "thinking": text}
+    item: dict[str, Any] = {"type": "thinking.done", "thinking": text}
     if reasoning_field is not None:
         item["fidelity"] = {"reasoning_field": reasoning_field}
 
@@ -60,7 +60,12 @@ def _thinking_item(text: str, reasoning_field: str | None = None) -> dict[str, A
 
 
 def _tool_call_item(tool_call_id: str) -> dict[str, Any]:
-    return {"type": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}, "tool_call_id": tool_call_id}
+    return {
+        "type": "tool_call.done",
+        "name": "get_weather",
+        "arguments": {"city": "Paris"},
+        "tool_call_id": tool_call_id,
+    }
 
 
 def _assistant(*content_items: dict[str, Any]) -> dict[str, Any]:
@@ -71,7 +76,7 @@ def _tool_results(*tool_call_ids: str) -> dict[str, Any]:
     return {
         "role": "user",
         "content_items": [
-            {"type": "tool_result", "text": "20 degrees.", "tool_call_id": tool_call_id}
+            {"type": "tool_result.done", "text": "20 degrees.", "tool_call_id": tool_call_id}
             for tool_call_id in tool_call_ids
         ],
     }
@@ -129,7 +134,7 @@ async def test_replay_sends_no_reasoning_field_when_no_message_ever_thought():
     client = _chat_client()
     history = [
         _user_text(),
-        _assistant({"type": "text", "text": "Let me check that for you."}, _tool_call_item("call_1")),
+        _assistant({"type": "text.done", "text": "Let me check that for you."}, _tool_call_item("call_1")),
         _tool_results("call_1"),
     ]
 
@@ -147,7 +152,7 @@ async def test_replay_sends_no_reasoning_field_for_a_message_without_tool_calls(
         _user_text(),
         _assistant(_thinking_item(THINKING, "reasoning_content"), _tool_call_item("call_1")),
         _tool_results("call_1"),
-        _assistant({"type": "text", "text": "It is 20 degrees in Paris."}),
+        _assistant({"type": "text.done", "text": "It is 20 degrees in Paris."}),
     ]
 
     _thought, answer = _assistant_messages(await _transform_history(client, history))
