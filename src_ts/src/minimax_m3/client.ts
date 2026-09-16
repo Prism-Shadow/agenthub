@@ -304,7 +304,8 @@ export class MiniMaxM3Client extends LLMClient {
             item: {
               type: "tool_call.delta",
               name: item.name,
-              arguments: item.arguments,
+              // a server may complete a call without its arguments field
+              arguments: item.arguments || "",
               tool_call_id: item.call_id,
             },
           },

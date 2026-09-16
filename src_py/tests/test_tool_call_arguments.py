@@ -389,3 +389,53 @@ async def test_openai_responses_clients_keep_interleaved_parallel_tool_calls(
             "tool_call_id": "call_second",
         },
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    RESPONSES_CASES,
+    ids=[case.client_type for case in RESPONSES_CASES],
+)
+async def test_openai_responses_clients_read_a_call_completed_without_arguments_as_no_arguments(
+    case: OpenAICompatibleToolStreamCase,
+):
+    client = _create_auto_client(case)
+    _install_fake_stream(
+        client,
+        case,
+        [
+            SimpleNamespace(
+                type="response.output_item.added",
+                item=SimpleNamespace(type="function_call", id="fc_list", call_id="call_list", name="list_files"),
+            ),
+            SimpleNamespace(type="response.function_call_arguments.done", item_id="fc_list"),
+            # the SDK parses a completed call that leaves its arguments field out as arguments=None
+            SimpleNamespace(
+                type="response.output_item.done",
+                item=SimpleNamespace(
+                    type="function_call",
+                    id="fc_list",
+                    call_id="call_list",
+                    name="list_files",
+                    arguments=None,
+                    status="completed",
+                ),
+            ),
+            _COMPLETED_EVENT,
+        ],
+    )
+
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
+    events = [event async for event in client.streaming_response(messages, {})]
+    assert_stream_grammar(events)
+    tool_calls = [item for event in events for item in event["content_items"] if item["type"] == "tool_call.done"]
+
+    assert tool_calls == [
+        {
+            "type": "tool_call.done",
+            "name": "list_files",
+            "arguments": {},
+            "tool_call_id": "call_list",
+        }
+    ]

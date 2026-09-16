@@ -490,3 +490,52 @@ describe.each(RESPONSES_CASES)(
     });
   },
 );
+
+describe.each(RESPONSES_CASES)(
+  "OpenAI Responses call without arguments for $clientType",
+  (testCase) => {
+    test("reads a call completed without its arguments field as no arguments", async () => {
+      const client = createAutoClient(testCase);
+      installFakeStream(client, testCase, [
+        {
+          type: "response.output_item.added",
+          item: {
+            type: "function_call",
+            id: "fc_list",
+            call_id: "call_list",
+            name: "list_files",
+          },
+        },
+        { type: "response.function_call_arguments.done", item_id: "fc_list" },
+        {
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            id: "fc_list",
+            call_id: "call_list",
+            name: "list_files",
+            status: "completed",
+          },
+        },
+        COMPLETED_EVENT,
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
+      const toolCalls = streamedItems(events).filter(
+        (item): item is ToolCallDoneItem => item.type === "tool_call.done",
+      );
+
+      expect(toolCalls).toEqual([
+        {
+          type: "tool_call.done",
+          name: "list_files",
+          arguments: {},
+          tool_call_id: "call_list",
+        },
+      ]);
+    });
+  },
+);

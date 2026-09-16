@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
@@ -212,11 +213,23 @@ def _gemini_text_delta_event(text: str) -> object:
     return SimpleNamespace(event_type="step.delta", index=0, delta=SimpleNamespace(type="text", text=text))
 
 
-def _gemini_completed_event() -> object:
+def _gemini_delta_event(index: int, delta: object) -> object:
+    return SimpleNamespace(event_type="step.delta", index=index, delta=delta)
+
+
+def _gemini_error_event() -> object:
+    # the error event the streaming reference documents, as the SDK parses it
+    return SimpleNamespace(
+        event_type="error",
+        error=SimpleNamespace(code="gateway_timeout", message="Deadline expired before operation could complete."),
+    )
+
+
+def _gemini_completed_event(status: str = "completed") -> object:
     return SimpleNamespace(
         event_type="interaction.completed",
         interaction=SimpleNamespace(
-            status="completed",
+            status=status,
             usage=SimpleNamespace(
                 total_input_tokens=2, total_cached_tokens=0, total_thought_tokens=1, total_output_tokens=3
             ),
@@ -496,6 +509,86 @@ async def test_gemini_client_rejects_unknown_deltas_in_debug_mode(case: StreamCa
     with pytest.raises(ValueError, match="Unknown output"):
         async for _event in client.streaming_response(MESSAGES, {}):
             pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", GEMINI_STREAM_CASES, ids=[case.client_type for case in GEMINI_STREAM_CASES])
+async def test_gemini_client_raises_provider_error_events(case: StreamCase):
+    client = _create_auto_client(case)
+    _install_fake_gemini_stream(
+        client, [_gemini_text_delta_event("Here is"), _gemini_error_event(), _gemini_completed_event("failed")]
+    )
+
+    with pytest.raises(
+        RuntimeError, match="Gemini stream error gateway_timeout: Deadline expired before operation could complete."
+    ):
+        async for _event in client.streaming_response(MESSAGES, {}):
+            pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", GEMINI_STREAM_CASES, ids=[case.client_type for case in GEMINI_STREAM_CASES])
+async def test_gemini_client_streams_every_image_as_an_item_and_audio_chunks_as_one(case: StreamCase):
+    def data(text: str) -> str:
+        return base64.b64encode(text.encode()).decode()
+
+    client = _create_auto_client(case)
+    _install_fake_gemini_stream(
+        client,
+        [
+            # an image model's thought summary showing two drafts in a row, closed by its signature
+            _gemini_delta_event(
+                0,
+                SimpleNamespace(
+                    type="thought_summary",
+                    content=SimpleNamespace(type="image", data=data("draft 1"), mime_type="image/png"),
+                ),
+            ),
+            _gemini_delta_event(
+                0,
+                SimpleNamespace(
+                    type="thought_summary",
+                    content=SimpleNamespace(type="image", data=data("draft 2"), mime_type="image/png"),
+                ),
+            ),
+            _gemini_delta_event(0, SimpleNamespace(type="thought_signature", signature="sig-1")),
+            SimpleNamespace(event_type="step.stop", index=0),
+            # two images in a row in the model's output
+            _gemini_delta_event(1, SimpleNamespace(type="image", data=data("image 1"), mime_type="image/png")),
+            _gemini_delta_event(1, SimpleNamespace(type="image", data=data("image 2"), mime_type="image/png")),
+            SimpleNamespace(event_type="step.stop", index=1),
+            # speech a TTS model streams in chunks
+            _gemini_delta_event(
+                2,
+                SimpleNamespace(
+                    type="audio", data=data("pcm 1"), mime_type="audio/l16", sample_rate=24000, channels=1
+                ),
+            ),
+            _gemini_delta_event(
+                2,
+                SimpleNamespace(
+                    type="audio", data=data("pcm 2"), mime_type="audio/l16", sample_rate=24000, channels=1
+                ),
+            ),
+            SimpleNamespace(event_type="step.stop", index=2),
+            _gemini_completed_event(),
+        ],
+    )
+
+    events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
+    assert [item for event in events for item in event["content_items"] if item["type"].endswith(".done")] == [
+        {"type": "inline_thinking.done", "data": b"draft 1", "mime_type": "image/png"},
+        {
+            "type": "inline_thinking.done",
+            "data": b"draft 2",
+            "mime_type": "image/png",
+            "fidelity": {"signature": "sig-1"},
+        },
+        {"type": "inline_data.done", "data": b"image 1", "mime_type": "image/png"},
+        {"type": "inline_data.done", "data": b"image 2", "mime_type": "image/png"},
+        {"type": "inline_data.done", "data": b"pcm 1pcm 2", "mime_type": "audio/l16; rate=24000; channels=1"},
+    ]
 
 
 # Every client, driven over a stream opening with an ignorable event of its own protocol.

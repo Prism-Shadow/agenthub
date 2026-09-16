@@ -492,9 +492,10 @@ export class Gemini3_8Client extends LLMClient {
 
           let result: Interactions.FunctionResultStep["result"] = item.text;
           if (item.images) {
-            const resultContent: TextImageBlocks = [
-              { type: "text", text: item.text },
-            ];
+            // an empty text block is rejected, while a result of images alone is accepted
+            const resultContent: TextImageBlocks = item.text
+              ? [{ type: "text", text: item.text }]
+              : [];
             for (const imageUrl of item.images) {
               const imageData = await this._getImageBytesAndMimeType(
                 imageUrl,
@@ -526,12 +527,19 @@ export class Gemini3_8Client extends LLMClient {
 
       // An image model sometimes streams its text before its first thought step, but the API
       // takes a turn holding a thought back only when the turn opens with one: "Model turns with
-      // images must start with a thought block" (verified live 2026-09-16). Such a turn opens
-      // with the placeholder signature Google documents for thoughts it did not produce.
+      // images must start with a thought block" (verified live 2026-09-16). A turn another
+      // provider produced holds no signed thought at all, which the API rejects once the turn
+      // continues with its tool results (verified live 2026-09-16). Both open with the
+      // placeholder signature Google documents for thoughts it did not produce.
       const turn = steps.slice(messageStart);
       if (
-        turn.some((step) => step.type === "thought") &&
-        turn[0].type !== "thought"
+        (turn.some((step) => step.type === "thought") &&
+          turn[0].type !== "thought") ||
+        (turn.some(
+          (step) =>
+            step.type === "model_output" || step.type === "function_call",
+        ) &&
+          !turn.some((step) => step.type === "thought" && step.signature))
       ) {
         steps.splice(messageStart, 0, {
           type: "thought",
@@ -683,6 +691,13 @@ export class Gemini3_8Client extends LLMClient {
           },
         },
       ];
+    } else if (modelOutput.event_type === "error" && modelOutput.error) {
+      // Neither Interactions SDK raises on an error event inside an open stream, so the provider's
+      // failure is raised here rather than lost; an error event without an error, which the Python
+      // SDK makes of a gateway heartbeat, stays with the unknown-event guard.
+      throw new Error(
+        `Gemini stream error ${modelOutput.error.code}: ${modelOutput.error.message}`,
+      );
     } else if (
       ["interaction.created", "interaction.status_update"].includes(
         modelOutput.event_type,
@@ -816,7 +831,8 @@ export class Gemini3_8Client extends LLMClient {
 
     // A step streams one item per run of a content kind: an image model's thought summary can
     // go text, image, text, which is three items, so an item's key is its step index and the
-    // number of the run within the step.
+    // number of the run within the step. Every image delta is a whole image and a run of its
+    // own, while audio streams in chunks of one run.
     let stepKey = "";
     let run = 0;
     let runItem: DeltaContentItem | null = null;
@@ -850,8 +866,13 @@ export class Gemini3_8Client extends LLMClient {
             mime_type: runItem.mime_type,
             fidelity: item.fidelity,
           };
-        }
-        if (runItem !== null && runItem.type !== item.type) {
+        } else if (
+          runItem !== null &&
+          (runItem.type !== item.type ||
+            item.type === "inline_thinking.delta" ||
+            (item.type === "inline_data.delta" &&
+              item.mime_type.startsWith("image/")))
+        ) {
           yield { type: "done", key: `${stepKey}.${run}` };
           run += 1;
         }

@@ -183,3 +183,50 @@ async def test_replay_keeps_each_message_on_its_own_reasoning_field():
     # the request as a whole produced both spellings, so the turn without thinking sends both
     assert third["reasoning_content"] == ""
     assert third["reasoning"] == ""
+
+
+# Gemini rejects such a turn outright once its tool results follow: the Interactions API takes an
+# unfinished model turn back only when it holds a signed thought (verified live 2026-09-16). A turn
+# another provider produced, its unsigned thinking included, opens with the placeholder signature
+# Google documents for thoughts it did not produce, while the signature a generateContent history
+# recorded on a call already makes the turn's thought.
+def _gemini_client() -> AutoLLMClient:
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key="test-key")
+    assert client._client.__class__.__name__ == "Gemini3_8Client"  # noqa: SLF001
+    return client
+
+
+@pytest.mark.asyncio
+async def test_gemini_replay_opens_a_turn_without_a_signed_thought_with_the_placeholder_signature():
+    client = _gemini_client()
+    history = [
+        _user_text(),
+        _assistant({"type": "text.done", "text": "Let me check that for you."}, _tool_call_item("call_1")),
+        _tool_results("call_1"),
+        _assistant(_thinking_item(THINKING, "reasoning_content"), _tool_call_item("call_2")),
+        _tool_results("call_2"),
+        _assistant({**_tool_call_item("call_3"), "fidelity": {"signature": "sig-3"}}),
+        _tool_results("call_3"),
+    ]
+
+    steps = await _transform_history(client, history)
+    assert [step["type"] for step in steps] == [
+        "user_input",
+        "thought",
+        "model_output",
+        "function_call",
+        "function_result",
+        "thought",
+        "thought",
+        "function_call",
+        "function_result",
+        "thought",
+        "function_call",
+        "function_result",
+    ]
+    assert [step for step in steps if step["type"] == "thought"] == [
+        {"type": "thought", "signature": "skip_thought_signature_validator"},
+        {"type": "thought", "signature": "skip_thought_signature_validator"},
+        {"type": "thought", "summary": [{"type": "text", "text": THINKING}]},
+        {"type": "thought", "signature": "sig-3"},
+    ]

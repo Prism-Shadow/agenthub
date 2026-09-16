@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import inspect
 import json
 from collections.abc import AsyncIterator
@@ -457,3 +458,27 @@ async def test_responses_message_items_keep_their_phase_and_replay_splits_only_o
             "phase": "final_answer",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_replays_a_bytes_signature_on_a_thinking_item_as_base64():
+    """The generateContent client recorded every thought signature as bytes, a thinking item's included."""
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key="test-key")
+    assert client._client.__class__.__name__ == "Gemini3_8Client"  # noqa: SLF001
+    history = [
+        _user_message(),
+        {
+            "role": "assistant",
+            "content_items": [
+                {"type": "thinking.done", "thinking": "Let me think.", "fidelity": {"signature": b"sig-1"}},
+                {"type": "text.done", "text": "Here is the memo."},
+            ],
+        },
+    ]
+
+    model_input = await _transform_history(client, history)
+    assert model_input[1] == {
+        "type": "thought",
+        "summary": [{"type": "text", "text": "Let me think."}],
+        "signature": base64.b64encode(b"sig-1").decode(),
+    }

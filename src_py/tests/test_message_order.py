@@ -155,6 +155,25 @@ async def test_message_transform_keeps_content_item_order(case: MessageOrderCase
         assert model_input[4]["result"] == "20 degrees."
 
 
+@pytest.mark.asyncio
+async def test_gemini_sends_an_image_only_tool_result_without_an_empty_text_block():
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key="test-key")
+    assert client._client.__class__.__name__ == "Gemini3_8Client"  # noqa: SLF001
+    messages = _messages()
+    messages[2]["content_items"] = [
+        {
+            "type": "tool_result.done",
+            "text": "",
+            "images": ["data:image/png;base64,iVBORw0KGgo="],
+            "tool_call_id": "call_1",
+        }
+    ]
+
+    model_input = await client._client.transform_uni_message_to_model_input(messages)  # noqa: SLF001
+    # an empty text block is rejected with a 400, while a result of images alone is accepted
+    assert model_input[4]["result"] == [{"type": "image", "data": "iVBORw0KGgo=", "mime_type": "image/png"}]
+
+
 # The generic client and the three routed ones share the replayed shape, so the cases are the
 # Responses rows of the order suite.
 RESPONSES_SHAPE_CASES = [case for case in MESSAGE_ORDER_CASES if case.protocol == "responses"]

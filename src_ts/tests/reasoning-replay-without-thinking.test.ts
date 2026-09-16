@@ -220,3 +220,66 @@ test("replay keeps each message on its own reasoning field", async () => {
   expect(third.reasoning_content).toBe("");
   expect(third.reasoning).toBe("");
 });
+
+// Gemini rejects such a turn outright once its tool results follow: the Interactions API takes
+// an unfinished model turn back only when it holds a signed thought (verified live 2026-09-16).
+// A turn another provider produced, its unsigned thinking included, opens with the placeholder
+// signature Google documents for thoughts it did not produce, while the signature a
+// generateContent history recorded on a call already makes the turn's thought.
+function geminiClient(): AutoLLMClient {
+  const client = new AutoLLMClient({
+    model: "gemini-3.8-flash",
+    apiKey: "test-key",
+  });
+  expect(
+    (client as unknown as { _client: object })._client.constructor.name,
+  ).toBe("Gemini3_8Client");
+  return client;
+}
+
+test("gemini replay opens a turn without a signed thought with the placeholder signature", async () => {
+  const client = geminiClient();
+  const history: UniMessage[] = [
+    userText(),
+    assistant(
+      { type: "text.done", text: "Let me check that for you." },
+      toolCallItem("call_1"),
+    ),
+    toolResults("call_1"),
+    assistant(
+      thinkingItem(THINKING, "reasoning_content"),
+      toolCallItem("call_2"),
+    ),
+    toolResults("call_2"),
+    assistant({
+      type: "tool_call.done",
+      name: "get_weather",
+      arguments: { city: "Paris" },
+      tool_call_id: "call_3",
+      fidelity: { signature: "sig-3" },
+    }),
+    toolResults("call_3"),
+  ];
+
+  const steps = await transformHistory(client, history);
+  expect(steps.map((step) => step.type)).toEqual([
+    "user_input",
+    "thought",
+    "model_output",
+    "function_call",
+    "function_result",
+    "thought",
+    "thought",
+    "function_call",
+    "function_result",
+    "thought",
+    "function_call",
+    "function_result",
+  ]);
+  expect(steps.filter((step) => step.type === "thought")).toEqual([
+    { type: "thought", signature: "skip_thought_signature_validator" },
+    { type: "thought", signature: "skip_thought_signature_validator" },
+    { type: "thought", summary: [{ type: "text", text: THINKING }] },
+    { type: "thought", signature: "sig-3" },
+  ]);
+});

@@ -383,6 +383,39 @@ def test_chat_app_reports_a_response_that_fails_midway_as_an_error_event(monkeyp
     assert events[-1] == "[DONE]"
 
 
+def test_chat_app_names_an_error_without_a_message_by_its_class(monkeypatch):
+    """Test that a failure carrying no message still reaches the page as an error it shows."""
+
+    class TimingOutClient:
+        def __init__(self, model, api_key=None, base_url=None, client_type=None, default_headers=None):
+            pass
+
+        async def streaming_response_stateful(self, message, config, signal=None):
+            yield EVENTS[0]
+            raise TimeoutError()
+
+    playground._session_clients.clear()
+    playground._session_client_options.clear()
+    monkeypatch.setattr(playground, "AutoLLMClient", TimingOutClient)
+
+    app = create_chat_app()
+    with app.test_client() as client:
+        response = client.post(
+            "/api/chat",
+            json={
+                "session_id": "timing-out-stream",
+                "message": {"role": "user", "content_items": [{"type": "text.done", "text": "Hello"}]},
+                "config": {"model": "gpt-5.5"},
+            },
+        )
+
+        assert response.status_code == 200
+        events = _sse_events(response.data)
+
+    assert [json.loads(event) for event in events[:-1]] == [EVENTS[0], {"error": "TimeoutError"}]
+    assert events[-1] == "[DONE]"
+
+
 def test_chat_app_abort_route_interrupts_active_signal():
     """Test that the abort route interrupts the active request signal."""
     playground._session_abort_signals.clear()

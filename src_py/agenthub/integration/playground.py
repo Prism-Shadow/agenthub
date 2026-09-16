@@ -1459,8 +1459,9 @@ def create_chat_app() -> Flask:
                         pass
                 raise
             except Exception as e:
-                # a failed response has no stop event, so the page gets the error as an event of its own
-                error_event = {"error": str(e)}
+                # a failed response has no stop event, so the page gets the error as an event of its own,
+                # named by its class when it carries no message, since the page shows no empty error
+                error_event = {"error": str(e) or type(e).__name__}
                 yield f"data: {json.dumps(error_event, ensure_ascii=False)}\n\n"
                 yield "data: [DONE]\n\n"
             finally:

@@ -339,6 +339,35 @@ describe("Playground", () => {
     ]);
   });
 
+  test("should name an error without a message by its class", async () => {
+    class TimeoutError extends Error {}
+    (AutoLLMClient as unknown as jest.Mock).mockImplementationOnce(() => ({
+      streamingResponseStateful: async function* (): AsyncGenerator<UniEvent> {
+        yield mockEvents[0];
+        throw new TimeoutError();
+      },
+    }));
+    const app = createChatApp();
+
+    const response = await request(app)
+      .post("/api/chat")
+      .send({
+        session_id: "timing-out-stream",
+        message: {
+          role: "user",
+          content_items: [{ type: "text.done", text: "Hello" }],
+        },
+        config: { model: "gpt-5.5" },
+      });
+
+    expect(response.status).toBe(200);
+    expect(sseEvents(response.text)).toEqual([
+      JSON.stringify(mockEvents[0]),
+      JSON.stringify({ error: "TimeoutError" }),
+      "[DONE]",
+    ]);
+  });
+
   test("should expose an abort endpoint", async () => {
     const app = createChatApp();
 

@@ -252,7 +252,8 @@ class MiniMaxM3Client(LLMClient):
                         "item": {
                             "type": "tool_call.delta",
                             "name": item.name,
-                            "arguments": item.arguments,
+                            # a server may complete a call without its arguments field
+                            "arguments": item.arguments or "",
                             "tool_call_id": item.call_id,
                         },
                     },

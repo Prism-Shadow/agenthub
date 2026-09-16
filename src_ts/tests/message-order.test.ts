@@ -240,6 +240,28 @@ describe.each(MESSAGE_ORDER_CASES)(
   },
 );
 
+describe("Message transform shape for Gemini3_8Client", () => {
+  test("sends an image-only tool result without an empty text block", async () => {
+    const client = routedClient("gemini-3.8-flash");
+    expect(client.constructor.name).toBe("Gemini3_8Client");
+    const messages = messagesFor();
+    messages[2].content_items = [
+      {
+        type: "tool_result.done",
+        text: "",
+        images: ["data:image/png;base64,iVBORw0KGgo="],
+        tool_call_id: "call_1",
+      },
+    ];
+
+    const modelInput = await client.transformUniMessageToModelInput(messages);
+    // an empty text block is rejected with a 400, while a result of images alone is accepted
+    expect(modelInput[4].result).toEqual([
+      { type: "image", data: "iVBORw0KGgo=", mime_type: "image/png" },
+    ]);
+  });
+});
+
 // The generic client and the three routed ones share the replayed shape, so the cases are
 // the Responses rows of the order suite.
 const RESPONSES_SHAPE_CASES = MESSAGE_ORDER_CASES.filter(

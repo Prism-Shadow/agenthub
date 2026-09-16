@@ -278,9 +278,13 @@ class Gemini3_8Client(LLMClient):
             thought: interactions.ThoughtStepParam | None = None
 
             for item in msg["content_items"]:
+                signature = (item.get("fidelity") or {}).get("signature")
+                # the generateContent SDK recorded signatures as bytes, on thinking items as on the rest
+                if isinstance(signature, bytes):
+                    signature = base64.b64encode(signature).decode()
+
                 if item["type"] in ("thinking.done", "inline_thinking.done"):
                     content = None
-                    signature = (item.get("fidelity") or {}).get("signature")
                     summary = []
                     if item["type"] == "inline_thinking.done":
                         summary.append(
@@ -308,15 +312,10 @@ class Gemini3_8Client(LLMClient):
                     continue
 
                 thought = None
-                signature = (item.get("fidelity") or {}).get("signature")
                 if signature:
                     # Histories recorded through generateContent carry the signature on the text,
                     # image or call it came with and hold no thinking item; the Interactions API takes
-                    # it back as a thought step in front of that item (verified live 2026-09-16). The
-                    # generateContent SDK recorded it as bytes.
-                    if isinstance(signature, bytes):
-                        signature = base64.b64encode(signature).decode()
-
+                    # it back as a thought step in front of that item (verified live 2026-09-16).
                     steps.append({"type": "thought", "signature": signature})
                     content = None
 
@@ -366,7 +365,8 @@ class Gemini3_8Client(LLMClient):
 
                     result: str | list[dict[str, str]] = item["text"]
                     if "images" in item:
-                        result = [{"type": "text", "text": item["text"]}]
+                        # an empty text block is rejected, while a result of images alone is accepted
+                        result = [{"type": "text", "text": item["text"]}] if item["text"] else []
                         for image_url in item["images"]:
                             image_data = await self._get_image_bytes_and_mime_type(image_url)
                             result.append(
@@ -388,10 +388,15 @@ class Gemini3_8Client(LLMClient):
 
             # An image model sometimes streams its text before its first thought step, but the API
             # takes a turn holding a thought back only when the turn opens with one: "Model turns with
-            # images must start with a thought block" (verified live 2026-09-16). Such a turn opens
-            # with the placeholder signature Google documents for thoughts it did not produce.
+            # images must start with a thought block" (verified live 2026-09-16). A turn another
+            # provider produced holds no signed thought at all, which the API rejects once the turn
+            # continues with its tool results (verified live 2026-09-16). Both open with the
+            # placeholder signature Google documents for thoughts it did not produce.
             turn = steps[message_start:]
-            if any(step["type"] == "thought" for step in turn) and turn[0]["type"] != "thought":
+            if (any(step["type"] == "thought" for step in turn) and turn[0]["type"] != "thought") or (
+                any(step["type"] in ("model_output", "function_call") for step in turn)
+                and not any(step["type"] == "thought" and step.get("signature") for step in turn)
+            ):
                 steps.insert(message_start, {"type": "thought", "signature": "skip_thought_signature_validator"})
 
         return steps
@@ -528,6 +533,12 @@ class Gemini3_8Client(LLMClient):
                 }
             ]
 
+        elif model_output.event_type == "error" and model_output.error is not None:
+            # Neither Interactions SDK raises on an error event inside an open stream, so the provider's
+            # failure is raised here rather than lost; an error event without an error, which the Python
+            # SDK makes of a gateway heartbeat, stays with the unknown-event guard.
+            raise RuntimeError(f"Gemini stream error {model_output.error.code}: {model_output.error.message}")
+
         elif model_output.event_type in ("interaction.created", "interaction.status_update"):
             return []
 
@@ -625,7 +636,8 @@ class Gemini3_8Client(LLMClient):
 
         # A step streams one item per run of a content kind: an image model's thought summary can go
         # text, image, text, which is three items, so an item's key is its step index and the number
-        # of the run within the step.
+        # of the run within the step. Every image delta is a whole image and a run of its own, while audio
+        # streams in chunks of one run.
         step_key = ""
         run = 0
         run_item: DeltaContentItem | None = None
@@ -658,8 +670,11 @@ class Gemini3_8Client(LLMClient):
                         "mime_type": run_item["mime_type"],
                         "fidelity": item["fidelity"],
                     }
-
-                if run_item is not None and run_item["type"] != item["type"]:
+                elif run_item is not None and (
+                    run_item["type"] != item["type"]
+                    or item["type"] == "inline_thinking.delta"
+                    or (item["type"] == "inline_data.delta" and item["mime_type"].startswith("image/"))
+                ):
                     yield {"type": "done", "key": f"{step_key}.{run}"}
                     run += 1
 

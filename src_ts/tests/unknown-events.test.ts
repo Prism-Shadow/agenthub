@@ -290,11 +290,26 @@ function geminiTextDeltaEvent(text: string): unknown {
   };
 }
 
-function geminiCompletedEvent(): unknown {
+function geminiDeltaEvent(index: number, delta: object): unknown {
+  return { event_type: "step.delta", index, delta };
+}
+
+function geminiErrorEvent(): unknown {
+  // the error event the streaming reference documents, which the SDK hands over as parsed
+  return {
+    event_type: "error",
+    error: {
+      message: "Deadline expired before operation could complete.",
+      code: "gateway_timeout",
+    },
+  };
+}
+
+function geminiCompletedEvent(status = "completed"): unknown {
   return {
     event_type: "interaction.completed",
     interaction: {
-      status: "completed",
+      status,
       usage: {
         total_input_tokens: 2,
         total_cached_tokens: 0,
@@ -608,6 +623,112 @@ describe.each(GEMINI_STREAM_CASES)(
       // item, the stop
       expect(events).toHaveLength(4);
       expect(events[events.length - 1].finish_reason).toBe("stop");
+    });
+
+    test("raises a provider error event with its code and message", async () => {
+      const client = createAutoClient(testCase);
+      installFakeGeminiStream(client, [
+        geminiTextDeltaEvent("Here is"),
+        geminiErrorEvent(),
+        geminiCompletedEvent("failed"),
+      ]);
+
+      await expect(
+        collectEvents(client.streamingResponse({ messages, config: {} })),
+      ).rejects.toThrow(
+        "Gemini stream error gateway_timeout: Deadline expired before operation could complete.",
+      );
+    });
+
+    test("streams every image of a step as an item of its own and audio chunks as one item", async () => {
+      const data = (text: string) => Buffer.from(text).toString("base64");
+      const client = createAutoClient(testCase);
+      installFakeGeminiStream(client, [
+        // an image model's thought summary showing two drafts in a row, closed by its signature
+        geminiDeltaEvent(0, {
+          type: "thought_summary",
+          content: {
+            type: "image",
+            data: data("draft 1"),
+            mime_type: "image/png",
+          },
+        }),
+        geminiDeltaEvent(0, {
+          type: "thought_summary",
+          content: {
+            type: "image",
+            data: data("draft 2"),
+            mime_type: "image/png",
+          },
+        }),
+        geminiDeltaEvent(0, { type: "thought_signature", signature: "sig-1" }),
+        { event_type: "step.stop", index: 0 },
+        // two images in a row in the model's output
+        geminiDeltaEvent(1, {
+          type: "image",
+          data: data("image 1"),
+          mime_type: "image/png",
+        }),
+        geminiDeltaEvent(1, {
+          type: "image",
+          data: data("image 2"),
+          mime_type: "image/png",
+        }),
+        { event_type: "step.stop", index: 1 },
+        // speech a TTS model streams in chunks
+        geminiDeltaEvent(2, {
+          type: "audio",
+          data: data("pcm 1"),
+          mime_type: "audio/l16",
+          sample_rate: 24000,
+          channels: 1,
+        }),
+        geminiDeltaEvent(2, {
+          type: "audio",
+          data: data("pcm 2"),
+          mime_type: "audio/l16",
+          sample_rate: 24000,
+          channels: 1,
+        }),
+        { event_type: "step.stop", index: 2 },
+        geminiCompletedEvent(),
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
+      const doneItems = events
+        .flatMap((event): EventContentItem[] => event.content_items)
+        .filter((item) => item.type.endsWith(".done"));
+      expect(doneItems).toEqual([
+        {
+          type: "inline_thinking.done",
+          data: Buffer.from("draft 1"),
+          mime_type: "image/png",
+        },
+        {
+          type: "inline_thinking.done",
+          data: Buffer.from("draft 2"),
+          mime_type: "image/png",
+          fidelity: { signature: "sig-1" },
+        },
+        {
+          type: "inline_data.done",
+          data: Buffer.from("image 1"),
+          mime_type: "image/png",
+        },
+        {
+          type: "inline_data.done",
+          data: Buffer.from("image 2"),
+          mime_type: "image/png",
+        },
+        {
+          type: "inline_data.done",
+          data: Buffer.from("pcm 1pcm 2"),
+          mime_type: "audio/l16; rate=24000; channels=1",
+        },
+      ]);
     });
   },
 );

@@ -12,14 +12,14 @@
 
 - `Gemini3_8Client`（Python 与 TypeScript）通过 Interactions API（`client.interactions.create`，流式，`store: false`，每次请求携带完整历史）发送文本、图像与 TTS 请求；generateContent 路径被移除。embedding 模型仍使用 `models.embedContent`，因为 Interactions API 对它们返回 404。
 - SDK 依赖提升为 `@google/genai` `^2.22.0` 与 `google-genai>=2.23.0`。
-- 流以 step 的 `index` 作为 key。某个 step 的内容切换种类时，每一段同种类内容流出一个内容项，key 为 `<index>.<run>`，因此图像模型先文本、再图像、再文本的思考摘要是三个内容项。
+- 流以 step 的 `index` 作为 key。某个 step 的内容切换种类时，每一段同种类内容流出一个内容项，key 为 `<index>.<run>`，因此图像模型先文本、再图像、再文本的思考摘要是三个内容项；每张图像各为一个内容项，音频片段则合为一个。
 - `thought` step 的 `thought_summary` 文本以 `thinking.delta` 流出，摘要图像以 `inline_thinking.delta` 流出；其 `thought_signature` 作为 `fidelity.signature`，挂在该 step 最后一个内容项同种类的空增量上（step 没有摘要时为空的 `thinking.delta`）。因此每个 Gemini 文本响应都带有一个承载 signature 的 `thinking.done` 项，摘要关闭时其 `thinking` 为空。
 - `function_call` step 以携带调用名称与 id 的 `tool_call.delta` 开始，参数以片段流出。`model_output` step 流出 `text.delta`，图像与音频流出 `inline_data.delta`；TTS 音频的 mime type 为 `audio/l16; rate=<sample_rate>; channels=<channels>`。
-- `interaction.completed` 设置结束原因与用量；未知的事件、step 与增量被跳过，在 `AGENTHUB_DEBUG` 下抛出异常。
+- `interaction.completed` 设置结束原因与用量；携带 error 的 `error` 事件抛出包含提供方错误码与错误信息的异常；未知的事件、step 与增量被跳过，在 `AGENTHUB_DEBUG` 下抛出异常。
 - 消息以 Interactions step 发出：用户文本与图像为 `user_input` step，图像以 base64 内联、URL 先行下载；助手的文本与媒体为 `model_output` step；思考内容项每一段连续内容合为一个 `thought` step，携带摘要以及结束该段的内容项的 signature；`tool_call.done` 为 `function_call`；`tool_result.done` 为 `function_result`，函数 `name` 取自对应的调用，纯文本结果为字符串，附带图像时为文本加图像的内容列表。空文本块不发送。
-- 经 generateContent 客户端记录的历史把 `fidelity.signature` 放在文本、内联数据或工具调用内容项上；这样的内容项回放时，前面加一个携带其 signature 的 `thought` step。generateContent Python SDK 以 bytes 记录的 signature 以 base64 发送。
+- 经 generateContent 客户端记录的历史把 `fidelity.signature` 放在文本、内联数据或工具调用内容项上；这样的内容项回放时，前面加一个携带其 signature 的 `thought` step。generateContent Python SDK 以 bytes 记录的 signature（思考内容项上的也一样）以 base64 发送。
 - 以函数名作为 id 记录的调用，回放时不带 `id` 与 `call_id`。
-- 含有 `thought` step 却不以其开头的助手消息（图像模型有时在第一个思考之前先流出文本），回放时以一个携带占位 signature `skip_thought_signature_validator` 的 `thought` step 开头。
+- 含有 `thought` step 却不以其开头的助手消息（图像模型有时在第一个思考之前先流出文本），回放时以一个携带占位 signature `skip_thought_signature_validator` 的 `thought` step 开头；含有文本、媒体或工具调用、却没有携带 signature 的 `thought` step 的助手消息（由其他提供方生成的轮次）同样如此。
 - `thinking_summary: true` 时，`gemini-3.8-flash` 会流出思考摘要。
 - 共享单元测试中的 Gemini 用例（`unknown-events`、`message-order`、`thinking-level-mapping`）按 Interactions 的事件与 step 重写。
 - `llmsdk_docs/gemini_interactions/README.md` 记录了图像模型可能在第一个思考之前先流出文本、回放时共用同一 id 的并行调用与空文本块会被拒绝，以及先文本的图像轮次可被接受的回放形式。

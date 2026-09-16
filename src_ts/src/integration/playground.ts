@@ -1462,9 +1462,13 @@ export function createChatApp(): Express {
         return;
       }
 
-      // a failed response has no stop event, so the page gets the error as an event of its own
+      // a failed response has no stop event, so the page gets the error as an event of its own,
+      // named by its class when it carries no message, since the page shows no empty error
       const errorEvent = {
-        error: error instanceof Error ? error.message : String(error),
+        error:
+          error instanceof Error
+            ? error.message || error.constructor.name
+            : String(error),
       };
       completed = true;
       res.write(`data: ${JSON.stringify(errorEvent)}\n\n`);
