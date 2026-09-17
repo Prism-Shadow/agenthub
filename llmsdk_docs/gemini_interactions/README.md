@@ -87,3 +87,49 @@ The snapshot describes the `steps` schema introduced by the May 2026 breaking ch
 - `usage.total_tokens = total_input_tokens + total_output_tokens + total_thought_tokens`;
   `total_input_tokens` includes `total_cached_tokens`.
 - `gemini-embedding-2` is rejected by the Interactions endpoint (404 model not found).
+
+## Vertex AI (verified 2026-09-17)
+
+- The Interactions endpoint is
+  `POST https://aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/interactions`,
+  on `v1beta1` only (`v1` and `v1alpha` answer 404).
+- It answers `400 Unsupported model interaction: <model>` for `gemini-3.8-flash`,
+  `gemini-3.7-flash`, `gemini-3.6-flash`, `gemini-3.5-flash`, `gemini-3.5-flash-lite`,
+  `gemini-3.1-flash-lite`, `gemini-3.1-pro-preview`, `gemini-3-pro-preview`, the image models
+  (`gemini-3.1-flash-image`, `gemini-3-pro-image`, their `-preview` ids,
+  `gemini-3.1-flash-lite-image`), the TTS models (`gemini-3.1-flash-tts-preview`,
+  `gemini-2.5-flash-tts`, `gemini-2.5-pro-tts`), `gemini-2.5-pro`, `gemini-2.5-flash`,
+  `gemini-2.5-flash-lite` and `gemini-embedding-2`. `gemini-3.8-flash` answers the same in every
+  location tried (`global`, `us`, `eu`, `us-central1`, `europe-west4`), with every model spelling
+  (`google/…`, `models/…`, `publishers/google/models/…`, the full resource name), with the
+  client's body, a minimal string input and the Vertex documentation's body, streamed or not,
+  whatever `store` is.
+- Of the Gemini models only two are served: `gemini-3-flash-preview`, with `store` true or
+  omitted (`store: false` → 400 "gemini-3-flash-preview on this path must set store to true."),
+  in `global` (`us-central1` → 400 naming `global`, `us` and `eu` as the supported locations;
+  `us` and `eu` → 404 for the model); and `gemini-omni-1.1-flash-preview`, non-streaming only
+  (streaming → 400 "Omni does not support streaming.").
+- `streamGenerateContent` serves `gemini-3.8-flash` (thinking, a tool call and its replayed
+  turn), `gemini-3.1-flash-image` and `gemini-3.1-flash-tts-preview`. Every chunk carries a
+  `usageMetadata` holding only `trafficType`; the token counts arrive with the finish reason.
+- `embedContent` takes one content per request: two `contents` → 400
+  `Unknown name "contents"`, and both SDKs refuse a second content before sending. The response
+  carries no `metadata`; its `usageMetadata.promptTokenCount` reaches the SDKs as
+  `embeddings[0].statistics.tokenCount`.
+- `models.list` (`GET v1beta1/publishers/google/models`) returns 27 ids, `gemini-1.5-pro-002`,
+  the transcribe models and `spicy-mayo` among them, and leaves out
+  `gemini-3.1-flash-tts-preview`, which `streamGenerateContent` serves.
+- generateContent on Vertex AI rejects a content that mixes `functionResponse` parts with other
+  parts ("Requests ending with a model turn are not supported"; found with the earlier
+  generateContent client), so function responses go in a content of their own.
+- Thought signatures are bound to the endpoint that issued them: a signature from the API-key
+  Interactions endpoint replayed on Vertex AI generateContent → 400 "Invalid thought signature."
+  (the same request on the API-key generateContent endpoint → 200), and a Vertex AI generateContent
+  signature replayed through the API-key Interactions endpoint → 400 "Corrupted thought signature."
+- On Vertex AI generateContent the first `functionCall` of the turn must carry the signature (a
+  signature on the preceding thought part → 400 "missing a thought_signature");
+  `skip_thought_signature_validator` on that call → 200.
+- On the API-key Interactions endpoint, a turn that opens with an unsigned `thought` step followed
+  by a signed one → 400 "Request contains an invalid argument."; giving the first thought step the
+  same signature → 200, dropping it → 400 "Model turns with thought summaries must start with a
+  thought block".

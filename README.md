@@ -51,6 +51,12 @@ https://github.com/user-attachments/assets/c49a21a1-5bf9-4768-a76d-f73c9a03ca87
 | MiniMax-M3     | Official                            | `MiniMax-M3`           | Text, Image      | Text                           |
 | Qwen3.6        | OpenRouter/SiliconFlow/vLLM         | `qwen/qwen3.6-35b-a3b` | Text, Image      | Text, Embedding                |
 
+Gemini on Google Vertex AI takes the service-account JSON key as the API key. Such a key is
+served through generateContent, because Vertex AI's Interactions endpoint serves none of these
+models; any other Gemini key uses the Interactions API. `client_type="gemini-interactions"` and
+`client_type="gemini-generate-content"` pin the wire protocol explicitly, the latter also for
+gateways that proxy generateContent only.
+
 Beyond the model-specific clients, four generic protocol clients call any compatible
 endpoint:
 
@@ -689,6 +695,7 @@ Every client speaks one vendor protocol on the wire, whichever `client_type` rea
 | `client_type`                                              | Wire protocol      |
 | ---------------------------------------------------------- | ------------------ |
 | `gemini-3.8`, `gemini-3.7`, `gemini-3`, `gemini-embedding` | `google-genai`     |
+| `gemini-interactions`, `gemini-generate-content`           | `google-genai`     |
 | `claude-5`, `claude-4-8`, `claude-4-7`, `claude-4-6`       | `ant-messages`     |
 | `ant-messages`                                             | `ant-messages`     |
 | `gpt-6`, `gpt-5.6`, `gpt-5.5`, `gpt-5.4`                   | `openai-responses` |

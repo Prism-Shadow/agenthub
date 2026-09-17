@@ -47,9 +47,11 @@ type TextImageBlocks = NonNullable<Interactions.ThoughtStep["summary"]>;
  * Unified client for the Gemini family, named for the newest generation it
  * serves (3.8). It speaks the Interactions API statelessly (store=false, the
  * whole history in every request) for 3.8 back through the 3.x text, image,
- * and TTS models, and embeds through embedContent, because the Interactions
- * API does not serve the embedding models. It applies the 3.6-generation
- * parameter contract to the whole family: temperature is rejected everywhere.
+ * and TTS models with an API key; Vertex AI is served by
+ * gemini3_8_generate_content. It embeds through embedContent, because the
+ * Interactions API does not serve the embedding models, and applies the
+ * 3.6-generation parameter contract to the whole family: temperature is
+ * rejected everywhere.
  *
  * Starting with the 3.6 generation the API deprecates the temperature/top_p/top_k
  * sampling parameters (silently ignored today, HTTP 400 in future
@@ -432,6 +434,13 @@ export class Gemini3_8Client extends LLMClient {
           // it back as a thought step in front of that item (verified live 2026-09-16).
           steps.push({ type: "thought", signature: item.fidelity.signature });
           content = null;
+          // A thought summary such a history holds is unsigned, and a turn opening with an unsigned
+          // thought is rejected ("Request contains an invalid argument") while the same signature
+          // on two thoughts is accepted (verified live 2026-09-17), so the opening thought takes it too.
+          const first = steps[messageStart];
+          if (first.type === "thought" && !first.signature) {
+            first.signature = item.fidelity.signature;
+          }
         }
 
         if (

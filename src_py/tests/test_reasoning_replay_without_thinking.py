@@ -21,6 +21,7 @@ recognises as its own, which it cannot once a relay has reissued them. The turn 
 carries the reasoning field empty.
 """
 
+import base64
 import inspect
 from typing import Any
 
@@ -196,20 +197,23 @@ def _gemini_client() -> AutoLLMClient:
     return client
 
 
-@pytest.mark.asyncio
-async def test_gemini_replay_opens_a_turn_without_a_signed_thought_with_the_placeholder_signature():
-    client = _gemini_client()
-    history = [
+def _gemini_history(signature: str) -> list[dict[str, Any]]:
+    return [
         _user_text(),
         _assistant({"type": "text.done", "text": "Let me check that for you."}, _tool_call_item("call_1")),
         _tool_results("call_1"),
         _assistant(_thinking_item(THINKING, "reasoning_content"), _tool_call_item("call_2")),
         _tool_results("call_2"),
-        _assistant({**_tool_call_item("call_3"), "fidelity": {"signature": "sig-3"}}),
+        _assistant({**_tool_call_item("call_3"), "fidelity": {"signature": signature}}),
         _tool_results("call_3"),
     ]
 
-    steps = await _transform_history(client, history)
+
+@pytest.mark.asyncio
+async def test_gemini_replay_opens_a_turn_without_a_signed_thought_with_the_placeholder_signature():
+    client = _gemini_client()
+
+    steps = await _transform_history(client, _gemini_history("sig-3"))
     assert [step["type"] for step in steps] == [
         "user_input",
         "thought",
@@ -229,4 +233,35 @@ async def test_gemini_replay_opens_a_turn_without_a_signed_thought_with_the_plac
         {"type": "thought", "signature": "skip_thought_signature_validator"},
         {"type": "thought", "summary": [{"type": "text", "text": THINKING}]},
         {"type": "thought", "signature": "sig-3"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_replay_signs_the_first_call_of_an_unsigned_turn_with_the_placeholder():
+    """generateContent validates the signature on the first function call of a turn instead."""
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key="test-key", client_type="gemini-generate-content")
+    assert client._client.__class__.__name__ == "Gemini3_8GenerateContentClient"  # noqa: SLF001
+    # the Gemini SDK takes a thought signature as base64 text, the form a stream records it in
+    signature = base64.b64encode(b"sig-3").decode()
+
+    contents = await _transform_history(client, _gemini_history(signature))
+
+    def call(tool_call_id: str) -> dict[str, Any]:
+        return {"function_call": {"id": tool_call_id, "name": "get_weather", "args": {"city": "Paris"}}}
+
+    # the parts as the SDK sends them
+    assert [
+        [part.model_dump(mode="json", exclude_none=True) for part in content.parts]
+        for content in contents
+        if content.role == "model"
+    ] == [
+        [
+            {"text": "Let me check that for you."},
+            {**call("call_1"), "thought_signature": "skip_thought_signature_validator"},
+        ],
+        [
+            {"text": THINKING, "thought": True},
+            {**call("call_2"), "thought_signature": "skip_thought_signature_validator"},
+        ],
+        [{**call("call_3"), "thought_signature": signature}],
     ]

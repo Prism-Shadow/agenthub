@@ -10,7 +10,7 @@
 
 ## 变更内容
 
-- `Gemini3_8Client`（Python 与 TypeScript）通过 Interactions API（`client.interactions.create`，流式，`store: false`，每次请求携带完整历史）发送文本、图像与 TTS 请求；generateContent 路径被移除。embedding 模型仍使用 `models.embedContent`，因为 Interactions API 对它们返回 404。
+- `Gemini3_8Client`（Python 与 TypeScript）通过 Interactions API（`client.interactions.create`，流式，`store: false`，每次请求携带完整历史）发送文本、图像与 TTS 请求；generateContent 客户端移到 `gemini3_8_generate_content/`，服务 Vertex AI（见 [Vertex AI 上的 Gemini 改走 generateContent](2026-09-17-gemini-vertex-generate-content.zh.md)）。embedding 模型仍使用 `models.embedContent`，因为 Interactions API 对它们返回 404。
 - SDK 依赖提升为 `@google/genai` `^2.22.0` 与 `google-genai>=2.23.0`。
 - 流以 step 的 `index` 作为 key。某个 step 的内容切换种类时，每一段同种类内容流出一个内容项，key 为 `<index>.<run>`，因此图像模型先文本、再图像、再文本的思考摘要是三个内容项；每张图像各为一个内容项，音频片段则合为一个。
 - `thought` step 的 `thought_summary` 文本以 `thinking.delta` 流出，摘要图像以 `inline_thinking.delta` 流出；其 `thought_signature` 作为 `fidelity.signature`，挂在该 step 最后一个内容项同种类的空增量上（step 没有摘要时为空的 `thinking.delta`）。因此每个 Gemini 文本响应都带有一个承载 signature 的 `thinking.done` 项，摘要关闭时其 `thinking` 为空。

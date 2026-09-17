@@ -260,6 +260,16 @@ if (process.env.VERTEX_API_KEY) {
     supportEmbedding: false,
     provider: "vertex",
   });
+
+  AVAILABLE_MODELS.push({
+    name: "gemini-embedding-2",
+    supportTextGeneration: false,
+    supportImageUnderstanding: false,
+    supportImageGeneration: false,
+    supportAudioGeneration: false,
+    supportEmbedding: true,
+    provider: "vertex",
+  });
 }
 
 const RUN_SLOW_TEST = process.env.RUN_SLOW_TEST === "1";

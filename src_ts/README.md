@@ -24,6 +24,8 @@ async function main() {
   const client = new AutoLLMClient({ model: "gpt-5.5" });
   // For OpenAI Chat Completions-compatible endpoints:
   // const client = new AutoLLMClient({ model: "custom-model", clientType: "openai" });
+  // For Gemini on Google Vertex AI, the service-account JSON key is the API key:
+  // const client = new AutoLLMClient({ model: "gemini-3.8-flash", apiKey: fs.readFileSync("service-account.json", "utf8") });
 
   for await (const event of client.streamingResponseStateful({
     message: {
@@ -38,6 +40,8 @@ async function main() {
 
 main().catch(console.error);
 ```
+
+A Vertex AI service-account key is served through generateContent, because Vertex AI's Interactions endpoint serves none of the Gemini models; any other Gemini key uses the Interactions API. `clientType: "gemini-interactions"` and `clientType: "gemini-generate-content"` pin the wire protocol explicitly, the latter also for gateways that proxy generateContent only.
 
 Both streaming methods yield `delta` events, each carrying exactly one content item, then exactly one `stop` event, always last, carrying `usage_metadata` and `finish_reason`. Each item streams as one or more `.delta` fragments (`text.delta`, `tool_call.delta`, …) followed by its complete `.done` item (`text.done`, `tool_call.done`, …); items never interleave.
 

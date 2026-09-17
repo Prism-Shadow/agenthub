@@ -30,9 +30,14 @@ client = AutoLLMClient(model="gpt-5.5", api_key="your-openai-api-key")
 
 # Use OpenAI Chat Completions-compatible routing explicitly
 client = AutoLLMClient(model="custom-model", client_type="openai")
+
+# Gemini on Google Vertex AI: the service-account JSON key is the API key
+client = AutoLLMClient(model="gemini-3.8-flash", api_key=open("service-account.json").read())
 ```
 
 The client automatically selects the appropriate client based on the model name.
+
+A Vertex AI service-account key is served through generateContent, because Vertex AI's Interactions endpoint serves none of the Gemini models; any other Gemini key uses the Interactions API. `client_type="gemini-interactions"` and `client_type="gemini-generate-content"` pin the wire protocol explicitly, the latter also for gateways that proxy generateContent only.
 
 ## Core Methods
 

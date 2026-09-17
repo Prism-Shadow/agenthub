@@ -56,6 +56,15 @@ GEMINI_STREAM_CASES = [
     StreamCase(expected_client="Gemini3_8Client", model="gemini-3.8-flash", client_type="gemini-3.8"),
 ]
 
+# Every client that parses the Gemini generateContent chunk shape.
+GENERATE_CONTENT_STREAM_CASES = [
+    StreamCase(
+        expected_client="Gemini3_8GenerateContentClient",
+        model="gemini-3.8-flash",
+        client_type="gemini-generate-content",
+    ),
+]
+
 MESSAGES = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
 
 
@@ -75,6 +84,16 @@ class _FakeCreateEndpoint:
         self._events = events
 
     async def create(self, **_kwargs: object) -> AsyncIterator[object]:
+        return _stream_from_events(self._events)
+
+
+class _FakeGenerateContentModels:
+    """Stands in for the Gemini SDK's models resource, whose generate_content_stream() returns a stream."""
+
+    def __init__(self, events: list[object]) -> None:
+        self._events = events
+
+    async def generate_content_stream(self, **_kwargs: object) -> AsyncIterator[object]:
         return _stream_from_events(self._events)
 
 
@@ -98,6 +117,10 @@ def _install_fake_messages_stream(client: AutoLLMClient, events: list[object]) -
 
 def _install_fake_gemini_stream(client: AutoLLMClient, events: list[object]) -> None:
     client._client._client = SimpleNamespace(aio=SimpleNamespace(interactions=_FakeCreateEndpoint(events)))  # noqa: SLF001
+
+
+def _install_fake_generate_content_stream(client: AutoLLMClient, events: list[object]) -> None:
+    client._client._client = SimpleNamespace(aio=SimpleNamespace(models=_FakeGenerateContentModels(events)))  # noqa: SLF001
 
 
 # Heartbeats come from gateways in front of the provider (one-api-style proxies), never from
@@ -233,6 +256,41 @@ def _gemini_completed_event(status: str = "completed") -> object:
             usage=SimpleNamespace(
                 total_input_tokens=2, total_cached_tokens=0, total_thought_tokens=1, total_output_tokens=3
             ),
+        ),
+    )
+
+
+def _generate_content_keepalive_chunk() -> object:
+    # The SDK maps only the fields it knows onto the response, so a heartbeat reaches the
+    # client as a chunk carrying neither candidates nor usage.
+    return SimpleNamespace(candidates=None, usage_metadata=None)
+
+
+def _generate_content_unknown_part_chunk() -> object:
+    # a part the client recognizes by none of its fields, e.g. a modality added after this client
+    part = SimpleNamespace(function_call=None, thought=None, text=None, inline_data=None, thought_signature=None)
+    return SimpleNamespace(
+        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]), finish_reason=None)], usage_metadata=None
+    )
+
+
+def _generate_content_text_chunk(text: str) -> object:
+    part = SimpleNamespace(function_call=None, thought=None, text=text, inline_data=None, thought_signature=None)
+    return SimpleNamespace(
+        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part]), finish_reason=None)],
+        usage_metadata=None,
+    )
+
+
+def _generate_content_stop_chunk() -> object:
+    return SimpleNamespace(
+        # FinishReason is a string enum, so the raw value keys the client's mapping
+        candidates=[SimpleNamespace(content=SimpleNamespace(parts=[]), finish_reason="STOP")],
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=2,
+            cached_content_token_count=0,
+            thoughts_token_count=1,
+            candidates_token_count=3,
         ),
     )
 
@@ -591,6 +649,71 @@ async def test_gemini_client_streams_every_image_as_an_item_and_audio_chunks_as_
     ]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", GENERATE_CONTENT_STREAM_CASES, ids=[case.client_type for case in GENERATE_CONTENT_STREAM_CASES]
+)
+async def test_generate_content_client_skips_keepalive_heartbeats(case: StreamCase):
+    client = _create_auto_client(case)
+    assert type(client._client).__name__ == case.expected_client  # noqa: SLF001
+    _install_fake_generate_content_stream(
+        client,
+        [
+            _generate_content_keepalive_chunk(),
+            _generate_content_text_chunk("Here is"),
+            _generate_content_keepalive_chunk(),
+            _generate_content_text_chunk(" the memo."),
+            _generate_content_stop_chunk(),
+            _generate_content_keepalive_chunk(),
+        ],
+    )
+
+    events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
+    assert _collected_texts(events) == ["Here is", " the memo."]
+    # a heartbeat must not surface as an event of its own: two text deltas, their done item, the stop
+    assert len(events) == 4
+    assert events[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", GENERATE_CONTENT_STREAM_CASES, ids=[case.client_type for case in GENERATE_CONTENT_STREAM_CASES]
+)
+async def test_generate_content_client_skips_unknown_parts(case: StreamCase):
+    client = _create_auto_client(case)
+    assert client.transform_model_output_to_client_parts(_generate_content_unknown_part_chunk()) == []
+    _install_fake_generate_content_stream(
+        client,
+        [
+            _generate_content_unknown_part_chunk(),
+            _generate_content_text_chunk("Here is"),
+            _generate_content_stop_chunk(),
+        ],
+    )
+
+    events = [event async for event in client.streaming_response(MESSAGES, {})]
+    assert_stream_grammar(events)
+    assert _collected_texts(events) == ["Here is"]
+    assert events[-1]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case", GENERATE_CONTENT_STREAM_CASES, ids=[case.client_type for case in GENERATE_CONTENT_STREAM_CASES]
+)
+async def test_generate_content_client_rejects_unknown_parts_in_debug_mode(case: StreamCase, monkeypatch):
+    monkeypatch.setenv("AGENTHUB_DEBUG", "1")
+    client = _create_auto_client(case)
+    _install_fake_generate_content_stream(
+        client, [_generate_content_unknown_part_chunk(), _generate_content_stop_chunk()]
+    )
+
+    with pytest.raises(ValueError, match="Unknown output"):
+        async for _event in client.streaming_response(MESSAGES, {}):
+            pass
+
+
 # Every client, driven over a stream opening with an ignorable event of its own protocol.
 IGNORABLE_EVENT_CASES = [
     *[
@@ -625,6 +748,18 @@ IGNORABLE_EVENT_CASES = [
             [_gemini_status_update_event(), _gemini_text_delta_event("Here is"), _gemini_completed_event()],
         )
         for case in GEMINI_STREAM_CASES
+    ],
+    *[
+        (
+            case,
+            _install_fake_generate_content_stream,
+            [
+                _generate_content_keepalive_chunk(),
+                _generate_content_text_chunk("Here is"),
+                _generate_content_stop_chunk(),
+            ],
+        )
+        for case in GENERATE_CONTENT_STREAM_CASES
     ],
 ]
 

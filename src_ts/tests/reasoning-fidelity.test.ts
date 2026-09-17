@@ -533,3 +533,145 @@ describe.each(RESPONSES_REASONING_CASES)(
     });
   },
 );
+
+function installFakeGenerateContentStream(
+  client: AutoLLMClient,
+  chunks: unknown[],
+): void {
+  const routedClient = (client as unknown as { _client: { _client: unknown } })
+    ._client;
+  routedClient._client = {
+    models: { generateContentStream: async () => streamFromChunks(chunks) },
+  };
+}
+
+// Vertex AI attaches a usageMetadata carrying no counts to every chunk before the last one
+function generateContentChunk(parts: object[]): unknown {
+  return {
+    candidates: [{ content: { role: "model", parts } }],
+    usageMetadata: { trafficType: "ON_DEMAND" },
+  };
+}
+
+function generateContentStopChunk(parts: object[]): unknown {
+  return {
+    candidates: [{ content: { role: "model", parts }, finishReason: "STOP" }],
+    usageMetadata: {
+      promptTokenCount: 77,
+      candidatesTokenCount: 87,
+      thoughtsTokenCount: 377,
+      trafficType: "ON_DEMAND",
+    },
+  };
+}
+
+function createGenerateContentClient(): AutoLLMClient {
+  const client = new AutoLLMClient({
+    model: "gemini-3.8-flash",
+    apiKey: "test-key",
+    clientType: "gemini-generate-content",
+  });
+  expect(
+    (client as unknown as { _client: object })._client.constructor.name,
+  ).toBe("Gemini3_8GenerateContentClient");
+  return client;
+}
+
+// generateContent carries no item identity and no end-of-item signal; the chunk shapes follow
+// the Vertex AI captures of 2026-09-17 (api_captures/gemini_interactions/vertex/generate_content/).
+describe("generateContent signature replay", () => {
+  test("generateContent closes an item with its signature and replays it on the same part", async () => {
+    const client = createGenerateContentClient();
+    installFakeGenerateContentStream(client, [
+      generateContentChunk([
+        { text: "**Checking the weather**", thought: true },
+      ]),
+      generateContentChunk([{ text: "The capital" }]),
+      generateContentChunk([{ text: " of China" }]),
+      generateContentChunk([{ text: " is Beijing." }]),
+      generateContentChunk([
+        {
+          functionCall: {
+            name: "get_weather",
+            args: { city: "Beijing" },
+            id: "call_1",
+          },
+          thoughtSignature: "sig-1",
+        },
+      ]),
+      generateContentStopChunk([{ text: "" }]),
+    ]);
+
+    const { events, modelInput } = await runTurnAndReplay(client);
+
+    const fidelity = { signature: "sig-1" };
+    expect(streamedItems(events)).toEqual([
+      { type: "thinking.delta", thinking: "**Checking the weather**" },
+      { type: "thinking.done", thinking: "**Checking the weather**" },
+      { type: "text.delta", text: "The capital" },
+      { type: "text.delta", text: " of China" },
+      { type: "text.delta", text: " is Beijing." },
+      { type: "text.done", text: "The capital of China is Beijing." },
+      {
+        type: "tool_call.delta",
+        name: "get_weather",
+        arguments: '{"city":"Beijing"}',
+        tool_call_id: "call_1",
+        fidelity,
+      },
+      {
+        type: "tool_call.done",
+        name: "get_weather",
+        arguments: { city: "Beijing" },
+        tool_call_id: "call_1",
+        fidelity,
+      },
+    ]);
+    // the API reports STOP for a turn that stopped to call a tool
+    expect(events[events.length - 1].finish_reason).toBe("tool_call");
+
+    // the empty text part that ended the stream is not replayed
+    expect(modelInput[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "**Checking the weather**", thought: true },
+        { text: "The capital of China is Beijing." },
+        {
+          functionCall: {
+            id: "call_1",
+            name: "get_weather",
+            args: { city: "Beijing" },
+          },
+          thoughtSignature: "sig-1",
+        },
+      ],
+    });
+  });
+
+  test("generateContent closes a text answer with the signature of its last empty part", async () => {
+    const client = createGenerateContentClient();
+    installFakeGenerateContentStream(client, [
+      generateContentChunk([{ text: "The weather in Beijing" }]),
+      generateContentChunk([{ text: " is sunny." }]),
+      generateContentStopChunk([{ text: "", thoughtSignature: "sig-2" }]),
+    ]);
+
+    const { events, historyMessage, modelInput } =
+      await runTurnAndReplay(client);
+
+    expect(historyMessage.content_items).toEqual([
+      {
+        type: "text.done",
+        text: "The weather in Beijing is sunny.",
+        fidelity: { signature: "sig-2" },
+      },
+    ]);
+    expect(events[events.length - 1].finish_reason).toBe("stop");
+    expect(modelInput[1]).toEqual({
+      role: "model",
+      parts: [
+        { text: "The weather in Beijing is sunny.", thoughtSignature: "sig-2" },
+      ],
+    });
+  });
+});

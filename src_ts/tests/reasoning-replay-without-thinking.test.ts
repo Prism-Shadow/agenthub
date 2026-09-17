@@ -237,9 +237,8 @@ function geminiClient(): AutoLLMClient {
   return client;
 }
 
-test("gemini replay opens a turn without a signed thought with the placeholder signature", async () => {
-  const client = geminiClient();
-  const history: UniMessage[] = [
+function geminiHistory(): UniMessage[] {
+  return [
     userText(),
     assistant(
       { type: "text.done", text: "Let me check that for you." },
@@ -260,8 +259,12 @@ test("gemini replay opens a turn without a signed thought with the placeholder s
     }),
     toolResults("call_3"),
   ];
+}
 
-  const steps = await transformHistory(client, history);
+test("gemini replay opens a turn without a signed thought with the placeholder signature", async () => {
+  const client = geminiClient();
+
+  const steps = await transformHistory(client, geminiHistory());
   expect(steps.map((step) => step.type)).toEqual([
     "user_input",
     "thought",
@@ -281,5 +284,47 @@ test("gemini replay opens a turn without a signed thought with the placeholder s
     { type: "thought", signature: "skip_thought_signature_validator" },
     { type: "thought", summary: [{ type: "text", text: THINKING }] },
     { type: "thought", signature: "sig-3" },
+  ]);
+});
+
+// generateContent validates the signature on the first function call of a turn instead.
+test("generateContent replay signs the first call of an unsigned turn with the placeholder", async () => {
+  const client = new AutoLLMClient({
+    model: "gemini-3.8-flash",
+    apiKey: "test-key",
+    clientType: "gemini-generate-content",
+  });
+  expect(
+    (client as unknown as { _client: object })._client.constructor.name,
+  ).toBe("Gemini3_8GenerateContentClient");
+
+  const contents = await transformHistory(client, geminiHistory());
+  const call = (toolCallId: string) => ({
+    functionCall: {
+      id: toolCallId,
+      name: "get_weather",
+      args: { city: "Paris" },
+    },
+  });
+  expect(
+    contents
+      .filter((content) => content.role === "model")
+      .map((content) => content.parts),
+  ).toEqual([
+    [
+      { text: "Let me check that for you." },
+      {
+        ...call("call_1"),
+        thoughtSignature: "skip_thought_signature_validator",
+      },
+    ],
+    [
+      { text: THINKING, thought: true },
+      {
+        ...call("call_2"),
+        thoughtSignature: "skip_thought_signature_validator",
+      },
+    ],
+    [{ ...call("call_3"), thoughtSignature: "sig-3" }],
   ]);
 });

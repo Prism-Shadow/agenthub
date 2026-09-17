@@ -109,6 +109,42 @@ describe("gemini3_8 thinking level clamping", () => {
   );
 });
 
+// The generateContent client clamps like the Interactions client, onto the SDK's ThinkingLevel
+// enum, whose values are the uppercase names.
+function createGenerateContentAutoClient(model: string): AutoLLMClient {
+  return new AutoLLMClient({
+    model,
+    apiKey: "test-key",
+    clientType: "gemini-generate-content",
+  });
+}
+
+describe("gemini3_8_generate_content thinking level clamping", () => {
+  test.each([
+    ...GEMINI3_THINKING_LEVEL_CASES,
+    ...GEMINI3_7_THINKING_LEVEL_CASES,
+  ])("%s clamps %s to %s", (model, level, expected) => {
+    const client = createGenerateContentAutoClient(model);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((client as any)._client.constructor.name).toBe(
+      "Gemini3_8GenerateContentClient",
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect((client as any)._client._convertThinkingLevel(level)).toBe(
+      expected?.toUpperCase(),
+    );
+  });
+
+  test("thinking config carries the clamped level", () => {
+    const client = createGenerateContentAutoClient("gemini-3.1-pro-preview");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const config = (client as any)._client.transformUniConfigToModelConfig({
+      thinking_level: ThinkingLevel.NONE,
+    });
+    expect(config.thinkingConfig.thinkingLevel).toBe("LOW");
+  });
+});
+
 // GLM-5.3 cannot disable thinking and accepts only low/high/max reasoning_effort
 // (llmsdk_docs/glm5_3/docs/thinking.md); GLM-5.2
 // keeps the full pass-through vocabulary and pre-5.2 models take no effort parameter.
@@ -220,9 +256,10 @@ describe("thinking level to vendor effort", () => {
 
 // thinking_summary reaches the wire on its own, not only when a thinking_level rides with
 // it. Each protocol spells the switch differently: Anthropic puts it on thinking.display,
-// the Responses API on reasoning.summary, and Gemini on generation_config.thinking_summaries.
+// the Responses API on reasoning.summary, the Gemini Interactions API on
+// generation_config.thinking_summaries, and generateContent on thinkingConfig.includeThoughts.
 const THINKING_SUMMARY_CASES: Array<
-  [string, string | undefined, UniConfig, string | undefined]
+  [string, string | undefined, UniConfig, string | boolean | undefined]
 > = [
   ["claude-sonnet-5", undefined, { thinking_summary: true }, "summarized"],
   ["claude-sonnet-5", undefined, { thinking_summary: false }, "omitted"],
@@ -261,13 +298,26 @@ const THINKING_SUMMARY_CASES: Array<
   ["gpt-5.6", "openai-responses", { thinking_summary: true }, undefined],
   ["gemini-3.8-flash", undefined, { thinking_summary: true }, "auto"],
   ["gemini-3.8-flash", undefined, { thinking_summary: false }, "none"],
+  [
+    "gemini-3.8-flash",
+    "gemini-generate-content",
+    { thinking_summary: true },
+    true,
+  ],
+  [
+    "gemini-3.8-flash",
+    "gemini-generate-content",
+    { thinking_summary: false },
+    false,
+  ],
 ];
 
 /** Read the thinking-summary switch out of whichever field the client used. */
 function wireThinkingSummary(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   config: any,
-): string | undefined {
+): string | boolean | undefined {
+  if (config.thinkingConfig) return config.thinkingConfig.includeThoughts;
   if (config.generation_config) {
     return config.generation_config.thinking_summaries;
   }

@@ -34,11 +34,11 @@ class Gemini3_8Client(LLMClient):
     """Unified client for the Gemini family, named for the newest generation it serves (3.8).
 
     It speaks the Interactions API statelessly (store=false, the whole history in every request) for
-    3.8 back through the 3.x text, image, and TTS models, and embeds through embedContent, because the
-    Interactions API does not serve the embedding models. The API deprecated the temperature/top_p/top_k
-    sampling parameters starting with the 3.6 generation (silently ignored today, HTTP 400 in future
-    generations), and this client applies that contract to the whole family: temperature is rejected
-    everywhere.
+    3.8 back through the 3.x text, image, and TTS models with an API key; Vertex AI is served by
+    gemini3_8_generate_content. It embeds through embedContent, because the Interactions API does not
+    serve the embedding models. The API deprecated the temperature/top_p/top_k sampling parameters
+    starting with the 3.6 generation (silently ignored today, HTTP 400 in future generations), and this
+    client applies that contract to the whole family: temperature is rejected everywhere.
     """
 
     def __init__(
@@ -318,6 +318,11 @@ class Gemini3_8Client(LLMClient):
                     # it back as a thought step in front of that item (verified live 2026-09-16).
                     steps.append({"type": "thought", "signature": signature})
                     content = None
+                    # A thought summary such a history holds is unsigned, and a turn opening with an unsigned thought
+                    # is rejected ("Request contains an invalid argument") while the same signature on two thoughts
+                    # is accepted (verified live 2026-09-17), so the opening thought takes it too.
+                    if steps[message_start]["type"] == "thought" and not steps[message_start].get("signature"):
+                        steps[message_start]["signature"] = signature
 
                 if item["type"] in ("text.done", "image_url.done", "inline_data.done"):
                     if item["type"] == "text.done":

@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from google.genai import types
 from stream_grammar import assert_stream_grammar
 
 from agenthub import AutoLLMClient
@@ -482,3 +483,156 @@ async def test_gemini_replays_a_bytes_signature_on_a_thinking_item_as_base64():
         "summary": [{"type": "text", "text": "Let me think."}],
         "signature": base64.b64encode(b"sig-1").decode(),
     }
+
+
+class _FakeGenerateContentModels:
+    """Stands in for the Gemini SDK's models resource, whose generate_content_stream() returns a stream."""
+
+    def __init__(self, chunks: list[object]) -> None:
+        self._chunks = chunks
+
+    async def generate_content_stream(self, **_kwargs: object) -> AsyncIterator[object]:
+        return _stream_from_chunks(self._chunks)
+
+
+def _install_fake_generate_content_stream(client: AutoLLMClient, chunks: list[object]) -> None:
+    client._client._client = SimpleNamespace(aio=SimpleNamespace(models=_FakeGenerateContentModels(chunks)))  # noqa: SLF001
+
+
+def _generate_content_chunk(*parts: types.Part) -> types.GenerateContentResponse:
+    # Vertex AI attaches a usage_metadata carrying no counts to every chunk before the last one
+    return types.GenerateContentResponse(
+        candidates=[types.Candidate(content=types.Content(role="model", parts=list(parts)))],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(traffic_type="ON_DEMAND"),
+    )
+
+
+def _generate_content_stop_chunk(*parts: types.Part) -> types.GenerateContentResponse:
+    return types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                content=types.Content(role="model", parts=list(parts)), finish_reason=types.FinishReason.STOP
+            )
+        ],
+        usage_metadata=types.GenerateContentResponseUsageMetadata(
+            prompt_token_count=77, candidates_token_count=87, thoughts_token_count=377, traffic_type="ON_DEMAND"
+        ),
+    )
+
+
+def _generate_content_client() -> AutoLLMClient:
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key="test-key", client_type="gemini-generate-content")
+    assert client._client.__class__.__name__ == "Gemini3_8GenerateContentClient"  # noqa: SLF001
+    return client
+
+
+def _wire_parts(content: types.Content) -> list[dict[str, Any]]:
+    """The parts of a content as the SDK sends them, signatures as base64."""
+    return [part.model_dump(mode="json", exclude_none=True) for part in content.parts]
+
+
+# generateContent carries no item identity and no end-of-item signal; the chunk shapes follow the
+# Vertex AI captures of 2026-09-17 (api_captures/gemini_interactions/vertex/generate_content/).
+@pytest.mark.asyncio
+async def test_generate_content_closes_an_item_with_its_signature_and_replays_it_on_the_same_part():
+    client = _generate_content_client()
+    _install_fake_generate_content_stream(
+        client,
+        [
+            _generate_content_chunk(types.Part(text="**Checking the weather**", thought=True)),
+            _generate_content_chunk(types.Part(text="The capital")),
+            _generate_content_chunk(types.Part(text=" of China")),
+            _generate_content_chunk(types.Part(text=" is Beijing.")),
+            _generate_content_chunk(
+                types.Part(
+                    function_call=types.FunctionCall(name="get_weather", args={"city": "Beijing"}, id="call_1"),
+                    thought_signature=b"sig-1",
+                )
+            ),
+            _generate_content_stop_chunk(types.Part(text="")),
+        ],
+    )
+
+    events, _history_message, model_input = await _run_turn_and_replay(client)
+
+    # the SDK hands a signature over as bytes, which the client records as base64 text
+    fidelity = {"signature": base64.b64encode(b"sig-1").decode()}
+    assert [item for event in events for item in event["content_items"]] == [
+        {"type": "thinking.delta", "thinking": "**Checking the weather**"},
+        {"type": "thinking.done", "thinking": "**Checking the weather**"},
+        {"type": "text.delta", "text": "The capital"},
+        {"type": "text.delta", "text": " of China"},
+        {"type": "text.delta", "text": " is Beijing."},
+        {"type": "text.done", "text": "The capital of China is Beijing."},
+        {
+            "type": "tool_call.delta",
+            "name": "get_weather",
+            "arguments": '{"city": "Beijing"}',
+            "tool_call_id": "call_1",
+            "fidelity": fidelity,
+        },
+        {
+            "type": "tool_call.done",
+            "name": "get_weather",
+            "arguments": {"city": "Beijing"},
+            "tool_call_id": "call_1",
+            "fidelity": fidelity,
+        },
+    ]
+    # the API reports STOP for a turn that stopped to call a tool
+    assert events[-1]["finish_reason"] == "tool_call"
+
+    # the empty text part that ended the stream is not replayed
+    assert model_input[1].role == "model"
+    assert _wire_parts(model_input[1]) == [
+        {"text": "**Checking the weather**", "thought": True},
+        {"text": "The capital of China is Beijing."},
+        {
+            "function_call": {"id": "call_1", "name": "get_weather", "args": {"city": "Beijing"}},
+            "thought_signature": fidelity["signature"],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_closes_a_text_answer_with_the_signature_of_its_last_empty_part():
+    client = _generate_content_client()
+    _install_fake_generate_content_stream(
+        client,
+        [
+            _generate_content_chunk(types.Part(text="The weather in Beijing")),
+            _generate_content_chunk(types.Part(text=" is sunny.")),
+            _generate_content_stop_chunk(types.Part(text="", thought_signature=b"sig-2")),
+        ],
+    )
+
+    events, history_message, model_input = await _run_turn_and_replay(client)
+
+    signature = base64.b64encode(b"sig-2").decode()
+    assert history_message["content_items"] == [
+        {"type": "text.done", "text": "The weather in Beijing is sunny.", "fidelity": {"signature": signature}}
+    ]
+    assert events[-1]["finish_reason"] == "stop"
+    assert _wire_parts(model_input[1]) == [
+        {"text": "The weather in Beijing is sunny.", "thought_signature": signature}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_replays_a_bytes_signature_of_a_thinking_item_on_the_text():
+    """The generateContent client recorded every thought signature as bytes before 0.5.0, a thinking item's included."""
+    client = _generate_content_client()
+    history = [
+        _user_message(),
+        {
+            "role": "assistant",
+            "content_items": [
+                {"type": "thinking.done", "thinking": "Let me think.", "fidelity": {"signature": b"sig-1"}},
+                {"type": "text.done", "text": "Here is the memo."},
+            ],
+        },
+    ]
+
+    model_input = await _transform_history(client, history)
+    assert model_input[1].parts[0].thought_signature is None
+    assert model_input[1].parts[1].thought_signature == b"sig-1"

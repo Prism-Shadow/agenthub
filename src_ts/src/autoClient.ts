@@ -14,6 +14,7 @@
 
 import { ClientPart, LLMClient } from "./baseClient";
 import { Gemini3_8Client } from "./gemini3_8";
+import { Gemini3_8GenerateContentClient } from "./gemini3_8_generate_content";
 import { Claude5Client } from "./claude5";
 import { GPT6Client } from "./gpt6";
 import { GLM5_3Client } from "./glm5_3";
@@ -95,10 +96,13 @@ export class AutoLLMClient extends LLMClient {
     clientType: string,
   ): LLMClientConstructor | null {
     // every Gemini generation shares the unified client ("gemini-3" also matches the
-    // gemini-3.8/gemini-3.7/gemini-3.6/gemini-3.5-flash-lite client types)
+    // gemini-3.8/gemini-3.7/gemini-3.6/gemini-3.5-flash-lite client types), and the two
+    // wire-protocol pins name the family too: _createClientForModel picks the protocol
     if (
       clientType.includes("gemini-3") ||
-      clientType.includes("gemini-embedding")
+      clientType.includes("gemini-embedding") ||
+      clientType.includes("gemini-interactions") ||
+      clientType.includes("gemini-generate-content")
     ) {
       return Gemini3_8Client;
     } else if (
@@ -162,17 +166,30 @@ export class AutoLLMClient extends LLMClient {
     clientType?: string | null,
     defaultHeaders?: Record<string, string>,
   ): LLMClient {
-    const ClientClass = this._clientClassForModel(
+    let ClientClass = this._clientClassForModel(
       clientType || model.toLowerCase(),
     );
     if (ClientClass === null) {
       throw new Error(
         `${clientType} is not supported. ` +
           "Supported client types: minimax-m3, gemini-3.8, gemini-3.7, gemini-3.6, gemini-3, " +
-          "claude-5, claude-4-8, claude-4-7, " +
+          "gemini-interactions, gemini-generate-content, claude-5, claude-4-8, claude-4-7, " +
           "claude-4-6, gpt-6, gpt-5.6, gpt-5.5, gpt-5.4, glm-5.3, glm-5.2, glm-5.1, kimi-k3, kimi-k2.6, kimi-k2.5, " +
           "deepseek-v4, openai-chat-vllm-adapter, openai-embedding, ant-messages, openai-responses, openai-chat.",
       );
+    }
+
+    if (ClientClass === Gemini3_8Client) {
+      // Vertex AI's Interactions endpoint serves none of the Gemini models, so a service-account
+      // JSON, told apart by the test both clients' constructors apply, speaks generateContent
+      // unless Interactions is pinned
+      const key = apiKey || process.env.GEMINI_API_KEY || "";
+      if (
+        clientType?.includes("gemini-generate-content") ||
+        (key.startsWith("{") && !clientType?.includes("gemini-interactions"))
+      ) {
+        ClientClass = Gemini3_8GenerateContentClient;
+      }
     }
 
     return new ClientClass({ model, apiKey, baseUrl, defaultHeaders });
@@ -284,7 +301,11 @@ export class AutoLLMClient extends LLMClient {
     const protocolClasses = PROTOCOL_CLIENT_TYPES.map((clientType) =>
       this._clientClassForModel(clientType),
     );
-    const clientClass = this._client.constructor as LLMClientConstructor;
+    // the generateContent client serves the Gemini family, whose model ids route to Gemini3_8Client
+    const clientClass =
+      this._client instanceof Gemini3_8GenerateContentClient
+        ? Gemini3_8Client
+        : (this._client.constructor as LLMClientConstructor);
     if (protocolClasses.includes(clientClass)) {
       return modelIds;
     }

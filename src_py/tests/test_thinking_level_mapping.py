@@ -93,6 +93,31 @@ def test_gemini3_8_thinking_level_clamps_to_model_support(model: str, level: Thi
     assert client._client._convert_thinking_level(level) == expected  # noqa: SLF001
 
 
+# The generateContent client clamps like the Interactions client, onto the SDK's ThinkingLevel, a
+# str enum whose values are the uppercase names.
+def _create_generate_content_auto_client(model: str) -> AutoLLMClient:
+    return AutoLLMClient(model=model, api_key="test-key", client_type="gemini-generate-content")
+
+
+@pytest.mark.parametrize(
+    ("model", "level", "expected"), [*GEMINI3_THINKING_LEVEL_CASES, *GEMINI3_7_THINKING_LEVEL_CASES]
+)
+def test_gemini3_8_generate_content_thinking_level_clamps_to_model_support(
+    model: str, level: ThinkingLevel, expected: str
+):
+    client = _create_generate_content_auto_client(model)
+    assert client._client.__class__.__name__ == "Gemini3_8GenerateContentClient"  # noqa: SLF001
+    assert client._client._convert_thinking_level(level) == expected.upper()  # noqa: SLF001
+
+
+def test_gemini3_8_generate_content_thinking_config_carries_clamped_level():
+    client = _create_generate_content_auto_client("gemini-3.1-pro-preview")
+    config = client._client.transform_uni_config_to_model_config(  # noqa: SLF001
+        {"thinking_level": ThinkingLevel.NONE}
+    )
+    assert config.thinking_config.thinking_level == "LOW"
+
+
 # GLM-5.3 cannot disable thinking and accepts only low/high/max reasoning_effort
 # (llmsdk_docs/glm5_3/docs/thinking.md); GLM-5.2
 # keeps the full pass-through vocabulary and pre-5.2 models take no effort parameter.
@@ -188,7 +213,8 @@ def test_thinking_level_maps_to_vendor_effort(
 
 # thinking_summary reaches the wire on its own, not only when a thinking_level rides with
 # it. Each protocol spells the switch differently: Anthropic puts it on thinking.display,
-# the Responses API on reasoning.summary, and Gemini on generation_config.thinking_summaries.
+# the Responses API on reasoning.summary, the Gemini Interactions API on
+# generation_config.thinking_summaries, and generateContent on thinking_config.include_thoughts.
 THINKING_SUMMARY_CASES: list[tuple[str, str | None, dict[str, Any], Any]] = [
     ("claude-sonnet-5", None, {"thinking_summary": True}, "summarized"),
     ("claude-sonnet-5", None, {"thinking_summary": False}, "omitted"),
@@ -207,11 +233,16 @@ THINKING_SUMMARY_CASES: list[tuple[str, str | None, dict[str, Any], Any]] = [
     ("gpt-5.6", "openai-responses", {"thinking_summary": True}, None),
     ("gemini-3.8-flash", None, {"thinking_summary": True}, "auto"),
     ("gemini-3.8-flash", None, {"thinking_summary": False}, "none"),
+    ("gemini-3.8-flash", "gemini-generate-content", {"thinking_summary": True}, True),
+    ("gemini-3.8-flash", "gemini-generate-content", {"thinking_summary": False}, False),
 ]
 
 
 def _wire_thinking_summary(config: Any) -> Any:
     """Read the thinking-summary switch out of whichever field the client used."""
+    thinking_config = getattr(config, "thinking_config", None)
+    if thinking_config is not None:
+        return thinking_config.include_thoughts
     if "generation_config" in config:
         return config["generation_config"].get("thinking_summaries")
     if "reasoning" in config:

@@ -22,3 +22,6 @@ one month on from the 3.7 page.
 For the SDK usage guides (function calling, streaming, thought signatures, TTS, image
 generation, embeddings), refer to [../gemini3/docs/](../gemini3/README.md); they apply
 unchanged to this generation.
+
+On Vertex AI this generation is served through generateContent only; see
+[Vertex AI](../gemini_interactions/README.md#vertex-ai-verified-2026-09-17) in the Interactions notes.

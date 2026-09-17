@@ -102,6 +102,15 @@ const GEMINI_STREAM_CASES: StreamCase[] = [
   },
 ];
 
+// Every client that parses the Gemini generateContent chunk shape.
+const GENERATE_CONTENT_STREAM_CASES: StreamCase[] = [
+  {
+    expectedClient: "Gemini3_8GenerateContentClient",
+    model: "gemini-3.8-flash",
+    clientType: "gemini-generate-content",
+  },
+];
+
 const messages: UniMessage[] = [
   {
     role: "user",
@@ -159,6 +168,15 @@ function installFakeGeminiStream(
 ): void {
   installFakeStream(client, {
     interactions: { create: async () => streamFromEvents(events) },
+  });
+}
+
+function installFakeGenerateContentStream(
+  client: StreamClient,
+  events: unknown[],
+): void {
+  installFakeStream(client, {
+    models: { generateContentStream: async () => streamFromEvents(events) },
   });
 }
 
@@ -316,6 +334,39 @@ function geminiCompletedEvent(status = "completed"): unknown {
         total_thought_tokens: 1,
         total_output_tokens: 3,
       },
+    },
+  };
+}
+
+function generateContentKeepaliveChunk(): unknown {
+  // The SDK maps only the fields it knows onto the response, so a heartbeat reaches the
+  // client as a chunk carrying neither candidates nor usage.
+  return {};
+}
+
+function generateContentUnknownPartChunk(): unknown {
+  // a part the client recognizes by none of its fields, e.g. a modality added after this
+  // client: the SDK leaves what it does not know undefined rather than null
+  return {
+    candidates: [{ content: { parts: [{}] }, finishReason: null }],
+  };
+}
+
+function generateContentTextChunk(text: string): unknown {
+  return {
+    candidates: [{ content: { parts: [{ text: text }] }, finishReason: null }],
+  };
+}
+
+function generateContentStopChunk(): unknown {
+  return {
+    // FinishReason is a string enum, so the raw value keys the client's mapping
+    candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
+    usageMetadata: {
+      promptTokenCount: 2,
+      cachedContentTokenCount: 0,
+      thoughtsTokenCount: 1,
+      candidatesTokenCount: 3,
     },
   };
 }
@@ -733,6 +784,68 @@ describe.each(GEMINI_STREAM_CASES)(
   },
 );
 
+describe.each(GENERATE_CONTENT_STREAM_CASES)(
+  "Stream event handling for $clientType",
+  (testCase) => {
+    test("skips an unknown part", async () => {
+      const client = createAutoClient(testCase);
+      expect(
+        client.transformModelOutputToClientParts(
+          generateContentUnknownPartChunk(),
+        ),
+      ).toEqual([]);
+      installFakeGenerateContentStream(client, [
+        generateContentUnknownPartChunk(),
+        generateContentTextChunk("Here is"),
+        generateContentStopChunk(),
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
+      expect(collectedTexts(events)).toEqual(["Here is"]);
+      expect(events[events.length - 1].finish_reason).toBe("stop");
+    });
+
+    test("rejects an unknown part with AGENTHUB_DEBUG set", async () => {
+      process.env.AGENTHUB_DEBUG = "1";
+      const client = createAutoClient(testCase);
+      installFakeGenerateContentStream(client, [
+        generateContentUnknownPartChunk(),
+        generateContentStopChunk(),
+      ]);
+
+      await expect(
+        collectEvents(client.streamingResponse({ messages, config: {} })),
+      ).rejects.toThrow("Unknown output");
+    });
+
+    test("skips gateway keepalive heartbeats between stream chunks", async () => {
+      const client = createAutoClient(testCase);
+      expect(routedClientName(client)).toBe(testCase.expectedClient);
+      installFakeGenerateContentStream(client, [
+        generateContentKeepaliveChunk(),
+        generateContentTextChunk("Here is"),
+        generateContentKeepaliveChunk(),
+        generateContentTextChunk(" the memo."),
+        generateContentStopChunk(),
+        generateContentKeepaliveChunk(),
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
+      expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
+      // a heartbeat must not surface as an event of its own: two text deltas, their done
+      // item, the stop
+      expect(events).toHaveLength(4);
+      expect(events[events.length - 1].finish_reason).toBe("stop");
+    });
+  },
+);
+
 // Every client, driven over a stream opening with an ignorable event of its own protocol.
 const IGNORABLE_EVENT_CASES: Array<{
   testCase: StreamCase;
@@ -774,6 +887,15 @@ const IGNORABLE_EVENT_CASES: Array<{
       geminiStatusUpdateEvent(),
       geminiTextDeltaEvent("Here is"),
       geminiCompletedEvent(),
+    ],
+  })),
+  ...GENERATE_CONTENT_STREAM_CASES.map((testCase) => ({
+    testCase,
+    install: installFakeGenerateContentStream,
+    stream: () => [
+      generateContentKeepaliveChunk(),
+      generateContentTextChunk("Here is"),
+      generateContentStopChunk(),
     ],
   })),
 ];

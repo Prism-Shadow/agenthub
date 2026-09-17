@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import base64
 import inspect
 from dataclasses import dataclass
 from typing import Any
@@ -21,6 +22,11 @@ import pytest
 from agenthub import AutoLLMClient
 
 
+# The Gemini SDK holds a thought signature as bytes and takes it as base64 text, the form a
+# stream records it in, so the generateContent client cannot replay a signature like "sig-1".
+GENERATE_CONTENT_SIGNATURE = base64.b64encode(b"sig-1").decode()
+
+
 @dataclass
 class MessageOrderCase:
     expected_client: str
@@ -28,6 +34,7 @@ class MessageOrderCase:
     client_type: str | None
     protocol: str
     expected: list[str]
+    thought_signature: str = "sig-1"
 
 
 # A turn where the model thought, spoke, and then called a tool. Every protocol that can
@@ -37,6 +44,7 @@ RESPONSES_ORDER = ["message:user", "reasoning", "message:assistant", "function_c
 MESSAGES_ORDER = ["user:text", "assistant:thinking,text,tool_use", "user:tool_result"]
 # the Interactions API sends every item as a step of its own kind, a thought first in its turn
 GEMINI_ORDER = ["user_input", "thought", "model_output", "function_call", "function_result"]
+GENERATE_CONTENT_ORDER = ["user:text", "model:thinking,text,function_call", "user:function_response"]
 # Chat Completions has no interleaving to keep: the text lands in content, the call in
 # tool_calls of the same message, and the thinking in its own reasoning field.
 CHAT_ORDER = ["user:text", "assistant:text,tool_calls,thinking", "tool:call_1"]
@@ -49,13 +57,21 @@ MESSAGE_ORDER_CASES = [
     MessageOrderCase("Claude5Client", "claude-sonnet-5", None, "messages", MESSAGES_ORDER),
     MessageOrderCase("AntMessagesClient", "claude-sonnet-5", "ant-messages", "messages", MESSAGES_ORDER),
     MessageOrderCase("Gemini3_8Client", "gemini-3.8-flash", None, "gemini", GEMINI_ORDER),
+    MessageOrderCase(
+        "Gemini3_8GenerateContentClient",
+        "gemini-3.8-flash",
+        "gemini-generate-content",
+        "generate_content",
+        GENERATE_CONTENT_ORDER,
+        GENERATE_CONTENT_SIGNATURE,
+    ),
     MessageOrderCase("OpenaiChatClient", "gpt-5.6", "openai-chat", "chat", CHAT_ORDER),
     MessageOrderCase("GLM5_3Client", "glm-5.3", None, "chat", CHAT_ORDER),
     MessageOrderCase("KimiK3Client", "kimi-k3", None, "chat", CHAT_ORDER),
 ]
 
 
-def _messages() -> list[dict[str, Any]]:
+def _messages(thought_signature: str = "sig-1") -> list[dict[str, Any]]:
     return [
         {"role": "user", "content_items": [{"type": "text.done", "text": "What is the weather in Paris?"}]},
         {
@@ -64,7 +80,7 @@ def _messages() -> list[dict[str, Any]]:
                 {
                     "type": "thinking.done",
                     "thinking": "I should call the tool.",
-                    "fidelity": {"signature": "sig-1"},
+                    "fidelity": {"signature": thought_signature},
                 },
                 {"type": "text.done", "text": "Let me check that for you."},
                 {
@@ -101,6 +117,25 @@ def _gemini_signature(model_input: list[dict[str, Any]]) -> list[str]:
     return [step["type"] for step in model_input]
 
 
+def _generate_content_signature(model_input: list[Any]) -> list[str]:
+    labels = []
+    for content in model_input:
+        kinds = []
+        for part in content.parts:
+            if part.function_call is not None:
+                kinds.append("function_call")
+            elif part.function_response is not None:
+                kinds.append("function_response")
+            elif part.thought:
+                kinds.append("thinking")
+            else:
+                kinds.append("text")
+
+        labels.append(f"{content.role}:" + ",".join(kinds))
+
+    return labels
+
+
 def _chat_signature(model_input: list[dict[str, Any]]) -> list[str]:
     labels = []
     for message in model_input:
@@ -125,6 +160,7 @@ _SIGNATURES = {
     "responses": _responses_signature,
     "messages": _messages_signature,
     "gemini": _gemini_signature,
+    "generate_content": _generate_content_signature,
     "chat": _chat_signature,
 }
 
@@ -139,20 +175,23 @@ async def test_message_transform_keeps_content_item_order(case: MessageOrderCase
     client = AutoLLMClient(model=case.model, api_key="test-key", client_type=case.client_type)
     assert client._client.__class__.__name__ == case.expected_client  # noqa: SLF001
 
-    model_input = client._client.transform_uni_message_to_model_input(_messages())  # noqa: SLF001
+    model_input = client._client.transform_uni_message_to_model_input(_messages(case.thought_signature))  # noqa: SLF001
     if inspect.isawaitable(model_input):
         model_input = await model_input
 
     assert _SIGNATURES[case.protocol](model_input) == case.expected
 
-    # every Responses, Chat Completions and Interactions client sends a text-only tool result as a
-    # plain string rather than a one-part content list; the messages protocol has no such position
+    # every Responses, Chat Completions, Interactions and generateContent client sends a text-only
+    # tool result as a plain string rather than a one-part content list; the messages protocol has
+    # no such position
     if case.protocol == "responses":
         assert model_input[4]["output"] == "20 degrees."
     elif case.protocol == "chat":
         assert model_input[2]["content"] == "20 degrees."
     elif case.protocol == "gemini":
         assert model_input[4]["result"] == "20 degrees."
+    elif case.protocol == "generate_content":
+        assert model_input[2].parts[0].function_response.response["result"] == "20 degrees."
 
 
 @pytest.mark.asyncio
@@ -172,6 +211,95 @@ async def test_gemini_sends_an_image_only_tool_result_without_an_empty_text_bloc
     model_input = await client._client.transform_uni_message_to_model_input(messages)  # noqa: SLF001
     # an empty text block is rejected with a 400, while a result of images alone is accepted
     assert model_input[4]["result"] == [{"type": "image", "data": "iVBORw0KGgo=", "mime_type": "image/png"}]
+
+
+def _generate_content_client(model: str = "gemini-3.8-flash") -> AutoLLMClient:
+    client = AutoLLMClient(model=model, api_key="test-key", client_type="gemini-generate-content")
+    assert client._client.__class__.__name__ == "Gemini3_8GenerateContentClient"  # noqa: SLF001
+    return client
+
+
+def _wire_parts(content: Any) -> list[dict[str, Any]]:
+    """The parts of a content as the SDK sends them, signatures and data as base64."""
+    return [part.model_dump(mode="json", exclude_none=True) for part in content.parts]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_moves_a_thought_signature_onto_the_first_function_call():
+    client = _generate_content_client()
+
+    model_input = await client._client.transform_uni_message_to_model_input(  # noqa: SLF001
+        _messages(GENERATE_CONTENT_SIGNATURE)
+    )
+    # generateContent validates the signature on the first function call of a turn, where the
+    # Interactions API records it on the turn's thought
+    assert _wire_parts(model_input[1]) == [
+        {"text": "I should call the tool.", "thought": True},
+        {"text": "Let me check that for you."},
+        {
+            "function_call": {"id": "call_1", "name": "get_weather", "args": {"city": "Paris"}},
+            "thought_signature": GENERATE_CONTENT_SIGNATURE,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_splits_function_responses_into_contents_of_their_own():
+    client = _generate_content_client()
+    messages = _messages(GENERATE_CONTENT_SIGNATURE)
+    messages[2]["content_items"] = [
+        {"type": "text.done", "text": "Here is the weather."},
+        {"type": "tool_result.done", "text": "20 degrees.", "tool_call_id": "call_1"},
+    ]
+
+    model_input = await client._client.transform_uni_message_to_model_input(messages)  # noqa: SLF001
+    # Vertex AI rejects a content mixing function responses with other parts
+    assert [(content.role, _wire_parts(content)) for content in model_input[2:]] == [
+        ("user", [{"text": "Here is the weather."}]),
+        (
+            "user",
+            [
+                {
+                    "function_response": {
+                        "id": "call_1",
+                        "name": "get_weather",
+                        "response": {"result": "20 degrees."},
+                    }
+                }
+            ],
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_keeps_the_signature_of_a_thought_image_on_its_own_part():
+    client = _generate_content_client("gemini-3.1-flash-image")
+
+    model_input = await client._client.transform_uni_message_to_model_input(  # noqa: SLF001
+        [
+            {"role": "user", "content_items": [{"type": "text.done", "text": "Draw a cat."}]},
+            {
+                "role": "assistant",
+                "content_items": [
+                    {
+                        "type": "inline_thinking.done",
+                        "data": b"draft",
+                        "mime_type": "image/png",
+                        "fidelity": {"signature": GENERATE_CONTENT_SIGNATURE},
+                    },
+                    {"type": "inline_data.done", "data": b"image", "mime_type": "image/png"},
+                ],
+            },
+        ]
+    )
+    assert _wire_parts(model_input[1]) == [
+        {
+            "inline_data": {"data": base64.b64encode(b"draft").decode(), "mime_type": "image/png"},
+            "thought": True,
+            "thought_signature": GENERATE_CONTENT_SIGNATURE,
+        },
+        {"inline_data": {"data": base64.b64encode(b"image").decode(), "mime_type": "image/png"}},
+    ]
 
 
 # The generic client and the three routed ones share the replayed shape, so the cases are the

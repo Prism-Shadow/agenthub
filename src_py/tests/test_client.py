@@ -166,6 +166,15 @@ if os.getenv("VERTEX_API_KEY"):
             support_tts=True,
         )
     )
+    AVAILABLE_MODELS.append(
+        Model(
+            name="gemini-embedding-2",
+            provider="vertex",
+            support_text=False,
+            support_image_understanding=False,
+            support_embedding=True,
+        )
+    )
 
 RUN_SLOW_TEST = os.getenv("RUN_SLOW_TEST", "0") == "1"
 

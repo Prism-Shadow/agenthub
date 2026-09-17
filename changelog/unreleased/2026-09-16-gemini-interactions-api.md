@@ -10,7 +10,7 @@
 
 ## What changed
 
-- `Gemini3_8Client` (Python and TypeScript) sends text, image, and TTS requests through the Interactions API (`client.interactions.create`, streamed, `store: false`, the whole history in every request); the generateContent path was removed. Embedding models stay on `models.embedContent`, because the Interactions API answers them with 404.
+- `Gemini3_8Client` (Python and TypeScript) sends text, image, and TTS requests through the Interactions API (`client.interactions.create`, streamed, `store: false`, the whole history in every request); the generateContent client moved to `gemini3_8_generate_content/` and serves Vertex AI (see [Gemini on Vertex AI through generateContent](2026-09-17-gemini-vertex-generate-content.md)). Embedding models stay on `models.embedContent`, because the Interactions API answers them with 404.
 - The SDK requirements were raised to `@google/genai` `^2.22.0` and `google-genai>=2.23.0`.
 - Streams are keyed by the step `index`. A step whose content switches kind streams one item per run of a kind, keyed `<index>.<run>`, so an image model's thought summary that goes text, image, text is three items; every image is an item of its own, while audio chunks join into one.
 - A `thought` step streams `thought_summary` text as `thinking.delta` and summary images as `inline_thinking.delta`; its `thought_signature` goes out as `fidelity.signature` on an empty delta of the item the step ends with (an empty `thinking.delta` when the step has no summary). Every Gemini text response therefore carries a `thinking.done` item holding the signature, with empty `thinking` when summaries are off.
