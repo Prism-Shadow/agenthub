@@ -35,20 +35,12 @@ export enum PromptCaching {
 
 export type ToolChoice = ("auto" | "required" | "none") | string[];
 export type Role = "user" | "assistant";
-// "start" opens an item, "delta" carries content, and "stop" closes the response with usage and
-// a finish reason. "unused" is a client's own marker for a wire event that carries nothing
-// universal, and never leaves the client.
-export type EventType = "start" | "delta" | "stop" | "unused";
+// A stream is any number of "delta" events closed by exactly one "stop" event, which carries the
+// usage and the finish reason; a caller can tell a running stream from a finished one by it.
+export type EventType = "delta" | "stop";
 export type FinishReason = "stop" | "length" | "tool_call" | "unknown";
 export type AspectRatio =
-  | "1:1"
-  | "2:3"
-  | "3:2"
-  | "3:4"
-  | "4:3"
-  | "9:16"
-  | "16:9"
-  | "21:9";
+  "1:1" | "2:3" | "3:2" | "3:4" | "4:3" | "9:16" | "16:9" | "21:9";
 export type ImageSize = "1K" | "2K";
 
 /**
@@ -60,39 +52,41 @@ export type ImageSize = "1K" | "2K";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Fidelity = Record<string, any>;
 
-export interface TextContentItem {
-  type: "text";
+// Complete items. A message holds only these, and a stream closes every item it streams with one.
+
+export interface TextDoneItem {
+  type: "text.done";
   text: string;
   fidelity?: Fidelity;
 }
 
-export interface ImageContentItem {
-  type: "image_url";
+export interface ImageUrlDoneItem {
+  type: "image_url.done";
   image_url: string;
 }
 
-export interface InlineDataContentItem {
-  type: "inline_data";
+export interface InlineDataDoneItem {
+  type: "inline_data.done";
   data: Buffer;
   mime_type: string;
   fidelity?: Fidelity;
 }
 
-export interface ThinkingContentItem {
-  type: "thinking";
+export interface ThinkingDoneItem {
+  type: "thinking.done";
   thinking: string;
   fidelity?: Fidelity;
 }
 
-export interface InlineThinkingContentItem {
-  type: "inline_thinking";
+export interface InlineThinkingDoneItem {
+  type: "inline_thinking.done";
   data: Buffer;
   mime_type: string;
   fidelity?: Fidelity;
 }
 
-export interface ToolCallContentItem {
-  type: "tool_call";
+export interface ToolCallDoneItem {
+  type: "tool_call.done";
   name: string;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   arguments: Record<string, any>;
@@ -100,40 +94,82 @@ export interface ToolCallContentItem {
   fidelity?: Fidelity;
 }
 
-export interface PartialToolCallContentItem {
-  type: "partial_tool_call";
-  name: string;
-  arguments: string;
-  tool_call_id: string;
-  // id of the streamed item this fragment belongs to, when the provider sends one (the
-  // Responses output item id); ties fragments to their call when several calls stream at once
-  item_id?: string;
-  fidelity?: Fidelity;
-}
-
-export interface ToolResultContentItem {
-  type: "tool_result";
+export interface ToolResultDoneItem {
+  type: "tool_result.done";
   text: string;
   images?: string[];
   tool_call_id: string;
 }
 
-export interface EmbeddingContentItem {
-  type: "embedding";
+export interface EmbeddingDoneItem {
+  type: "embedding.done";
   embedding: number[];
 }
 
 export type ContentItem =
-  | TextContentItem
-  | ImageContentItem
-  | InlineDataContentItem
-  | ThinkingContentItem
-  | InlineThinkingContentItem
-  | ToolCallContentItem
-  | ToolResultContentItem
-  | EmbeddingContentItem;
+  | TextDoneItem
+  | ImageUrlDoneItem
+  | InlineDataDoneItem
+  | ThinkingDoneItem
+  | InlineThinkingDoneItem
+  | ToolCallDoneItem
+  | ToolResultDoneItem
+  | EmbeddingDoneItem;
 
-export type PartialContentItem = ContentItem | PartialToolCallContentItem;
+// Streamed fragments. One or more deltas of a kind are followed by the done item of that kind;
+// at most one delta of an item carries fidelity, and it equals the done item's fidelity.
+
+export interface TextDeltaItem {
+  type: "text.delta";
+  text: string;
+  fidelity?: Fidelity;
+}
+
+export interface InlineDataDeltaItem {
+  type: "inline_data.delta";
+  data: Buffer;
+  mime_type: string;
+  fidelity?: Fidelity;
+}
+
+export interface ThinkingDeltaItem {
+  type: "thinking.delta";
+  thinking: string;
+  fidelity?: Fidelity;
+}
+
+export interface InlineThinkingDeltaItem {
+  type: "inline_thinking.delta";
+  data: Buffer;
+  mime_type: string;
+  fidelity?: Fidelity;
+}
+
+export interface ToolCallDeltaItem {
+  type: "tool_call.delta";
+  // non-empty on the first delta of a call only
+  name: string;
+  // a fragment of the raw arguments JSON string
+  arguments: string;
+  // non-empty on the first delta of a call only
+  tool_call_id: string;
+  fidelity?: Fidelity;
+}
+
+export interface EmbeddingDeltaItem {
+  type: "embedding.delta";
+  embedding: number[];
+}
+
+export type DeltaContentItem =
+  | TextDeltaItem
+  | InlineDataDeltaItem
+  | ThinkingDeltaItem
+  | InlineThinkingDeltaItem
+  | ToolCallDeltaItem
+  | EmbeddingDeltaItem;
+
+export type EventContentItem = DeltaContentItem | ContentItem;
 
 /**
  * Usage metadata for model response.
@@ -162,10 +198,29 @@ export interface UniMessage {
 export interface UniEvent {
   role: Role;
   event_type: EventType;
-  content_items: PartialContentItem[];
+  content_items: EventContentItem[];
   usage_metadata: UsageMetadata | null;
   finish_reason: FinishReason | null;
   created_at?: number;
+}
+
+/**
+ * A streamed event while the response is still running: exactly one delta or done item.
+ */
+export interface UniDeltaEvent extends UniEvent {
+  event_type: "delta";
+  usage_metadata: null;
+  finish_reason: null;
+}
+
+/**
+ * The last event of every successful stream, carrying no content items.
+ */
+export interface UniStopEvent extends UniEvent {
+  event_type: "stop";
+  content_items: [];
+  usage_metadata: UsageMetadata;
+  finish_reason: FinishReason;
 }
 
 /**
@@ -213,8 +268,9 @@ export interface UniConfig {
   tool_choice?: ToolChoice;
   system_prompt?: string;
   prompt_caching?: PromptCaching;
-  // fast processing at premium pricing: OpenAI-protocol clients send service_tier="priority",
-  // Anthropic-protocol clients send speed="fast"; clients without a fast tier reject it
+  // fast processing at premium pricing: OpenAI-protocol and Gemini clients send
+  // service_tier="priority", Anthropic-protocol clients send speed="fast"; clients without a
+  // fast tier reject it
   fast_mode?: boolean;
   image_config?: ImageConfig;
   tts_config?: SpeakerConfig[];

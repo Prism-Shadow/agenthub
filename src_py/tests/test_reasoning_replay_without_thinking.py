@@ -21,6 +21,7 @@ recognises as its own, which it cannot once a relay has reissued them. The turn 
 carries the reasoning field empty.
 """
 
+import base64
 import inspect
 from typing import Any
 
@@ -48,11 +49,11 @@ async def _transform_history(client: AutoLLMClient, history: list[dict[str, Any]
 
 
 def _user_text() -> dict[str, Any]:
-    return {"role": "user", "content_items": [{"type": "text", "text": "What is the weather in Paris?"}]}
+    return {"role": "user", "content_items": [{"type": "text.done", "text": "What is the weather in Paris?"}]}
 
 
 def _thinking_item(text: str, reasoning_field: str | None = None) -> dict[str, Any]:
-    item: dict[str, Any] = {"type": "thinking", "thinking": text}
+    item: dict[str, Any] = {"type": "thinking.done", "thinking": text}
     if reasoning_field is not None:
         item["fidelity"] = {"reasoning_field": reasoning_field}
 
@@ -60,7 +61,12 @@ def _thinking_item(text: str, reasoning_field: str | None = None) -> dict[str, A
 
 
 def _tool_call_item(tool_call_id: str) -> dict[str, Any]:
-    return {"type": "tool_call", "name": "get_weather", "arguments": {"city": "Paris"}, "tool_call_id": tool_call_id}
+    return {
+        "type": "tool_call.done",
+        "name": "get_weather",
+        "arguments": {"city": "Paris"},
+        "tool_call_id": tool_call_id,
+    }
 
 
 def _assistant(*content_items: dict[str, Any]) -> dict[str, Any]:
@@ -71,7 +77,7 @@ def _tool_results(*tool_call_ids: str) -> dict[str, Any]:
     return {
         "role": "user",
         "content_items": [
-            {"type": "tool_result", "text": "20 degrees.", "tool_call_id": tool_call_id}
+            {"type": "tool_result.done", "text": "20 degrees.", "tool_call_id": tool_call_id}
             for tool_call_id in tool_call_ids
         ],
     }
@@ -129,7 +135,7 @@ async def test_replay_sends_no_reasoning_field_when_no_message_ever_thought():
     client = _chat_client()
     history = [
         _user_text(),
-        _assistant({"type": "text", "text": "Let me check that for you."}, _tool_call_item("call_1")),
+        _assistant({"type": "text.done", "text": "Let me check that for you."}, _tool_call_item("call_1")),
         _tool_results("call_1"),
     ]
 
@@ -147,7 +153,7 @@ async def test_replay_sends_no_reasoning_field_for_a_message_without_tool_calls(
         _user_text(),
         _assistant(_thinking_item(THINKING, "reasoning_content"), _tool_call_item("call_1")),
         _tool_results("call_1"),
-        _assistant({"type": "text", "text": "It is 20 degrees in Paris."}),
+        _assistant({"type": "text.done", "text": "It is 20 degrees in Paris."}),
     ]
 
     _thought, answer = _assistant_messages(await _transform_history(client, history))
@@ -178,3 +184,84 @@ async def test_replay_keeps_each_message_on_its_own_reasoning_field():
     # the request as a whole produced both spellings, so the turn without thinking sends both
     assert third["reasoning_content"] == ""
     assert third["reasoning"] == ""
+
+
+# Gemini rejects such a turn outright once its tool results follow: the Interactions API takes an
+# unfinished model turn back only when it holds a signed thought (verified live 2026-09-16). A turn
+# another provider produced, its unsigned thinking included, opens with the placeholder signature
+# Google documents for thoughts it did not produce, while the signature a generateContent history
+# recorded on a call already makes the turn's thought.
+def _gemini_client() -> AutoLLMClient:
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key="test-key")
+    assert client._client.__class__.__name__ == "Gemini3_8Client"  # noqa: SLF001
+    return client
+
+
+def _gemini_history(signature: str) -> list[dict[str, Any]]:
+    return [
+        _user_text(),
+        _assistant({"type": "text.done", "text": "Let me check that for you."}, _tool_call_item("call_1")),
+        _tool_results("call_1"),
+        _assistant(_thinking_item(THINKING, "reasoning_content"), _tool_call_item("call_2")),
+        _tool_results("call_2"),
+        _assistant({**_tool_call_item("call_3"), "fidelity": {"signature": signature}}),
+        _tool_results("call_3"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_gemini_replay_opens_a_turn_without_a_signed_thought_with_the_placeholder_signature():
+    client = _gemini_client()
+
+    steps = await _transform_history(client, _gemini_history("sig-3"))
+    assert [step["type"] for step in steps] == [
+        "user_input",
+        "thought",
+        "model_output",
+        "function_call",
+        "function_result",
+        "thought",
+        "thought",
+        "function_call",
+        "function_result",
+        "thought",
+        "function_call",
+        "function_result",
+    ]
+    assert [step for step in steps if step["type"] == "thought"] == [
+        {"type": "thought", "signature": "skip_thought_signature_validator"},
+        {"type": "thought", "signature": "skip_thought_signature_validator"},
+        {"type": "thought", "summary": [{"type": "text", "text": THINKING}]},
+        {"type": "thought", "signature": "sig-3"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_replay_signs_the_first_call_of_an_unsigned_turn_with_the_placeholder():
+    """generateContent validates the signature on the first function call of a turn instead."""
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key="test-key", client_type="gemini-generate-content")
+    assert client._client.__class__.__name__ == "Gemini3_8GenerateContentClient"  # noqa: SLF001
+    # the Gemini SDK takes a thought signature as base64 text, the form a stream records it in
+    signature = base64.b64encode(b"sig-3").decode()
+
+    contents = await _transform_history(client, _gemini_history(signature))
+
+    def call(tool_call_id: str) -> dict[str, Any]:
+        return {"function_call": {"id": tool_call_id, "name": "get_weather", "args": {"city": "Paris"}}}
+
+    # the parts as the SDK sends them
+    assert [
+        [part.model_dump(mode="json", exclude_none=True) for part in content.parts]
+        for content in contents
+        if content.role == "model"
+    ] == [
+        [
+            {"text": "Let me check that for you."},
+            {**call("call_1"), "thought_signature": "skip_thought_signature_validator"},
+        ],
+        [
+            {"text": THINKING, "thought": True},
+            {**call("call_2"), "thought_signature": "skip_thought_signature_validator"},
+        ],
+        [{**call("call_3"), "thought_signature": signature}],
+    ]

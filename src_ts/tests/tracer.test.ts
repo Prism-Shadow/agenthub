@@ -14,9 +14,74 @@
 
 import * as fs from "fs";
 import * as path from "path";
+import { doneMarker, LLMClient } from "../src/baseClient";
 import { Tracer } from "../src/integration/tracer";
-import { UniMessage } from "../src/types";
-import { expect, describe, test, beforeEach, afterEach } from "@jest/globals";
+import { EventContentItem, UniEvent, UniMessage } from "../src/types";
+import {
+  expect,
+  describe,
+  test,
+  beforeEach,
+  afterEach,
+  jest,
+} from "@jest/globals";
+
+/**
+ * A client whose provider stream is a fixed list of events. The tracer hook lives in the base
+ * class's streamingResponse, above this seam, so a traced response runs for real without a
+ * network or an API key.
+ */
+class ScriptedClient extends LLMClient {
+  constructor(private readonly events: UniEvent[]) {
+    super();
+    this._model = "fake-model";
+  }
+
+  transformUniConfigToModelConfig(): undefined {
+    return undefined;
+  }
+
+  transformUniMessageToModelInput(messages: UniMessage[]): UniMessage[] {
+    return messages;
+  }
+
+  transformModelOutputToUniEvent(modelOutput: UniEvent): UniEvent {
+    return modelOutput;
+  }
+
+  async *_streamingResponseInternal(): AsyncGenerator<UniEvent> {
+    for (const event of this.events) {
+      yield this.transformModelOutputToUniEvent(event);
+    }
+  }
+
+  async listModels(): Promise<string[]> {
+    return [];
+  }
+}
+
+function delta(item: EventContentItem): UniEvent {
+  return {
+    role: "assistant",
+    event_type: "delta",
+    content_items: [item],
+    usage_metadata: null,
+    finish_reason: null,
+  };
+}
+
+const STOP: UniEvent = {
+  role: "assistant",
+  event_type: "stop",
+  content_items: [],
+  usage_metadata: {
+    cached_tokens: 0,
+    prompt_tokens: 1,
+    thoughts_tokens: null,
+    response_tokens: 2,
+  },
+  finish_reason: "stop",
+};
 
 describe("Tracer", () => {
   let tempCacheDir: string;
@@ -43,11 +108,11 @@ describe("Tracer", () => {
     const history: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "Hello" }],
+        content_items: [{ type: "text.done", text: "Hello" }],
       },
       {
         role: "assistant",
-        content_items: [{ type: "text", text: "Hi there!" }],
+        content_items: [{ type: "text.done", text: "Hi there!" }],
       },
     ];
 
@@ -83,7 +148,7 @@ describe("Tracer", () => {
     const history: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "Test" }],
+        content_items: [{ type: "text.done", text: "Test" }],
       },
     ];
 
@@ -104,14 +169,14 @@ describe("Tracer", () => {
     const history1: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "First message" }],
+        content_items: [{ type: "text.done", text: "First message" }],
       },
     ];
 
     const history2: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "Second message" }],
+        content_items: [{ type: "text.done", text: "Second message" }],
       },
     ];
 
@@ -135,7 +200,7 @@ describe("Tracer", () => {
     const history: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "Test" }],
+        content_items: [{ type: "text.done", text: "Test" }],
       },
     ];
 
@@ -161,11 +226,11 @@ describe("Tracer", () => {
     const history: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "Hello" }],
+        content_items: [{ type: "text.done", text: "Hello" }],
       },
       {
         role: "assistant",
-        content_items: [{ type: "text", text: "Hi!" }],
+        content_items: [{ type: "text.done", text: "Hi!" }],
         usage_metadata: {
           prompt_tokens: 10,
           thoughts_tokens: 5,
@@ -198,7 +263,7 @@ describe("Tracer", () => {
     const history: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "Hello" }],
+        content_items: [{ type: "text.done", text: "Hello" }],
       },
     ];
 
@@ -242,13 +307,13 @@ describe("Tracer", () => {
     const history: UniMessage[] = [
       {
         role: "user",
-        content_items: [{ type: "text", text: "Hello" }],
+        content_items: [{ type: "text.done", text: "Hello" }],
       },
       {
         role: "assistant",
         content_items: [
           {
-            type: "inline_data",
+            type: "inline_data.done",
             data: Buffer.from([0x00, 0x01, 0x02, 0x03]),
             mime_type: "audio/pcm",
           },
@@ -276,7 +341,7 @@ describe("Tracer", () => {
         role: "assistant",
         content_items: [
           {
-            type: "embedding",
+            type: "embedding.done",
             embedding: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
           },
         ],
@@ -301,11 +366,170 @@ describe("Tracer", () => {
     expect(response.text).not.toContain("0.6");
   });
 
+  test("should show trace files saved before 0.5.0 with the current item types", async () => {
+    const warn = jest
+      .spyOn(process, "emitWarning")
+      .mockImplementation(() => undefined);
+    const tracer = new Tracer(tempCacheDir);
+    fs.mkdirSync(path.join(tempCacheDir, "legacy"));
+    fs.writeFileSync(
+      path.join(tempCacheDir, "legacy", "conversation.json"),
+      JSON.stringify({
+        history: [
+          {
+            role: "user",
+            content_items: [{ type: "text", text: "Weather in Paris?" }],
+          },
+          {
+            role: "assistant",
+            content_items: [
+              { type: "thinking", thinking: "Look it up." },
+              {
+                type: "partial_tool_call",
+                name: "get_weather",
+                arguments: '{"city": "Paris"}',
+                tool_call_id: "call_1",
+              },
+              {
+                type: "tool_call",
+                name: "get_weather",
+                arguments: { city: "Paris" },
+                tool_call_id: "call_1",
+              },
+            ],
+          },
+          {
+            role: "user",
+            content_items: [
+              { type: "tool_result", text: "22 C", tool_call_id: "call_1" },
+            ],
+          },
+        ],
+        config: { model: "fake-model" },
+        timestamp: "2026-01-01T00:00:00",
+      }),
+    );
+
+    const app = tracer.createWebApp();
+    const supertest = await import("supertest");
+    const response = await supertest
+      .default(app)
+      .get("/legacy/conversation.json");
+
+    expect(response.status).toBe(200);
+    for (const type of [
+      "text.done",
+      "thinking.done",
+      "tool_call.done",
+      "tool_result.done",
+    ]) {
+      expect(response.text).toContain(`mb-2">${type}</div>`);
+    }
+    expect(response.text).toContain("Weather in Paris?");
+    expect(response.text).toContain("Look it up.");
+    expect(response.text).toContain('get_weather(city="Paris")');
+    expect(response.text).toContain("22 C");
+    expect(response.text).toContain("• 2 item(s)");
+    expect(response.text).not.toContain("partial_tool_call");
+    warn.mockRestore();
+  });
+
+  test("should save a traced response before its stop event is yielded", async () => {
+    const previousCacheDir = process.env.AGENTHUB_CACHE_DIR;
+    process.env.AGENTHUB_CACHE_DIR = tempCacheDir;
+    const client = new ScriptedClient([
+      delta({ type: "text.delta", text: "Hello ", fidelity: { item_id: "0" } }),
+      delta({ type: "text.delta", text: "there!", fidelity: { item_id: "0" } }),
+      delta(doneMarker("0")),
+      STOP,
+    ]);
+
+    let saved: { history: UniMessage[] } | null = null;
+    let transcript = "";
+    try {
+      for await (const event of client.streamingResponseStateful({
+        message: {
+          role: "user",
+          content_items: [{ type: "text.done", text: "Say hello" }],
+        },
+        config: { trace_id: "integration/conversation" },
+      })) {
+        if (event.event_type === "stop") {
+          const fileBase = path.join(
+            tempCacheDir,
+            "integration",
+            "conversation",
+          );
+          saved = JSON.parse(fs.readFileSync(fileBase + ".json", "utf-8"));
+          transcript = fs.readFileSync(fileBase + ".txt", "utf-8");
+          break;
+        }
+      }
+    } finally {
+      if (previousCacheDir === undefined) {
+        delete process.env.AGENTHUB_CACHE_DIR;
+      } else {
+        process.env.AGENTHUB_CACHE_DIR = previousCacheDir;
+      }
+    }
+
+    expect(saved?.history.map((message) => message.content_items)).toEqual([
+      [{ type: "text.done", text: "Say hello" }],
+      [{ type: "text.done", text: "Hello there!" }],
+    ]);
+    expect(transcript).toContain("Text: Hello there!");
+    expect(transcript).toContain("Finish Reason: stop");
+  });
+
+  test("should save a traced response's fidelity without its item_id", async () => {
+    const previousCacheDir = process.env.AGENTHUB_CACHE_DIR;
+    process.env.AGENTHUB_CACHE_DIR = tempCacheDir;
+    const client = new ScriptedClient([
+      delta({
+        type: "text.delta",
+        text: "Hello",
+        fidelity: { item_id: "0", signature: "s" },
+      }),
+      delta(doneMarker("0")),
+      STOP,
+    ]);
+
+    try {
+      for await (const event of client.streamingResponse({
+        messages: [
+          {
+            role: "user",
+            content_items: [{ type: "text.done", text: "Say hello" }],
+          },
+        ],
+        config: { trace_id: "integration/fidelity" },
+      })) {
+        void event;
+      }
+    } finally {
+      if (previousCacheDir === undefined) {
+        delete process.env.AGENTHUB_CACHE_DIR;
+      } else {
+        process.env.AGENTHUB_CACHE_DIR = previousCacheDir;
+      }
+    }
+
+    const saved = JSON.parse(
+      fs.readFileSync(
+        path.join(tempCacheDir, "integration", "fidelity.json"),
+        "utf-8",
+      ),
+    );
+    expect(saved.history[1].content_items).toEqual([
+      { type: "text.done", text: "Hello", fidelity: { signature: "s" } },
+    ]);
+  });
+
   test("should sort directory listing by name", async () => {
     const tracer = new Tracer(tempCacheDir);
     const model = "fake-model";
     const history: UniMessage[] = [
-      { role: "user", content_items: [{ type: "text", text: "Test" }] },
+      { role: "user", content_items: [{ type: "text.done", text: "Test" }] },
     ];
     const config = {};
 
@@ -337,7 +561,7 @@ describe("Tracer", () => {
     const tracer = new Tracer(tempCacheDir);
     const model = "fake-model";
     const history: UniMessage[] = [
-      { role: "user", content_items: [{ type: "text", text: "Test" }] },
+      { role: "user", content_items: [{ type: "text.done", text: "Test" }] },
     ];
     const config = {};
 
@@ -361,7 +585,7 @@ describe("Tracer", () => {
     const tracer = new Tracer(tempCacheDir);
     const model = "fake-model";
     const history: UniMessage[] = [
-      { role: "user", content_items: [{ type: "text", text: "Test" }] },
+      { role: "user", content_items: [{ type: "text.done", text: "Test" }] },
     ];
     const config = {};
 
@@ -399,7 +623,7 @@ describe("Tracer", () => {
     const tracer = new Tracer(tempCacheDir);
     const model = "fake-model";
     const history: UniMessage[] = [
-      { role: "user", content_items: [{ type: "text", text: "Test" }] },
+      { role: "user", content_items: [{ type: "text.done", text: "Test" }] },
     ];
     const config = {};
 

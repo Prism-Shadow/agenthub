@@ -17,12 +17,13 @@ import type {
   ResponseCreateParamsStreaming,
   ResponseStreamEvent,
 } from "openai/resources/responses/responses";
-import { LLMClient } from "../baseClient";
-import { parseToolCallArguments, UnsupportedParameterError } from "../errors";
+import { doneMarker, LLMClient } from "../baseClient";
+import { UnsupportedParameterError } from "../errors";
 import {
+  EventContentItem,
   EventType,
+  Fidelity,
   FinishReason,
-  PartialContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
@@ -173,8 +174,8 @@ export class MiniMaxM3Client extends LLMClient {
         // anything that is not message content becomes an input item of its own, so the
         // text collected so far is flushed first to keep the order the model produced
         if (
-          item.type !== "text" &&
-          item.type !== "image_url" &&
+          item.type !== "text.done" &&
+          item.type !== "image_url.done" &&
           contentItems.length > 0
         ) {
           // Every turn goes back as a typed message item — the Responses API's EasyInputMessage
@@ -191,14 +192,14 @@ export class MiniMaxM3Client extends LLMClient {
           contentItems = [];
         }
 
-        if (item.type === "text") {
+        if (item.type === "text.done") {
           contentItems.push({
             type: message.role === "user" ? "input_text" : "output_text",
             text: item.text,
           });
-        } else if (item.type === "image_url") {
+        } else if (item.type === "image_url.done") {
           contentItems.push({ type: "input_image", image_url: item.image_url });
-        } else if (item.type === "thinking") {
+        } else if (item.type === "thinking.done") {
           // MiniMax accepts a reasoning item rebuilt from the thinking text alone, so no fidelity
           // is recorded for it.
           inputList.push({
@@ -207,14 +208,14 @@ export class MiniMaxM3Client extends LLMClient {
               ? [{ type: "reasoning_text", text: item.thinking }]
               : [],
           });
-        } else if (item.type === "tool_call") {
+        } else if (item.type === "tool_call.done") {
           inputList.push({
             type: "function_call",
             call_id: item.tool_call_id,
             name: item.name,
             arguments: JSON.stringify(item.arguments),
           });
-        } else if (item.type === "tool_result") {
+        } else if (item.type === "tool_result.done") {
           if (item.tool_call_id === undefined) {
             throw new Error("tool_call_id is required for tool result.");
           }
@@ -249,39 +250,65 @@ export class MiniMaxM3Client extends LLMClient {
   }
 
   /**
-   * Transform a MiniMax streaming event to AgentHub's universal event format.
+   * Transform one MiniMax stream event into a universal event, identifying items by output item id.
    */
   transformModelOutputToUniEvent(modelOutput: ResponseStreamEvent): UniEvent {
-    let eventType: EventType = "unused";
-    const contentItems: PartialContentItem[] = [];
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
     let finishReason: FinishReason | null = null;
 
     const minimaxEventType = modelOutput.type;
     if (minimaxEventType === "response.output_text.delta") {
-      eventType = "delta";
-      contentItems.push({ type: "text", text: modelOutput.delta });
+      contentItems.push({
+        type: "text.delta",
+        text: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (minimaxEventType === "response.reasoning_text.delta") {
-      eventType = "delta";
-      contentItems.push({ type: "thinking", thinking: modelOutput.delta });
+      contentItems.push({
+        type: "thinking.delta",
+        thinking: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
+    } else if (minimaxEventType === "response.output_item.added") {
+      // a message or reasoning item is announced with an empty delta, so a fragment a server
+      // sends without its item id belongs to the item announced last
+      if (modelOutput.item.type === "message") {
+        contentItems.push({
+          type: "text.delta",
+          text: "",
+          fidelity: { item_id: modelOutput.item.id },
+        });
+      } else if (modelOutput.item.type === "reasoning") {
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: modelOutput.item.id },
+        });
+      }
     } else if (minimaxEventType === "response.output_item.done") {
       // MiniMax's tool calls are read from the completed item alone: the argument deltas are
-      // left unread rather than reconciled against this item, and the streaming loop announces
-      // the call with one fragment carrying the whole arguments, so what a consumer streams
-      // and the call it is handed are one and the same.
-      if (modelOutput.item.type === "function_call") {
-        eventType = "delta";
-        contentItems.push({
-          type: "tool_call",
-          name: modelOutput.item.name,
-          arguments: parseToolCallArguments(
-            modelOutput.item.arguments,
-            this.constructor.name,
-            modelOutput.item.name,
-            modelOutput.item.call_id,
-          ),
-          tool_call_id: modelOutput.item.call_id,
-        });
+      // left unread rather than reconciled against this item, and the call is announced with
+      // one fragment carrying the whole arguments and completed at once, so what a consumer
+      // streams and the call it is handed are one and the same.
+      const item = modelOutput.item;
+      if (item.type === "function_call") {
+        // a server that sends no item id still sends the call id
+        const itemId = item.id || item.call_id;
+        contentItems.push(
+          {
+            type: "tool_call.delta",
+            name: item.name,
+            // a server may complete a call without its arguments field
+            arguments: item.arguments || "",
+            tool_call_id: item.call_id,
+            fidelity: { item_id: itemId },
+          },
+          doneMarker(itemId),
+        );
+      } else if (item.type === "message" || item.type === "reasoning") {
+        contentItems.push(doneMarker(item.id));
       }
     } else if (
       minimaxEventType === "response.completed" ||
@@ -312,7 +339,6 @@ export class MiniMaxM3Client extends LLMClient {
       ![
         "response.created",
         "response.in_progress",
-        "response.output_item.added",
         "response.output_text.done",
         "response.reasoning_text.done",
         "response.function_call_arguments.delta",
@@ -355,37 +381,41 @@ export class MiniMaxM3Client extends LLMClient {
       stream: true,
     } as ResponseCreateParamsStreaming;
 
+    // A server may leave the item ids out. An item without one belongs to the item announced or
+    // streamed last while that item is open and of the same kind, and starts an item of its own
+    // otherwise.
+    let lastId = "";
+    let lastType = "";
+    let unkeyedItems = 0;
+
     const stream = await this._client.responses.create(params, {
       signal: options.signal,
     });
     for await (const event of stream) {
       const uniEvent = this.transformModelOutputToUniEvent(event);
-      if (uniEvent.event_type === "unused") {
-        continue;
-      }
-
+      const contentItems: EventContentItem[] = [];
       for (const item of uniEvent.content_items) {
-        if (item.type === "tool_call") {
-          // the argument deltas are not streamed, so announce the call the way the Gemini
-          // client does: one fragment carrying the whole arguments, then the complete call
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "partial_tool_call",
-                name: item.name,
-                arguments: JSON.stringify(item.arguments),
-                tool_call_id: item.tool_call_id,
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
+        const fidelity = (item as { fidelity: Fidelity }).fidelity;
+        if (item.type.endsWith(".done")) {
+          if (!fidelity.item_id && !lastId) {
+            continue;
+          }
+          fidelity.item_id = fidelity.item_id || lastId;
+          if (fidelity.item_id === lastId) {
+            lastId = "";
+            lastType = "";
+          }
+        } else {
+          if (!fidelity.item_id) {
+            fidelity.item_id =
+              lastType === item.type ? lastId : `unkeyed-${unkeyedItems++}`;
+          }
+          lastId = fidelity.item_id;
+          lastType = item.type;
         }
+        contentItems.push(item);
       }
-
-      yield uniEvent;
+      yield { ...uniEvent, content_items: contentItems };
     }
   }
 

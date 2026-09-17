@@ -18,15 +18,12 @@ import {
   BetaRawMessageStreamEvent,
 } from "@anthropic-ai/sdk/resources/beta/messages";
 import { Stream } from "@anthropic-ai/sdk/core/streaming";
-import { LLMClient } from "../baseClient";
+import { doneMarker, LLMClient } from "../baseClient";
+import { UnsupportedParameterError } from "../errors";
 import {
-  parseToolCallArguments,
-  UnsupportedParameterError,
-} from "../errors";
-import {
+  EventContentItem,
   EventType,
   FinishReason,
-  PartialContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
@@ -35,10 +32,7 @@ import {
   UniMessage,
   UsageMetadata,
 } from "../types";
-import {
-  fixOpenrouterUsageMetadata,
-  isDebugEnabled,
-} from "../utils";
+import { fixOpenrouterUsageMetadata, isDebugEnabled } from "../utils";
 
 const REDACTED_THINKING = "_REDACTED_THINKING";
 
@@ -244,11 +238,11 @@ export class AntMessagesClient extends LLMClient {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const contentBlocks: any[] = [];
       for (const item of msg.content_items) {
-        if (item.type === "text") {
+        if (item.type === "text.done") {
           contentBlocks.push({ type: "text", text: item.text });
-        } else if (item.type === "image_url") {
+        } else if (item.type === "image_url.done") {
           contentBlocks.push(this._convertImageUrlToSource(item.image_url));
-        } else if (item.type === "thinking") {
+        } else if (item.type === "thinking.done") {
           if (item.thinking === REDACTED_THINKING) {
             contentBlocks.push({
               type: "redacted_thinking",
@@ -268,14 +262,14 @@ export class AntMessagesClient extends LLMClient {
 
             contentBlocks.push(thinkingBlock);
           }
-        } else if (item.type === "tool_call") {
+        } else if (item.type === "tool_call.done") {
           contentBlocks.push({
             type: "tool_use",
             id: item.tool_call_id,
             name: item.name,
             input: item.arguments,
           });
-        } else if (item.type === "tool_result") {
+        } else if (item.type === "tool_result.done") {
           if (!item.tool_call_id) {
             throw new Error("tool_call_id is required for tool result.");
           }
@@ -305,83 +299,92 @@ export class AntMessagesClient extends LLMClient {
   }
 
   /**
-   * Transform a Messages API streaming event to universal event format.
-   *
-   * NOTE: the Messages API always has only one content item per event.
+   * Transform one Messages API stream event into a universal event, identifying items by
+   * content block index.
    */
   transformModelOutputToUniEvent(
     modelOutput: BetaRawMessageStreamEvent,
   ): UniEvent {
-    let eventType: EventType | null = null;
-    const contentItems: PartialContentItem[] = [];
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
     let finishReason: FinishReason | null = null;
 
     const antEventType = modelOutput.type;
     if (antEventType === "content_block_start") {
-      eventType = "start";
+      const itemId = String(modelOutput.index);
       const block = modelOutput.content_block;
       if (block.type === "tool_use") {
         contentItems.push({
-          type: "partial_tool_call",
+          type: "tool_call.delta",
           name: block.name,
           arguments: "",
           tool_call_id: block.id,
+          fidelity: { item_id: itemId },
         });
       } else if (block.type === "redacted_thinking") {
         contentItems.push({
-          type: "thinking",
+          type: "thinking.delta",
           thinking: REDACTED_THINKING,
-          fidelity: { signature: block.data },
+          fidelity: { item_id: itemId, signature: block.data },
         });
       }
     } else if (antEventType === "content_block_delta") {
-      eventType = "delta";
+      const itemId = String(modelOutput.index);
       const delta = modelOutput.delta;
       if (delta.type === "thinking_delta") {
-        contentItems.push({ type: "thinking", thinking: delta.thinking });
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: delta.thinking,
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "text_delta") {
-        contentItems.push({ type: "text", text: delta.text });
+        contentItems.push({
+          type: "text.delta",
+          text: delta.text,
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "input_json_delta") {
         contentItems.push({
-          type: "partial_tool_call",
+          type: "tool_call.delta",
           name: "",
           arguments: delta.partial_json,
           tool_call_id: "",
+          fidelity: { item_id: itemId },
         });
       } else if (delta.type === "signature_delta") {
+        // the signature closes the thinking block it belongs to
         contentItems.push({
-          type: "thinking",
+          type: "thinking.delta",
           thinking: "",
-          fidelity: { signature: delta.signature },
+          fidelity: { item_id: itemId, signature: delta.signature },
         });
       }
     } else if (antEventType === "content_block_stop") {
-      eventType = "stop";
+      contentItems.push(doneMarker(String(modelOutput.index)));
     } else if (antEventType === "message_start") {
-      eventType = "start";
-      const message = modelOutput.message;
-      if (message.usage) {
-        const cacheCreationTokens =
-          message.usage.cache_creation_input_tokens || 0;
+      eventType = "stop";
+      const usage = modelOutput.message.usage;
+      if (usage) {
+        const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
         usageMetadata = {
-          cached_tokens: message.usage.cache_read_input_tokens,
-          prompt_tokens: message.usage.input_tokens + cacheCreationTokens,
+          cached_tokens: usage.cache_read_input_tokens,
+          prompt_tokens: usage.input_tokens + cacheCreationTokens,
           thoughts_tokens: null,
           response_tokens: null,
         };
       }
     } else if (antEventType === "message_delta") {
       eventType = "stop";
-      const delta = modelOutput.delta;
-      if (delta.stop_reason) {
-        const stopReasonMapping: { [key: string]: FinishReason } = {
-          end_turn: "stop",
-          max_tokens: "length",
-          stop_sequence: "stop",
-          tool_use: "tool_call",
-        };
-        finishReason = stopReasonMapping[delta.stop_reason] || "unknown";
+      const stopReasonMapping: { [key: string]: FinishReason } = {
+        end_turn: "stop",
+        max_tokens: "length",
+        stop_sequence: "stop",
+        tool_use: "tool_call",
+      };
+      const stopReason = modelOutput.delta.stop_reason;
+      if (stopReason) {
+        finishReason = stopReasonMapping[stopReason] || "unknown";
       }
 
       const usage = modelOutput.usage;
@@ -395,29 +398,33 @@ export class AntMessagesClient extends LLMClient {
         const thinkingTokens =
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           (usage as any).output_tokens_details?.thinking_tokens ?? null;
-        usageMetadata = {
-          cached_tokens: usage.cache_read_input_tokens ?? null,
-          prompt_tokens: promptTokens,
-          thoughts_tokens: thinkingTokens,
-          response_tokens: usage.output_tokens - (thinkingTokens || 0),
-        };
+        usageMetadata = fixOpenrouterUsageMetadata(
+          {
+            cached_tokens: usage.cache_read_input_tokens ?? null,
+            prompt_tokens: promptTokens,
+            thoughts_tokens: thinkingTokens,
+            response_tokens: usage.output_tokens - (thinkingTokens || 0),
+          },
+          this._client.baseURL,
+        );
       }
-    } else if (antEventType === "message_stop") {
-      eventType = "stop";
     } else if (
-      ["text", "thinking", "signature", "input_json", "ping"].includes(
-        antEventType,
-      )
+      [
+        "message_stop",
+        "text",
+        "thinking",
+        "signature",
+        "input_json",
+        "ping",
+      ].includes(antEventType)
     ) {
       // the SDK drops the "ping" heartbeat at the SSE layer; it reaches here only
       // from gateways that relabel it onto another event
-      eventType = "unused";
-        } else if (isDebugEnabled()) {
+    } else if (isDebugEnabled()) {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     } else {
       // a gateway injects its own events (heartbeats, cost tickers) into the stream, and
       // killing a long generation over one costs more than dropping it
-      eventType = "unused";
     }
 
     return {
@@ -443,17 +450,6 @@ export class AntMessagesClient extends LLMClient {
       options.signal,
     );
 
-    // Stream generate
-    const partialToolCall: {
-      name?: string;
-      arguments?: string;
-      tool_call_id?: string;
-    } = {};
-    const partialUsage: {
-      prompt_tokens?: number | null;
-      cached_tokens?: number | null;
-    } = {};
-
     const stream = (await this._client.beta.messages.create(
       {
         ...antConfig,
@@ -465,88 +461,7 @@ export class AntMessagesClient extends LLMClient {
     )) as unknown as Stream<BetaRawMessageStreamEvent>;
 
     for await (const event of stream) {
-      const uniEvent = this.transformModelOutputToUniEvent(event);
-      if (uniEvent.event_type === "start") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.name = item.name;
-            partialToolCall.arguments = "";
-            partialToolCall.tool_call_id = item.tool_call_id;
-          }
-        }
-
-        if (uniEvent.content_items.length > 0) {
-          yield uniEvent;
-        }
-
-        if (uniEvent.usage_metadata !== null) {
-          partialUsage.prompt_tokens = uniEvent.usage_metadata.prompt_tokens;
-          partialUsage.cached_tokens = uniEvent.usage_metadata.cached_tokens;
-        }
-      } else if (uniEvent.event_type === "delta") {
-        for (const item of uniEvent.content_items) {
-          if (item.type === "partial_tool_call") {
-            partialToolCall.arguments =
-              (partialToolCall.arguments || "") + item.arguments;
-          }
-        }
-
-        yield uniEvent;
-      } else if (uniEvent.event_type === "stop") {
-        if (partialToolCall.name && partialToolCall.arguments !== undefined) {
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "tool_call",
-                name: partialToolCall.name,
-                arguments: parseToolCallArguments(
-                  partialToolCall.arguments,
-                  this.constructor.name,
-                  partialToolCall.name || "",
-                  partialToolCall.tool_call_id || "",
-                ),
-                tool_call_id: partialToolCall.tool_call_id || "",
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
-          partialToolCall.name = undefined;
-          partialToolCall.arguments = undefined;
-          partialToolCall.tool_call_id = undefined;
-        }
-
-        if (uniEvent.usage_metadata !== null) {
-          // finish partial usage: the message_delta counts win over message_start
-          const deltaUsage = uniEvent.usage_metadata;
-          const usageMetadata: UsageMetadata = {
-            prompt_tokens:
-              deltaUsage.prompt_tokens !== null
-                ? deltaUsage.prompt_tokens
-                : (partialUsage.prompt_tokens ?? null),
-            cached_tokens:
-              deltaUsage.cached_tokens !== null
-                ? deltaUsage.cached_tokens
-                : (partialUsage.cached_tokens ?? null),
-            thoughts_tokens: deltaUsage.thoughts_tokens,
-            response_tokens: deltaUsage.response_tokens,
-          };
-          yield {
-            role: "assistant",
-            event_type: "stop",
-            content_items: [],
-            usage_metadata: fixOpenrouterUsageMetadata(
-              usageMetadata,
-              this._client.baseURL,
-            ),
-            finish_reason: uniEvent.finish_reason,
-          };
-          partialUsage.prompt_tokens = undefined;
-          partialUsage.cached_tokens = undefined;
-        }
-      }
+      yield this.transformModelOutputToUniEvent(event);
     }
   }
 

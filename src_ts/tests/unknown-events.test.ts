@@ -15,12 +15,13 @@
 import { expect, describe, test, afterEach } from "@jest/globals";
 import {
   AutoLLMClient,
-  TextContentItem,
+  EventContentItem,
+  TextDeltaItem,
   UniConfig,
   UniEvent,
   UniMessage,
 } from "../src";
-import { LLMClient } from "../src/baseClient";
+import { assertStreamGrammar } from "./streamGrammar";
 
 type StreamClient = {
   streamingResponse(options: {
@@ -92,7 +93,7 @@ const MESSAGES_STREAM_CASES: StreamCase[] = [
   },
 ];
 
-// Every client that parses the Gemini generateContent chunk shape.
+// Every client that parses the Gemini Interactions event shape.
 const GEMINI_STREAM_CASES: StreamCase[] = [
   {
     expectedClient: "Gemini3_8Client",
@@ -101,12 +102,30 @@ const GEMINI_STREAM_CASES: StreamCase[] = [
   },
 ];
 
+// Every client that parses the Gemini generateContent chunk shape.
+const GENERATE_CONTENT_STREAM_CASES: StreamCase[] = [
+  {
+    expectedClient: "Gemini3_8GenerateContentClient",
+    model: "gemini-3.8-flash",
+    clientType: "gemini-generate-content",
+  },
+];
+
 const messages: UniMessage[] = [
   {
     role: "user",
-    content_items: [{ type: "text", text: "Create a memo." }],
+    content_items: [{ type: "text.done", text: "Create a memo." }],
   },
 ];
+
+// what a client makes of a wire event that carries nothing universal
+const EMPTY_EVENT: UniEvent = {
+  role: "assistant",
+  event_type: "delta",
+  content_items: [],
+  usage_metadata: null,
+  finish_reason: null,
+};
 
 function streamFromEvents(events: unknown[]): AsyncIterable<unknown> {
   return {
@@ -153,6 +172,15 @@ function installFakeMessagesStream(
 }
 
 function installFakeGeminiStream(
+  client: StreamClient,
+  events: unknown[],
+): void {
+  installFakeStream(client, {
+    interactions: { create: async () => streamFromEvents(events) },
+  });
+}
+
+function installFakeGenerateContentStream(
   client: StreamClient,
   events: unknown[],
 ): void {
@@ -244,6 +272,7 @@ function messagesStartEvent(): unknown {
 function messagesTextDeltaEvent(text: string): unknown {
   return {
     type: "content_block_delta",
+    index: 0,
     delta: { type: "text_delta", text: text },
   };
 }
@@ -261,13 +290,70 @@ function messagesStopEvent(): unknown {
   };
 }
 
-function geminiKeepaliveChunk(): unknown {
+function geminiKeepaliveEvent(): unknown {
+  // The SDK passes a frame through as parsed, so a heartbeat reaches the client without the
+  // event_type every Interactions event carries.
+  return { type: "keepalive", sequence_number: 1 };
+}
+
+function geminiStatusUpdateEvent(): unknown {
+  return {
+    event_type: "interaction.status_update",
+    interaction_id: "",
+    status: "in_progress",
+  };
+}
+
+function geminiUnknownDeltaEvent(): unknown {
+  // a delta of a type the client does not know, e.g. a modality added after this client
+  return { event_type: "step.delta", index: 0, delta: { type: "hologram" } };
+}
+
+function geminiTextDeltaEvent(text: string): unknown {
+  return {
+    event_type: "step.delta",
+    index: 0,
+    delta: { type: "text", text: text },
+  };
+}
+
+function geminiDeltaEvent(index: number, delta: object): unknown {
+  return { event_type: "step.delta", index, delta };
+}
+
+function geminiErrorEvent(): unknown {
+  // the error event the streaming reference documents, which the SDK hands over as parsed
+  return {
+    event_type: "error",
+    error: {
+      message: "Deadline expired before operation could complete.",
+      code: "gateway_timeout",
+    },
+  };
+}
+
+function geminiCompletedEvent(status = "completed"): unknown {
+  return {
+    event_type: "interaction.completed",
+    interaction: {
+      status,
+      usage: {
+        total_input_tokens: 2,
+        total_cached_tokens: 0,
+        total_thought_tokens: 1,
+        total_output_tokens: 3,
+      },
+    },
+  };
+}
+
+function generateContentKeepaliveChunk(): unknown {
   // The SDK maps only the fields it knows onto the response, so a heartbeat reaches the
   // client as a chunk carrying neither candidates nor usage.
   return {};
 }
 
-function geminiUnknownPartChunk(): unknown {
+function generateContentUnknownPartChunk(): unknown {
   // a part the client recognizes by none of its fields, e.g. a modality added after this
   // client: the SDK leaves what it does not know undefined rather than null
   return {
@@ -275,13 +361,13 @@ function geminiUnknownPartChunk(): unknown {
   };
 }
 
-function geminiTextChunk(text: string): unknown {
+function generateContentTextChunk(text: string): unknown {
   return {
     candidates: [{ content: { parts: [{ text: text }] }, finishReason: null }],
   };
 }
 
-function geminiStopChunk(): unknown {
+function generateContentStopChunk(): unknown {
   return {
     // FinishReason is a string enum, so the raw value keys the client's mapping
     candidates: [{ content: { parts: [] }, finishReason: "STOP" }],
@@ -339,11 +425,10 @@ async function collectEvents(
 }
 
 function collectedTexts(events: UniEvent[]): string[] {
-  return events.flatMap((event) =>
-    event.content_items
-      .filter((item): item is TextContentItem => item.type === "text")
-      .map((item) => item.text),
-  );
+  return events
+    .flatMap((event): EventContentItem[] => event.content_items)
+    .filter((item): item is TextDeltaItem => item.type === "text.delta")
+    .map((item) => item.text);
 }
 
 afterEach(() => {
@@ -368,6 +453,7 @@ describe.each(RESPONSES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -376,11 +462,19 @@ describe.each(RESPONSES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        installFakeResponsesStream(client, [unknownEvent(), responsesTextDeltaEvent("Here is"), responsesCompletedEvent()]);
+        expect(client.transformModelOutputToUniEvent(unknownEvent())).toEqual(
+          EMPTY_EVENT,
+        );
+        installFakeResponsesStream(client, [
+          unknownEvent(),
+          responsesTextDeltaEvent("Here is"),
+          responsesCompletedEvent(),
+        ]);
 
         const events = await collectEvents(
           client.streamingResponse({ messages, config: {} }),
         );
+        assertStreamGrammar(events);
         expect(collectedTexts(events)).toEqual(["Here is"]);
         expect(events[events.length - 1].finish_reason).toBe("stop");
       },
@@ -399,6 +493,7 @@ describe.each(RESPONSES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -408,7 +503,10 @@ describe.each(RESPONSES_STREAM_CASES)(
       async (_label, unknownEvent) => {
         process.env.AGENTHUB_DEBUG = "1";
         const client = createAutoClient(testCase);
-        installFakeResponsesStream(client, [unknownEvent(), responsesCompletedEvent()]);
+        installFakeResponsesStream(client, [
+          unknownEvent(),
+          responsesCompletedEvent(),
+        ]);
 
         await expect(
           collectEvents(client.streamingResponse({ messages, config: {} })),
@@ -436,6 +534,7 @@ describe.each(CHAT_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -461,6 +560,7 @@ describe.each(MESSAGES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -469,11 +569,20 @@ describe.each(MESSAGES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        installFakeMessagesStream(client, [unknownEvent(), messagesStartEvent(), messagesTextDeltaEvent("Here is"), messagesStopEvent()]);
+        expect(client.transformModelOutputToUniEvent(unknownEvent())).toEqual(
+          EMPTY_EVENT,
+        );
+        installFakeMessagesStream(client, [
+          unknownEvent(),
+          messagesStartEvent(),
+          messagesTextDeltaEvent("Here is"),
+          messagesStopEvent(),
+        ]);
 
         const events = await collectEvents(
           client.streamingResponse({ messages, config: {} }),
         );
+        assertStreamGrammar(events);
         expect(collectedTexts(events)).toEqual(["Here is"]);
         expect(events[events.length - 1].finish_reason).toBe("stop");
       },
@@ -494,6 +603,7 @@ describe.each(MESSAGES_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -503,7 +613,11 @@ describe.each(MESSAGES_STREAM_CASES)(
       async (_label, unknownEvent) => {
         process.env.AGENTHUB_DEBUG = "1";
         const client = createAutoClient(testCase);
-        installFakeMessagesStream(client, [unknownEvent(), messagesStartEvent(), messagesStopEvent()]);
+        installFakeMessagesStream(client, [
+          unknownEvent(),
+          messagesStartEvent(),
+          messagesStopEvent(),
+        ]);
 
         await expect(
           collectEvents(client.streamingResponse({ messages, config: {} })),
@@ -516,17 +630,189 @@ describe.each(MESSAGES_STREAM_CASES)(
 describe.each(GEMINI_STREAM_CASES)(
   "Stream event handling for $clientType",
   (testCase) => {
-    test("skips an unknown part", async () => {
+    test("skips an unknown delta", async () => {
       const client = createAutoClient(testCase);
+      expect(
+        client.transformModelOutputToUniEvent(geminiUnknownDeltaEvent()),
+      ).toEqual(EMPTY_EVENT);
       installFakeGeminiStream(client, [
-        geminiUnknownPartChunk(),
-        geminiTextChunk("Here is"),
-        geminiStopChunk(),
+        geminiUnknownDeltaEvent(),
+        geminiTextDeltaEvent("Here is"),
+        geminiCompletedEvent(),
       ]);
 
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
+      expect(collectedTexts(events)).toEqual(["Here is"]);
+      expect(events[events.length - 1].finish_reason).toBe("stop");
+    });
+
+    test("rejects an unknown delta with AGENTHUB_DEBUG set", async () => {
+      process.env.AGENTHUB_DEBUG = "1";
+      const client = createAutoClient(testCase);
+      installFakeGeminiStream(client, [
+        geminiUnknownDeltaEvent(),
+        geminiCompletedEvent(),
+      ]);
+
+      await expect(
+        collectEvents(client.streamingResponse({ messages, config: {} })),
+      ).rejects.toThrow("Unknown output");
+    });
+
+    test("skips gateway keepalive heartbeats between stream events", async () => {
+      const client = createAutoClient(testCase);
+      expect(routedClientName(client)).toBe(testCase.expectedClient);
+      installFakeGeminiStream(client, [
+        geminiKeepaliveEvent(),
+        geminiTextDeltaEvent("Here is"),
+        geminiKeepaliveEvent(),
+        geminiTextDeltaEvent(" the memo."),
+        geminiCompletedEvent(),
+        geminiKeepaliveEvent(),
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
+      expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
+      // a heartbeat must not surface as an event of its own: two text deltas, their done
+      // item, the stop
+      expect(events).toHaveLength(4);
+      expect(events[events.length - 1].finish_reason).toBe("stop");
+    });
+
+    test("raises a provider error event with its code and message", async () => {
+      const client = createAutoClient(testCase);
+      installFakeGeminiStream(client, [
+        geminiTextDeltaEvent("Here is"),
+        geminiErrorEvent(),
+        geminiCompletedEvent("failed"),
+      ]);
+
+      await expect(
+        collectEvents(client.streamingResponse({ messages, config: {} })),
+      ).rejects.toThrow(
+        "Gemini stream error gateway_timeout: Deadline expired before operation could complete.",
+      );
+    });
+
+    test("streams every image of a step as an item of its own and audio chunks as one item", async () => {
+      const data = (text: string) => Buffer.from(text).toString("base64");
+      const client = createAutoClient(testCase);
+      installFakeGeminiStream(client, [
+        // an image model's thought summary showing two drafts in a row, closed by its signature
+        geminiDeltaEvent(0, {
+          type: "thought_summary",
+          content: {
+            type: "image",
+            data: data("draft 1"),
+            mime_type: "image/png",
+          },
+        }),
+        geminiDeltaEvent(0, {
+          type: "thought_summary",
+          content: {
+            type: "image",
+            data: data("draft 2"),
+            mime_type: "image/png",
+          },
+        }),
+        geminiDeltaEvent(0, { type: "thought_signature", signature: "sig-1" }),
+        { event_type: "step.stop", index: 0 },
+        // two images in a row in the model's output
+        geminiDeltaEvent(1, {
+          type: "image",
+          data: data("image 1"),
+          mime_type: "image/png",
+        }),
+        geminiDeltaEvent(1, {
+          type: "image",
+          data: data("image 2"),
+          mime_type: "image/png",
+        }),
+        { event_type: "step.stop", index: 1 },
+        // speech a TTS model streams in chunks
+        geminiDeltaEvent(2, {
+          type: "audio",
+          data: data("pcm 1"),
+          mime_type: "audio/l16",
+          sample_rate: 24000,
+          channels: 1,
+        }),
+        geminiDeltaEvent(2, {
+          type: "audio",
+          data: data("pcm 2"),
+          mime_type: "audio/l16",
+          sample_rate: 24000,
+          channels: 1,
+        }),
+        { event_type: "step.stop", index: 2 },
+        geminiCompletedEvent(),
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
+      const doneItems = events
+        .flatMap((event): EventContentItem[] => event.content_items)
+        .filter((item) => item.type.endsWith(".done"));
+      expect(doneItems).toEqual([
+        {
+          type: "inline_thinking.done",
+          data: Buffer.from("draft 1"),
+          mime_type: "image/png",
+        },
+        {
+          type: "inline_thinking.done",
+          data: Buffer.from("draft 2"),
+          mime_type: "image/png",
+          fidelity: { signature: "sig-1" },
+        },
+        {
+          type: "inline_data.done",
+          data: Buffer.from("image 1"),
+          mime_type: "image/png",
+        },
+        {
+          type: "inline_data.done",
+          data: Buffer.from("image 2"),
+          mime_type: "image/png",
+        },
+        {
+          type: "inline_data.done",
+          data: Buffer.from("pcm 1pcm 2"),
+          mime_type: "audio/l16; rate=24000; channels=1",
+        },
+      ]);
+    });
+  },
+);
+
+describe.each(GENERATE_CONTENT_STREAM_CASES)(
+  "Stream event handling for $clientType",
+  (testCase) => {
+    test("skips an unknown part", async () => {
+      const client = createAutoClient(testCase);
+      expect(
+        client.transformModelOutputToUniEvent(
+          generateContentUnknownPartChunk(),
+        ),
+      ).toEqual(EMPTY_EVENT);
+      installFakeGenerateContentStream(client, [
+        generateContentUnknownPartChunk(),
+        generateContentTextChunk("Here is"),
+        generateContentStopChunk(),
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is"]);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
@@ -534,9 +820,9 @@ describe.each(GEMINI_STREAM_CASES)(
     test("rejects an unknown part with AGENTHUB_DEBUG set", async () => {
       process.env.AGENTHUB_DEBUG = "1";
       const client = createAutoClient(testCase);
-      installFakeGeminiStream(client, [
-        geminiUnknownPartChunk(),
-        geminiStopChunk(),
+      installFakeGenerateContentStream(client, [
+        generateContentUnknownPartChunk(),
+        generateContentStopChunk(),
       ]);
 
       await expect(
@@ -547,29 +833,30 @@ describe.each(GEMINI_STREAM_CASES)(
     test("skips gateway keepalive heartbeats between stream chunks", async () => {
       const client = createAutoClient(testCase);
       expect(routedClientName(client)).toBe(testCase.expectedClient);
-      installFakeGeminiStream(client, [
-        geminiKeepaliveChunk(),
-        geminiTextChunk("Here is"),
-        geminiKeepaliveChunk(),
-        geminiTextChunk(" the memo."),
-        geminiStopChunk(),
-        geminiKeepaliveChunk(),
+      installFakeGenerateContentStream(client, [
+        generateContentKeepaliveChunk(),
+        generateContentTextChunk("Here is"),
+        generateContentKeepaliveChunk(),
+        generateContentTextChunk(" the memo."),
+        generateContentStopChunk(),
+        generateContentKeepaliveChunk(),
       ]);
 
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is", " the memo."]);
-      // a heartbeat must not surface as an empty event of its own
-      expect(events).toHaveLength(3);
+      // a heartbeat must not surface as an event of its own: two text deltas, their done
+      // item, the stop
+      expect(events).toHaveLength(4);
       expect(events[events.length - 1].finish_reason).toBe("stop");
     });
   },
 );
 
-
-// Every client, driven over the ignorable events its own protocol carries.
-const UNUSED_EVENT_CASES: Array<{
+// Every client, driven over a stream opening with an ignorable event of its own protocol.
+const IGNORABLE_EVENT_CASES: Array<{
   testCase: StreamCase;
   install: (client: StreamClient, events: unknown[]) => void;
   stream: () => unknown[];
@@ -586,7 +873,11 @@ const UNUSED_EVENT_CASES: Array<{
   ...CHAT_STREAM_CASES.map((testCase) => ({
     testCase,
     install: installFakeChatStream,
-    stream: () => [chatKeepaliveChunk(1), chatTextChunk("Here is"), chatStopChunk()],
+    stream: () => [
+      chatKeepaliveChunk(1),
+      chatTextChunk("Here is"),
+      chatStopChunk(),
+    ],
   })),
   ...MESSAGES_STREAM_CASES.map((testCase) => ({
     testCase,
@@ -601,93 +892,41 @@ const UNUSED_EVENT_CASES: Array<{
   ...GEMINI_STREAM_CASES.map((testCase) => ({
     testCase,
     install: installFakeGeminiStream,
-    stream: () => [geminiKeepaliveChunk(), geminiTextChunk("Here is"), geminiStopChunk()],
+    stream: () => [
+      geminiStatusUpdateEvent(),
+      geminiTextDeltaEvent("Here is"),
+      geminiCompletedEvent(),
+    ],
+  })),
+  ...GENERATE_CONTENT_STREAM_CASES.map((testCase) => ({
+    testCase,
+    install: installFakeGenerateContentStream,
+    stream: () => [
+      generateContentKeepaliveChunk(),
+      generateContentTextChunk("Here is"),
+      generateContentStopChunk(),
+    ],
   })),
 ];
 
-/** A client that lets its own "unused" bookkeeping escape, which no client may do. */
-class LeakyClient extends LLMClient {
-  protected _model = "leaky-1";
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  transformUniConfigToModelConfig(config: UniConfig): any {
-    return config;
-  }
-
-  transformUniMessageToModelInput(messages: UniMessage[]): UniMessage[] {
-    return messages;
-  }
-
-  transformModelOutputToUniEvent(modelOutput: UniEvent): UniEvent {
-    return modelOutput;
-  }
-
-  async *_streamingResponseInternal(): AsyncGenerator<UniEvent> {
-    yield {
-      role: "assistant",
-      event_type: "unused",
-      content_items: [],
-      usage_metadata: null,
-      finish_reason: null,
-    };
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: [{ type: "text", text: "Here is" }],
-      usage_metadata: null,
-      finish_reason: null,
-    };
-    yield {
-      role: "assistant",
-      event_type: "stop",
-      content_items: [],
-      usage_metadata: {
-        cached_tokens: 0,
-        prompt_tokens: 1,
-        thoughts_tokens: 0,
-        response_tokens: 1,
-      },
-      finish_reason: "stop",
-    };
-  }
-
-  async listModels(): Promise<string[]> {
-    return [this._model];
-  }
-}
-
-describe.each(UNUSED_EVENT_CASES)(
-  "Unused event handling for $testCase.clientType",
+describe.each(IGNORABLE_EVENT_CASES)(
+  "Ignorable event handling for $testCase.clientType",
   ({ testCase, install, stream }) => {
-    test("never yields an unused event", async () => {
-      // with the debug guard on, an "unused" event that reached the caller throws instead of passing
+    test("turns an ignorable event into an empty event and streams only deltas and a stop", async () => {
+      // with the debug guard on, an event the client did not know would throw instead of passing
       process.env.AGENTHUB_DEBUG = "1";
       const client = createAutoClient(testCase);
+      const [ignorableEvent] = stream();
+      expect(client.transformModelOutputToUniEvent(ignorableEvent)).toEqual(
+        EMPTY_EVENT,
+      );
       install(client, stream());
 
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
-      expect(events.every((event) => event.event_type !== "unused")).toBe(true);
+      assertStreamGrammar(events);
       expect(collectedTexts(events)).toEqual(["Here is"]);
     });
   },
 );
-
-describe("Base client unused event guarantee", () => {
-  test("drops an escaped unused event", async () => {
-    const events = await collectEvents(
-      new LeakyClient().streamingResponse({ messages, config: {} }),
-    );
-
-    expect(events.map((event) => event.event_type)).toEqual(["delta", "stop"]);
-  });
-
-  test("rejects an escaped unused event with AGENTHUB_DEBUG set", async () => {
-    process.env.AGENTHUB_DEBUG = "1";
-
-    await expect(
-      collectEvents(new LeakyClient().streamingResponse({ messages, config: {} })),
-    ).rejects.toThrow("unused event");
-  });
-});

@@ -58,19 +58,19 @@ class OpenaiEmbeddingClient(LLMClient):
         for msg in messages:
             msg_text = ""
             for item in msg["content_items"]:
-                if item["type"] != "text":
+                if item["type"] != "text.done":
                     raise ValueError("OpenAI embeddings only support text content items.")
                 msg_text += item["text"]
             texts.append(msg_text or " ")
         return texts
 
     def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
-        """Transform OpenAI Embeddings response to universal event format."""
+        """Transform an OpenAI Embeddings response into a universal event, one complete item per vector."""
         usage = getattr(model_output, "usage", None)
         return {
             "role": "assistant",
             "event_type": "stop",
-            "content_items": [{"type": "embedding", "embedding": item.embedding} for item in model_output.data],
+            "content_items": [{"type": "embedding.delta", "embedding": item.embedding} for item in model_output.data],
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": usage.prompt_tokens if usage else None,

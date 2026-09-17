@@ -23,7 +23,7 @@
   "dependencies": {
     "@anthropic-ai/bedrock-sdk": "^0.26.4",
     "@anthropic-ai/sdk": "^0.81.0",
-    "@google/genai": "^1.48.0",
+    "@google/genai": "^2.22.0",
     "express": "^4.18.2",
     "openai": "^6.33.0"
   },

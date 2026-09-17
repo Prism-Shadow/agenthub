@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
 import { expect, describe, test } from "@jest/globals";
 
 import { AutoLLMClient, UnsupportedOperationError } from "../src";
@@ -164,6 +163,56 @@ describe("listModels", () => {
       "gemini-3.7-pro",
     ]);
   });
+
+  // A Vertex AI service-account key; the SDK authenticates lazily, so nothing more is needed to
+  // construct the client.
+  const serviceAccountKey = '{"project_id": "test-project"}';
+
+  test.each([
+    {
+      apiKey: serviceAccountKey,
+      clientType: undefined,
+      expectedClient: "Gemini3_8GenerateContentClient",
+    },
+    {
+      apiKey: "test-key",
+      clientType: "gemini-generate-content",
+      expectedClient: "Gemini3_8GenerateContentClient",
+    },
+    {
+      apiKey: serviceAccountKey,
+      clientType: "gemini-interactions",
+      expectedClient: "Gemini3_8Client",
+    },
+  ])(
+    "routes Gemini by credential and pin, and keeps the Gemini ids of a Vertex listing ($expectedClient, $clientType)",
+    async ({ apiKey, clientType, expectedClient }) => {
+      const client = new AutoLLMClient({
+        model: "gemini-3.8-flash",
+        apiKey,
+        clientType,
+      });
+      expect(routedClientName(client)).toBe(expectedClient);
+      installFakeModels(client, {
+        models: {
+          list: async () =>
+            asyncIterable(
+              [
+                "gemini-3.8-flash",
+                "gemini-embedding-2",
+                "gemini-2.5-flash",
+                "spicy-mayo",
+              ].map((id) => ({ name: `publishers/google/models/${id}` })),
+            ),
+        },
+      });
+
+      await expect(client.listModels()).resolves.toEqual([
+        "gemini-3.8-flash",
+        "gemini-embedding-2",
+      ]);
+    },
+  );
 
   test("the Claude client reports that Bedrock cannot list models", async () => {
     const client = new AutoLLMClient({

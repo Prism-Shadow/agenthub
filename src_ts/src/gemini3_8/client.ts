@@ -13,37 +13,20 @@
 // limitations under the License.
 
 import {
-  GoogleGenAI,
   Content,
-  GenerateContentConfig,
-  ImageConfig as GeminiImageConfig,
-  MultiSpeakerVoiceConfig,
-  Part,
-  PrebuiltVoiceConfig,
-  FunctionCall,
-  ThinkingConfig,
-  ThinkingLevel as GeminiThinkingLevel,
-  FunctionCallingConfig,
-  SpeakerVoiceConfig,
-  SpeechConfig,
-  Tool,
-  ToolConfig,
-  GenerateContentResponse,
-  FinishReason as GeminiFinishReason,
-  FunctionResponsePart,
-  FunctionResponseBlob,
-  FunctionResponse,
-  VoiceConfig,
   EmbedContentConfig,
+  GoogleGenAI,
+  Interactions,
+  Part,
 } from "@google/genai";
 import * as path from "path";
-import { LLMClient } from "../baseClient";
+import { doneMarker, LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
 import {
+  EventContentItem,
   EventType,
   Fidelity,
   FinishReason,
-  PartialContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
@@ -54,49 +37,23 @@ import {
 } from "../types";
 import { isDebugEnabled } from "../utils";
 
-/**
- * Wrap a part's thought signature as a fidelity payload, or nothing when absent.
- */
-function partFidelity(part: Part): { fidelity?: Fidelity } {
-  if (part.thoughtSignature == null) {
-    return {};
-  }
-  return { fidelity: { signature: part.thoughtSignature } };
-}
+type GeminiThinkingLevel = "minimal" | "low" | "medium" | "high";
 
-/**
- * Read the thought signature recorded in an item's fidelity payload.
- */
-function itemThoughtSignature(item: {
-  fidelity?: Fidelity;
-}): string | undefined {
-  return item.fidelity?.signature;
-}
+type InteractionRequest = Omit<
+  Interactions.CreateModelInteractionParamsStreaming,
+  "input"
+>;
 
-/**
- * Split a message's parts into consecutive runs of functionResponse and
- * non-functionResponse parts, preserving order. Vertex AI requires function
- * responses to sit in a content of their own (see the call site); a message
- * without function responses — or with nothing else — comes back as one run.
- */
-function splitFunctionResponseRuns(parts: Part[]): Part[][] {
-  const runs: Part[][] = [];
-  let lastIsResponse: boolean | null = null;
-  for (const part of parts) {
-    const isResponse = part.functionResponse !== undefined;
-    if (isResponse !== lastIsResponse) {
-      runs.push([]);
-      lastIsResponse = isResponse;
-    }
-    runs[runs.length - 1].push(part);
-  }
-  return runs.length > 0 ? runs : [parts];
-}
+// the text and image blocks a thought summary or a function result is made of
+type TextImageBlocks = NonNullable<Interactions.ThoughtStep["summary"]>;
 
 /**
  * Unified client for the Gemini family, named for the newest generation it
- * serves (3.8). It serves every generateContent model generation (3.8 back
- * through 3.x text, image, TTS, and embedding models), and applies the
+ * serves (3.8). It speaks the Interactions API statelessly (store=false, the
+ * whole history in every request) for 3.8 back through the 3.x text, image,
+ * and TTS models with an API key; Vertex AI is served by
+ * gemini3_8_generate_content. It embeds through embedContent, because the
+ * Interactions API does not serve the embedding models, and applies the
  * 3.6-generation parameter contract to the whole family: temperature is
  * rejected everywhere.
  *
@@ -202,54 +159,46 @@ export class Gemini3_8Client extends LLMClient {
   // Gemini thinking levels from weakest to strongest, used to pick the
   // closest supported level when a model rejects the requested one.
   private static readonly GEMINI_LEVEL_ORDER: GeminiThinkingLevel[] = [
-    GeminiThinkingLevel.MINIMAL,
-    GeminiThinkingLevel.LOW,
-    GeminiThinkingLevel.MEDIUM,
-    GeminiThinkingLevel.HIGH,
+    "minimal",
+    "low",
+    "medium",
+    "high",
   ];
 
   /**
-   * Thinking levels the target model accepts (llmsdk_docs/gemini3_8/docs/thinking.md).
+   * Thinking levels the target model accepts (llmsdk_docs/gemini_interactions/docs/thinking.md).
    *
    * An empty array means the model rejects the thinking_level parameter
    * entirely, so it must be omitted from the request.
    */
   private _supportedThinkingLevels(): GeminiThinkingLevel[] {
     if (this._model.includes("-image")) {
-      return [GeminiThinkingLevel.MINIMAL, GeminiThinkingLevel.HIGH];
+      return ["minimal", "high"];
     }
     if (this._model.includes("gemini-3-pro")) {
       // The only pro generation without "medium".
-      return [GeminiThinkingLevel.LOW, GeminiThinkingLevel.HIGH];
+      return ["low", "high"];
     }
     if (this._model.includes("-pro")) {
       // Every pro generation rejects "minimal"; matching broadly keeps
       // future pro models on the safe side (clamping a level the model
       // would have accepted costs a little accuracy, forwarding an
       // unsupported one is a 400).
-      return [
-        GeminiThinkingLevel.LOW,
-        GeminiThinkingLevel.MEDIUM,
-        GeminiThinkingLevel.HIGH,
-      ];
+      return ["low", "medium", "high"];
     }
     if (
       this._model.includes("gemini-3.7") ||
       this._model.includes("gemini-3.8")
     ) {
-      // Both generations reject "minimal" with a 400 (3.7 verified live 2026-08-13;
-      // 3.8 documented at ai.google.dev/gemini-api/docs/latest-model).
-      return [
-        GeminiThinkingLevel.LOW,
-        GeminiThinkingLevel.MEDIUM,
-        GeminiThinkingLevel.HIGH,
-      ];
+      // Both generations reject "minimal" with a 400 (3.7 verified live 2026-08-13,
+      // 3.7 and 3.8 again through the Interactions API 2026-09-16).
+      return ["low", "medium", "high"];
     }
     return Gemini3_8Client.GEMINI_LEVEL_ORDER;
   }
 
   /**
-   * Convert ThinkingLevel enum to the closest Gemini ThinkingLevel the model supports.
+   * Convert ThinkingLevel enum to the closest Gemini thinking level the model supports.
    */
   private _convertThinkingLevel(
     thinkingLevel: ThinkingLevel | undefined,
@@ -257,13 +206,13 @@ export class Gemini3_8Client extends LLMClient {
     if (!thinkingLevel) return undefined;
 
     const mapping: { [key: string]: GeminiThinkingLevel } = {
-      [ThinkingLevel.NONE]: GeminiThinkingLevel.MINIMAL,
-      [ThinkingLevel.LOW]: GeminiThinkingLevel.LOW,
-      [ThinkingLevel.MEDIUM]: GeminiThinkingLevel.MEDIUM,
-      [ThinkingLevel.HIGH]: GeminiThinkingLevel.HIGH,
-      [ThinkingLevel.XHIGH]: GeminiThinkingLevel.HIGH,
+      [ThinkingLevel.NONE]: "minimal",
+      [ThinkingLevel.LOW]: "low",
+      [ThinkingLevel.MEDIUM]: "medium",
+      [ThinkingLevel.HIGH]: "high",
+      [ThinkingLevel.XHIGH]: "high",
       // Gemini stops at "high", so both top levels land there before per-model clamping
-      [ThinkingLevel.MAX]: GeminiThinkingLevel.HIGH,
+      [ThinkingLevel.MAX]: "high",
     };
     const level = mapping[thinkingLevel];
     if (level === undefined) {
@@ -273,7 +222,7 @@ export class Gemini3_8Client extends LLMClient {
     if (supported.length === 0) {
       // A model that takes no thinking_level at all has nothing to clamp onto, so the
       // parameter is omitted rather than turned into a failed request. thinking_summary
-      // is unaffected -- includeThoughts still rides along.
+      // is unaffected -- thinking_summaries still rides along.
       return undefined;
     }
     if (supported.includes(level)) {
@@ -296,45 +245,28 @@ export class Gemini3_8Client extends LLMClient {
   }
 
   /**
-   * Convert ToolChoice to Gemini's tool config.
+   * Convert ToolChoice to the Interactions API tool_choice.
    */
   private _convertToolChoice(
     toolChoice: ToolChoice,
-  ): FunctionCallingConfig | undefined {
+  ): Interactions.GenerationConfig["tool_choice"] {
     if (Array.isArray(toolChoice)) {
-      return {
-        mode: "ANY",
-        allowedFunctionNames: toolChoice,
-      } as FunctionCallingConfig;
+      // allowed_tools takes only the "any" and "validated" modes (verified live 2026-09-16)
+      return { allowed_tools: { mode: "any", tools: toolChoice } };
     } else if (toolChoice === "none") {
-      return { mode: "NONE" } as FunctionCallingConfig;
+      return "none";
     } else if (toolChoice === "auto") {
-      return { mode: "AUTO" } as FunctionCallingConfig;
+      return "auto";
     } else if (toolChoice === "required") {
-      return { mode: "ANY" } as FunctionCallingConfig;
+      return "any";
     }
     return undefined;
   }
 
-  private _withAbortSignal<T extends { abortSignal?: AbortSignal }>(
-    config: T | undefined,
-    signal?: AbortSignal,
-  ): T | undefined {
-    if (!signal) {
-      return config;
-    }
-    return { ...(config ?? {}), abortSignal: signal } as T;
-  }
-
   /**
-   * Transform universal configuration to Gemini-specific configuration.
+   * Transform universal configuration to an Interactions API request without its input.
    */
-  transformUniConfigToModelConfig(
-    config: UniConfig,
-  ): GenerateContentConfig | undefined {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const configParams: any = {};
-
+  transformUniConfigToModelConfig(config: UniConfig): InteractionRequest {
     if (config.temperature !== undefined) {
       throw new UnsupportedParameterError({
         client: this.constructor.name,
@@ -342,14 +274,6 @@ export class Gemini3_8Client extends LLMClient {
         message:
           "Gemini models do not support setting temperature; the API deprecated " +
           "sampling parameters starting with the 3.6 generation.",
-      });
-    }
-
-    if (config.fast_mode) {
-      throw new UnsupportedParameterError({
-        client: this.constructor.name,
-        parameter: "fast_mode",
-        message: "Gemini does not support fast mode.",
       });
     }
 
@@ -364,320 +288,410 @@ export class Gemini3_8Client extends LLMClient {
       });
     }
 
+    // the history travels in every request, so nothing needs to be stored server-side
+    const geminiConfig: InteractionRequest = {
+      model: this._model,
+      stream: true,
+      store: false,
+    };
+    const generationConfig: Interactions.GenerationConfig = {};
+
     if (config.max_tokens !== undefined) {
-      configParams.maxOutputTokens = config.max_tokens;
+      generationConfig.max_output_tokens = config.max_tokens;
+    }
+
+    if (config.fast_mode) {
+      geminiConfig.service_tier = "priority";
     }
 
     // A TTS model takes the speech settings and nothing else: a system instruction, a
     // thinking config, or a tool declaration each comes back as a 400 (verified live
-    // 2026-08-20), so the rest of the universal config never reaches the request.
+    // 2026-08-20, again through the Interactions API 2026-09-16), so the rest of the
+    // universal config never reaches the request.
     if (this._model.toLowerCase().includes("tts")) {
-      configParams.responseModalities = ["AUDIO"];
       const ttsConfig = config.tts_config ?? [{ voice: "Kore" }];
       if (![1, 2].includes(ttsConfig.length)) {
         throw new Error("tts_config must contain 1 or 2 entries.");
       }
 
-      if (ttsConfig.length === 1) {
-        configParams.speechConfig = {
-          voiceConfig: {
-            prebuiltVoiceConfig: {
-              voiceName: ttsConfig[0].voice,
-            } as PrebuiltVoiceConfig,
-          } as VoiceConfig,
-        } as SpeechConfig;
-      } else {
-        const speakerVoiceConfigs = ttsConfig.map((speakerConfig) => {
-          if (!speakerConfig.speaker) {
-            throw new Error(
-              "speaker is required when tts_config has 2 entries.",
-            );
-          }
-
-          return {
-            speaker: speakerConfig.speaker,
-            voiceConfig: {
-              prebuiltVoiceConfig: {
-                voiceName: speakerConfig.voice,
-              } as PrebuiltVoiceConfig,
-            } as VoiceConfig,
-          } as SpeakerVoiceConfig;
-        });
-
-        configParams.speechConfig = {
-          multiSpeakerVoiceConfig: {
-            speakerVoiceConfigs,
-          } as MultiSpeakerVoiceConfig,
-        } as SpeechConfig;
-      }
-
-      return configParams as GenerateContentConfig;
+      geminiConfig.response_format = { type: "audio" };
+      generationConfig.speech_config =
+        ttsConfig.length === 1
+          ? [{ voice: ttsConfig[0].voice }]
+          : ttsConfig.map((speakerConfig) => {
+              if (!speakerConfig.speaker) {
+                throw new Error(
+                  "speaker is required when tts_config has 2 entries.",
+                );
+              }
+              return {
+                speaker: speakerConfig.speaker,
+                voice: speakerConfig.voice,
+              };
+            });
+      geminiConfig.generation_config = generationConfig;
+      return geminiConfig;
     }
 
     if (config.system_prompt !== undefined) {
-      configParams.systemInstruction = config.system_prompt;
+      geminiConfig.system_instruction = config.system_prompt;
     }
 
-    // includeThoughts asks for thought summaries, but whether generateContent returns any
-    // is model-dependent (llmsdk_docs/gemini3_8/docs/thinking.md)
-    const thinkingSummary = config.thinking_summary;
-    const thinkingLevel = config.thinking_level;
-    if (thinkingSummary !== undefined || thinkingLevel !== undefined) {
-      configParams.thinkingConfig = {
-        includeThoughts: thinkingSummary,
-        thinkingLevel: this._convertThinkingLevel(thinkingLevel),
-      } as ThinkingConfig;
+    const thinkingLevel = this._convertThinkingLevel(config.thinking_level);
+    if (thinkingLevel !== undefined) {
+      generationConfig.thinking_level = thinkingLevel;
+    }
+
+    if (config.thinking_summary !== undefined) {
+      generationConfig.thinking_summaries = config.thinking_summary
+        ? "auto"
+        : "none";
     }
 
     if (config.tools !== undefined) {
-      configParams.tools = [{ functionDeclarations: config.tools } as Tool];
-      const toolChoice = config.tool_choice;
-      if (toolChoice !== undefined) {
-        const toolConfig = this._convertToolChoice(toolChoice);
-        if (toolConfig) {
-          configParams.toolConfig = {
-            functionCallingConfig: toolConfig,
-          } as ToolConfig;
-        }
+      geminiConfig.tools = config.tools.map((tool) => ({
+        type: "function",
+        ...tool,
+      }));
+      if (config.tool_choice !== undefined) {
+        generationConfig.tool_choice = this._convertToolChoice(
+          config.tool_choice,
+        );
       }
     }
 
     if (config.image_config !== undefined) {
-      configParams.imageConfig = {
-        aspectRatio: config.image_config.aspect_ratio,
-        imageSize: config.image_config.image_size,
-      } as GeminiImageConfig;
+      // an image entry alone suppresses the text the model writes beside its images
+      geminiConfig.response_format = [
+        { type: "text" },
+        { type: "image", ...config.image_config },
+      ];
     }
 
-    return Object.keys(configParams).length > 0
-      ? (configParams as GenerateContentConfig)
-      : undefined;
+    if (Object.keys(generationConfig).length > 0) {
+      geminiConfig.generation_config = generationConfig;
+    }
+
+    return geminiConfig;
   }
 
   /**
-   * Transform universal message format to Gemini's Content format.
+   * Transform universal message format to Interactions API input steps.
    */
   async transformUniMessageToModelInput(
     messages: UniMessage[],
     signal?: AbortSignal,
-  ): Promise<Content[]> {
-    const mapping: { [key: string]: string } = {
-      user: "user",
-      assistant: "model",
-    };
-
-    const contents: Content[] = [];
-    // The generateContent API wants both the call id and the function name on a function
-    // response, but a universal tool_result carries only the id, so remember each call's name.
+  ): Promise<Interactions.Step[]> {
+    const steps: Interactions.Step[] = [];
+    // A function_result must name its function (HTTP 400 without it), but a universal
+    // tool_result carries only the call id, so remember each call's name.
     const callNames = new Map<string, string>();
     for (const msg of messages) {
-      const parts: Part[] = [];
+      const messageStart = steps.length;
+      // consecutive text and media of a message share one user_input or model_output step
+      let content: Interactions.Content[] | null = null;
+      // consecutive thinking items share one thought step, which ends at the item carrying
+      // the signature: a stream closes every thought step with its signature
+      let thought: {
+        type: "thought";
+        summary: TextImageBlocks;
+        signature?: string;
+      } | null = null;
+
       for (const item of msg.content_items) {
-        if (item.type === "text") {
-          parts.push({
-            text: item.text,
-            thoughtSignature: itemThoughtSignature(item),
-          } as Part);
-        } else if (item.type === "image_url") {
-          const urlValue = item.image_url;
-          const imageData = await this._getImageBytesAndMimeType(
-            urlValue,
-            signal,
-          );
-          parts.push({
-            inlineData: {
-              mimeType: imageData.mimeType,
-              data: imageData.data.toString("base64"),
-            },
-          } as Part);
-        } else if (item.type === "inline_data") {
-          parts.push({
-            inlineData: {
-              mimeType: item.mime_type,
+        if (
+          item.type === "thinking.done" ||
+          item.type === "inline_thinking.done"
+        ) {
+          content = null;
+          const signature = item.fidelity?.signature;
+          const summary: TextImageBlocks = [];
+          if (item.type === "inline_thinking.done") {
+            summary.push({
+              type: "image",
               data: item.data.toString("base64"),
-            },
-            thoughtSignature: itemThoughtSignature(item),
-          } as Part);
-        } else if (item.type === "thinking") {
-          parts.push({
-            text: item.thinking,
-            thought: true,
-            thoughtSignature: itemThoughtSignature(item),
-          } as Part);
-        } else if (item.type === "inline_thinking") {
-          parts.push({
-            inlineData: {
-              mimeType: item.mime_type,
-              data: item.data.toString("base64"),
-            },
-            thought: true,
-            thoughtSignature: itemThoughtSignature(item),
-          } as Part);
-        } else if (item.type === "tool_call") {
+              mime_type: item.mime_type,
+            });
+          } else if (item.thinking) {
+            summary.push({ type: "text", text: item.thinking });
+          }
+          if (summary.length === 0 && !signature) {
+            continue;
+          }
+
+          if (thought === null) {
+            thought = { type: "thought", summary: [] };
+            steps.push(thought);
+          }
+          thought.summary.push(...summary);
+          if (signature) {
+            thought.signature = signature;
+            thought = null;
+          }
+          continue;
+        }
+
+        thought = null;
+        if ("fidelity" in item && item.fidelity?.signature) {
+          // Histories recorded through generateContent carry the signature on the text,
+          // image or call it came with and hold no thinking item; the Interactions API takes
+          // it back as a thought step in front of that item (verified live 2026-09-16).
+          steps.push({ type: "thought", signature: item.fidelity.signature });
+          content = null;
+          // A thought summary such a history holds is unsigned, and a turn opening with an unsigned
+          // thought is rejected ("Request contains an invalid argument") while the same signature
+          // on two thoughts is accepted (verified live 2026-09-17), so the opening thought takes it too.
+          const first = steps[messageStart];
+          if (first.type === "thought" && !first.signature) {
+            first.signature = item.fidelity.signature;
+          }
+        }
+
+        if (
+          item.type === "text.done" ||
+          item.type === "image_url.done" ||
+          item.type === "inline_data.done"
+        ) {
+          let block: Interactions.Content;
+          if (item.type === "text.done") {
+            // an empty text block is rejected: "Missing text in content of type text"
+            if (!item.text) {
+              continue;
+            }
+            block = { type: "text", text: item.text };
+          } else {
+            const { data, mimeType } =
+              item.type === "image_url.done"
+                ? await this._getImageBytesAndMimeType(item.image_url, signal)
+                : { data: item.data, mimeType: item.mime_type };
+            // the block type follows the MIME type: image/jpeg is an image, application/pdf a document
+            const kind = mimeType.split("/")[0];
+            block = {
+              type: ["image", "audio", "video"].includes(kind)
+                ? kind
+                : "document",
+              data: data.toString("base64"),
+              mime_type: mimeType,
+            } as Interactions.Content;
+          }
+
+          if (content === null) {
+            content = [];
+            steps.push({
+              type: msg.role === "user" ? "user_input" : "model_output",
+              content,
+            } as Interactions.Step);
+          }
+          content.push(block);
+        } else if (item.type === "tool_call.done") {
+          content = null;
           callNames.set(item.tool_call_id, item.name);
-          // Histories from before ids were stored carry the name as the tool_call_id;
-          // replay those without an id, exactly as they arrived.
-          const functionCall: FunctionCall = {
+          // Histories from before ids were stored carry the name as the tool_call_id; replay
+          // those without an id, because parallel calls sharing one id are rejected with a
+          // 400 (verified live 2026-09-16).
+          steps.push({
+            type: "function_call",
             ...(item.tool_call_id !== item.name
               ? { id: item.tool_call_id }
               : {}),
             name: item.name,
-            args: item.arguments,
-          };
-          parts.push({
-            functionCall: functionCall,
-            thoughtSignature: itemThoughtSignature(item),
-          } as Part);
-        } else if (item.type === "tool_result") {
+            arguments: item.arguments,
+          } as Interactions.FunctionCallStep);
+        } else if (item.type === "tool_result.done") {
+          content = null;
           if (!item.tool_call_id) {
             throw new Error("tool_call_id is required for tool result.");
           }
 
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const toolResult: Record<string, any> = { result: item.text };
-          const multimodalParts: FunctionResponsePart[] = [];
-
+          let result: Interactions.FunctionResultStep["result"] = item.text;
           if (item.images) {
+            // an empty text block is rejected, while a result of images alone is accepted
+            const resultContent: TextImageBlocks = item.text
+              ? [{ type: "text", text: item.text }]
+              : [];
             for (const imageUrl of item.images) {
               const imageData = await this._getImageBytesAndMimeType(
                 imageUrl,
                 signal,
               );
-              multimodalParts.push({
-                inlineData: {
-                  mimeType: imageData.mimeType,
-                  data: imageData.data.toString("base64"),
-                } as FunctionResponseBlob,
-              } as FunctionResponsePart);
+              resultContent.push({
+                type: "image",
+                data: imageData.data.toString("base64"),
+                mime_type: imageData.mimeType,
+              });
             }
+            result = resultContent;
           }
 
           const functionName =
             callNames.get(item.tool_call_id) ?? item.tool_call_id;
-          parts.push({
-            functionResponse: {
-              ...(item.tool_call_id !== functionName
-                ? { id: item.tool_call_id }
-                : {}),
-              name: functionName,
-              response: toolResult,
-              parts: multimodalParts.length > 0 ? multimodalParts : undefined,
-            } as FunctionResponse,
-          } as Part);
+          steps.push({
+            type: "function_result",
+            ...(item.tool_call_id !== functionName
+              ? { call_id: item.tool_call_id }
+              : {}),
+            name: functionName,
+            result,
+          } as Interactions.FunctionResultStep);
         } else {
           throw new Error(`Unknown item: ${JSON.stringify(item)}`);
         }
       }
 
-      // Vertex AI rejects a content that mixes functionResponse parts with any other
-      // part kind — the request fails with a misleading 400, "Requests ending with a
-      // model turn are not supported" (the Gemini API endpoint accepts the mix). Split
-      // such a message into consecutive same-role contents: each run of function
-      // responses becomes its own content, the surrounding parts keep theirs, and the
-      // part order is preserved. Homogeneous messages stay a single content.
-      for (const runParts of splitFunctionResponseRuns(parts)) {
-        contents.push({
-          role: mapping[msg.role],
-          parts: runParts,
-        } as Content);
+      // An image model sometimes streams its text before its first thought step, but the API
+      // takes a turn holding a thought back only when the turn opens with one: "Model turns with
+      // images must start with a thought block" (verified live 2026-09-16). A turn another
+      // provider produced holds no signed thought at all, which the API rejects once the turn
+      // continues with its tool results (verified live 2026-09-16). Both open with the
+      // placeholder signature Google documents for thoughts it did not produce.
+      const turn = steps.slice(messageStart);
+      if (
+        (turn.some((step) => step.type === "thought") &&
+          turn[0].type !== "thought") ||
+        (turn.some(
+          (step) =>
+            step.type === "model_output" || step.type === "function_call",
+        ) &&
+          !turn.some((step) => step.type === "thought" && step.signature))
+      ) {
+        steps.splice(messageStart, 0, {
+          type: "thought",
+          signature: "skip_thought_signature_validator",
+        });
       }
     }
 
-    return contents;
+    return steps;
   }
 
   /**
-   * Transform Gemini model output to universal event format.
+   * Transform one Interactions API stream event into a universal event, its items identified by
+   * step index.
    */
   transformModelOutputToUniEvent(
-    modelOutput: GenerateContentResponse,
+    modelOutput: Interactions.InteractionSSEEvent,
   ): UniEvent {
     let eventType: EventType = "delta";
-    const contentItems: PartialContentItem[] = [];
+    const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
     let finishReason: FinishReason | null = null;
 
-    if (
-      modelOutput.candidates?.length !== undefined &&
-      modelOutput.candidates?.length > 0
-    ) {
-      const candidate = modelOutput.candidates?.[0];
-      for (const part of candidate.content?.parts || []) {
-        if (part.functionCall) {
-          contentItems.push({
-            type: "tool_call",
-            name: part.functionCall.name || "",
-            arguments: part.functionCall.args || {},
-            tool_call_id: part.functionCall.id || part.functionCall.name || "",
-            ...partFidelity(part),
-          });
-        } else if (part.thought) {
-          if (part.text !== undefined) {
-            contentItems.push({
-              type: "thinking",
-              thinking: part.text,
-              ...partFidelity(part),
-            });
-          } else if (part.inlineData) {
-            contentItems.push({
-              type: "inline_thinking",
-              data: Buffer.from(part.inlineData.data || "", "base64"),
-              mime_type: part.inlineData.mimeType || "application/octet-stream",
-              ...partFidelity(part),
-            });
-          }
-        } else if (part.inlineData) {
-          contentItems.push({
-            type: "inline_data",
-            data: Buffer.from(part.inlineData.data || "", "base64"),
-            mime_type: part.inlineData.mimeType || "application/octet-stream",
-            ...partFidelity(part),
-          });
-        } else if (part.text !== undefined) {
-          contentItems.push({
-            type: "text",
-            text: part.text,
-            ...partFidelity(part),
-          });
-        } else if (isDebugEnabled()) {
-          throw new Error(`Unknown output: ${JSON.stringify(part)}`);
-        }
+    if (modelOutput.event_type === "step.start") {
+      const step = modelOutput.step;
+      if (step.type === "function_call") {
+        // the start names the call; its arguments stream as deltas behind an empty object
+        const startArguments =
+          Object.keys(step.arguments ?? {}).length > 0
+            ? JSON.stringify(step.arguments)
+            : "";
+        contentItems.push({
+          type: "tool_call.delta",
+          name: step.name,
+          arguments: startArguments,
+          tool_call_id: step.id,
+          fidelity: { item_id: String(modelOutput.index) },
+        });
+      } else if (step.type === "thought" || step.type === "model_output") {
+        // their content arrives in the step's deltas
+      } else if (isDebugEnabled()) {
+        throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
       }
-
-      if (candidate.finishReason) {
-        eventType = "stop";
-        const stopReasonMapping: { [key: string]: FinishReason } = {
-          [GeminiFinishReason.STOP]: "stop",
-          [GeminiFinishReason.MAX_TOKENS]: "length",
-        };
-        finishReason = stopReasonMapping[candidate.finishReason] || "unknown";
+    } else if (modelOutput.event_type === "step.delta") {
+      const itemId = String(modelOutput.index);
+      const delta = modelOutput.delta;
+      if (delta.type === "thought_summary" && delta.content?.type === "text") {
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: delta.content.text,
+          fidelity: { item_id: itemId },
+        });
+      } else if (
+        delta.type === "thought_summary" &&
+        delta.content?.type === "image"
+      ) {
+        // image models summarize their thinking with interim images too
+        contentItems.push({
+          type: "inline_thinking.delta",
+          data: Buffer.from(delta.content.data || "", "base64"),
+          mime_type: delta.content.mime_type || "image/jpeg",
+          fidelity: { item_id: itemId },
+        });
+      } else if (delta.type === "thought_signature") {
+        // the signature is the last delta of its thought step
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: itemId, signature: delta.signature },
+        });
+      } else if (delta.type === "arguments_delta") {
+        contentItems.push({
+          type: "tool_call.delta",
+          name: "",
+          arguments: delta.arguments || "",
+          tool_call_id: "",
+          fidelity: { item_id: itemId },
+        });
+      } else if (delta.type === "text") {
+        contentItems.push({
+          type: "text.delta",
+          text: delta.text,
+          fidelity: { item_id: itemId },
+        });
+      } else if (delta.type === "image") {
+        contentItems.push({
+          type: "inline_data.delta",
+          data: Buffer.from(delta.data || "", "base64"),
+          mime_type: delta.mime_type || "image/jpeg",
+          fidelity: { item_id: itemId },
+        });
+      } else if (delta.type === "audio") {
+        // TTS streams raw PCM in 40 ms chunks; the MIME type carries the format a player needs
+        contentItems.push({
+          type: "inline_data.delta",
+          data: Buffer.from(delta.data || "", "base64"),
+          mime_type: `${delta.mime_type}; rate=${delta.sample_rate}; channels=${delta.channels}`,
+          fidelity: { item_id: itemId },
+        });
+      } else if (isDebugEnabled()) {
+        throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
       }
-    }
-
-    if (modelOutput.usageMetadata) {
-      eventType = eventType || "delta"; // deal with separate usage data
-
-      const promptTokens = modelOutput.usageMetadata.promptTokenCount || 0;
-      const cachedTokens =
-        modelOutput.usageMetadata.cachedContentTokenCount || 0;
-      usageMetadata = {
-        cached_tokens:
-          modelOutput.usageMetadata.cachedContentTokenCount || null,
-        prompt_tokens: promptTokens - cachedTokens,
-        thoughts_tokens: modelOutput.usageMetadata.thoughtsTokenCount || null,
-        response_tokens: modelOutput.usageMetadata.candidatesTokenCount || null,
+    } else if (modelOutput.event_type === "step.stop") {
+      contentItems.push(doneMarker(String(modelOutput.index)));
+    } else if (modelOutput.event_type === "interaction.completed") {
+      eventType = "stop";
+      const statusMapping: { [key: string]: FinishReason } = {
+        completed: "stop",
+        requires_action: "tool_call",
+        incomplete: "length",
       };
-    }
-
-    if (
-      contentItems.length === 0 &&
-      usageMetadata === null &&
-      finishReason === null
+      finishReason = statusMapping[modelOutput.interaction.status] || "unknown";
+      const usage = modelOutput.interaction.usage;
+      // total_input_tokens includes the cached tokens; total_output_tokens excludes the thoughts
+      usageMetadata = {
+        cached_tokens: usage?.total_cached_tokens || null,
+        prompt_tokens:
+          (usage?.total_input_tokens || 0) - (usage?.total_cached_tokens || 0),
+        thoughts_tokens: usage?.total_thought_tokens || null,
+        response_tokens: usage?.total_output_tokens || null,
+      };
+    } else if (modelOutput.event_type === "error" && modelOutput.error) {
+      // Neither Interactions SDK raises on an error event inside an open stream, so the provider's
+      // failure is raised here rather than lost; an error event without an error, which the Python
+      // SDK makes of a gateway heartbeat, stays with the unknown-event guard.
+      throw new Error(
+        `Gemini stream error ${modelOutput.error.code}: ${modelOutput.error.message}`,
+      );
+    } else if (
+      ["interaction.created", "interaction.status_update"].includes(
+        modelOutput.event_type,
+      )
     ) {
-      // nothing was read out of the chunk, so there is nothing to emit: a gateway
-      // heartbeat looks like this, and so does any other chunk we take no value from
-      eventType = "unused";
+      // the interaction's lifecycle carries nothing universal
+    } else if (isDebugEnabled()) {
+      throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     }
+    // the API adds event, step and delta types over time, and killing a long generation
+    // over one costs more than dropping it
 
     return {
       role: "assistant",
@@ -693,20 +707,47 @@ export class Gemini3_8Client extends LLMClient {
     config: UniConfig;
     signal?: AbortSignal;
   }): AsyncGenerator<UniEvent> {
-    // Embed transformed messages and return them as a streaming event.
-    const contents = await this.transformUniMessageToModelInput(
-      options.messages,
-      options.signal,
-    );
+    // the Interactions API does not serve embedding models (HTTP 404, verified live
+    // 2026-09-16), so they stay on embedContent
+    const contents: Content[] = [];
+    for (const msg of options.messages) {
+      const parts: Part[] = [];
+      for (const item of msg.content_items) {
+        if (item.type === "text.done") {
+          parts.push({ text: item.text });
+        } else if (item.type === "image_url.done") {
+          const imageData = await this._getImageBytesAndMimeType(
+            item.image_url,
+            options.signal,
+          );
+          parts.push({
+            inlineData: {
+              mimeType: imageData.mimeType,
+              data: imageData.data.toString("base64"),
+            },
+          });
+        } else if (item.type === "inline_data.done") {
+          parts.push({
+            inlineData: {
+              mimeType: item.mime_type,
+              data: item.data.toString("base64"),
+            },
+          });
+        } else {
+          throw new Error(`Unknown item: ${JSON.stringify(item)}`);
+        }
+      }
+      contents.push({
+        role: msg.role === "user" ? "user" : "model",
+        parts,
+      });
+    }
 
-    const geminiConfig = this._withAbortSignal<EmbedContentConfig>(
-      options.config.embedding_config?.dimensions != null
-        ? {
-            outputDimensionality: options.config.embedding_config.dimensions,
-          }
-        : undefined,
-      options.signal,
-    );
+    const geminiConfig: EmbedContentConfig = { abortSignal: options.signal };
+    if (options.config.embedding_config?.dimensions != null) {
+      geminiConfig.outputDimensionality =
+        options.config.embedding_config.dimensions;
+    }
 
     const result = await this._client.models.embedContent({
       model: this._model,
@@ -719,7 +760,7 @@ export class Gemini3_8Client extends LLMClient {
       event_type: "stop",
       content_items:
         result.embeddings?.map((embedding) => ({
-          type: "embedding",
+          type: "embedding.delta" as const,
           embedding: embedding.values ?? [],
         })) ?? [],
       usage_metadata: {
@@ -733,7 +774,7 @@ export class Gemini3_8Client extends LLMClient {
   }
 
   /**
-   * Stream generate using Gemini SDK with unified conversion methods.
+   * Stream generate through the Interactions API with unified conversion methods.
    */
   async *_streamingResponseInternal(options: {
     messages: UniMessage[];
@@ -741,9 +782,7 @@ export class Gemini3_8Client extends LLMClient {
     signal?: AbortSignal;
   }): AsyncGenerator<UniEvent> {
     if (this._model.toLowerCase().includes("embedding")) {
-      for await (const event of this._embedMessagesInternal(options)) {
-        yield event;
-      }
+      yield* this._embedMessagesInternal(options);
       return;
     }
 
@@ -756,7 +795,7 @@ export class Gemini3_8Client extends LLMClient {
       messages = messages.slice(-1);
       const invalidItem = messages
         .flatMap((message) => message.content_items)
-        .find((item) => item.type !== "text");
+        .find((item) => item.type !== "text.done");
       if (invalidItem) {
         throw new Error(
           `Gemini TTS only supports text input, got content item type=${JSON.stringify(invalidItem.type)}.`,
@@ -764,49 +803,66 @@ export class Gemini3_8Client extends LLMClient {
       }
     }
 
-    const geminiConfig = this._withAbortSignal<GenerateContentConfig>(
-      this.transformUniConfigToModelConfig(options.config),
-      options.signal,
-    );
-    const contents = await this.transformUniMessageToModelInput(
+    const geminiConfig = this.transformUniConfigToModelConfig(options.config);
+    const input = await this.transformUniMessageToModelInput(
       messages,
       options.signal,
     );
 
-    const responseStream = await this._client.models.generateContentStream({
-      model: this._model,
-      contents: contents,
-      config: geminiConfig,
-    });
+    const stream = await this._client.interactions.create(
+      { ...geminiConfig, input, stream: true },
+      { signal: options.signal },
+    );
 
-    for await (const chunk of responseStream) {
-      const event = this.transformModelOutputToUniEvent(chunk);
-      if (event.event_type === "unused") {
-        continue;
-      }
-
-      for (const item of event.content_items) {
-        if (item.type === "tool_call") {
-          // the Gemini API does not stream partial tool calls, mock a partial tool call event
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "partial_tool_call",
-                name: item.name,
-                arguments: JSON.stringify(item.arguments),
-                tool_call_id: item.tool_call_id,
-                fidelity: item.fidelity,
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
+    // A step streams one item per run of a content kind: an image model's thought summary can
+    // go text, image, text, which is three items, so an item's id is its step index and the
+    // number of the run within the step. Every image delta is a whole image and a run of its
+    // own, while audio streams in chunks of one run.
+    let stepId = "";
+    let run = 0;
+    let runItem: EventContentItem | null = null;
+    for await (const event of stream) {
+      const uniEvent = this.transformModelOutputToUniEvent(event);
+      const contentItems: EventContentItem[] = [];
+      for (let item of uniEvent.content_items) {
+        const fidelity = (item as { fidelity: Fidelity }).fidelity;
+        if (fidelity.item_id !== stepId) {
+          stepId = fidelity.item_id;
+          run = 0;
+          runItem = null;
         }
-      }
+        if (item.type.endsWith(".done")) {
+          contentItems.push(doneMarker(`${stepId}.${run}`));
+          continue;
+        }
 
-      yield event;
+        if (
+          item.type === "thinking.delta" &&
+          "signature" in fidelity &&
+          runItem?.type === "inline_thinking.delta"
+        ) {
+          // the signature closes the run its thought step ends with, an image one included
+          item = {
+            type: "inline_thinking.delta",
+            data: Buffer.alloc(0),
+            mime_type: runItem.mime_type,
+            fidelity,
+          };
+        } else if (
+          runItem !== null &&
+          (runItem.type !== item.type ||
+            item.type === "inline_thinking.delta" ||
+            (item.type === "inline_data.delta" &&
+              item.mime_type.startsWith("image/")))
+        ) {
+          contentItems.push(doneMarker(`${stepId}.${run}`));
+          run += 1;
+        }
+        runItem = item;
+        fidelity.item_id = `${stepId}.${run}`;
+        contentItems.push(item);
+      }
+      yield { ...uniEvent, content_items: contentItems };
     }
   }
 

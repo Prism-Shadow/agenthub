@@ -15,6 +15,8 @@
 import json
 from typing import Any
 
+from .types import UsageMetadata
+
 
 def _preview_tool_call_arguments(raw: str) -> str:
     max_length = 160
@@ -65,10 +67,28 @@ class EmptyResponseError(AgentHubError):
     error, so the response is rejected as soon as the stream completes.
     """
 
-    def __init__(self, client: str, finish_reason: str | None) -> None:
+    def __init__(self, client: str, finish_reason: str | None, usage_metadata: UsageMetadata | None = None) -> None:
         self.client = client
         self.finish_reason = finish_reason
+        # the tokens the rejected response still cost, since no stop event carries them
+        self.usage_metadata = usage_metadata
         super().__init__(f"{client} returned no content other than thinking (finish_reason={finish_reason!r}).")
+
+
+class StreamProtocolError(AgentHubError):
+    """Raised when a client produces a stream that breaks the streaming protocol.
+
+    Examples are a fragment after its item was completed, a second different fidelity within
+    one item, a tool call whose first fragment lacks its name or id, or a fragment of another
+    kind under an item's key.
+
+    It always reports a bug in the client rather than in the provider's output, so it is
+    raised in every mode instead of being repaired into a stream that breaks the contract.
+    """
+
+    def __init__(self, client: str, message: str) -> None:
+        self.client = client
+        super().__init__(f"{client} broke the streaming protocol: {message}")
 
 
 class ToolCallArgumentParseError(AgentHubError):

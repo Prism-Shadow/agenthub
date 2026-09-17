@@ -30,9 +30,14 @@ client = AutoLLMClient(model="gpt-5.5", api_key="your-openai-api-key")
 
 # Use OpenAI Chat Completions-compatible routing explicitly
 client = AutoLLMClient(model="custom-model", client_type="openai")
+
+# Gemini on Google Vertex AI: the service-account JSON key is the API key
+client = AutoLLMClient(model="gemini-3.8-flash", api_key=open("service-account.json").read())
 ```
 
 The client automatically selects the appropriate client based on the model name.
+
+A Vertex AI service-account key is served through generateContent, because Vertex AI's Interactions endpoint serves none of the Gemini models; any other Gemini key uses the Interactions API. `client_type="gemini-interactions"` and `client_type="gemini-generate-content"` pin the wire protocol explicitly, the latter also for gateways that proxy generateContent only.
 
 ## Core Methods
 
@@ -49,13 +54,15 @@ async def main():
     client = AutoLLMClient(model="gpt-5.5")
 
     async for event in client.streaming_response(
-        messages=[{"role": "user", "content_items": [{"type": "text", "text": "Hello!"}]}], config={}
+        messages=[{"role": "user", "content_items": [{"type": "text.done", "text": "Hello!"}]}], config={}
     ):
         print(event)
 
 
 asyncio.run(main())
 ```
+
+Both streaming methods yield `delta` events, each carrying exactly one content item, then exactly one `stop` event, always last, carrying `usage_metadata` and `finish_reason`. Each item streams as one or more `.delta` fragments (`text.delta`, `tool_call.delta`, …) followed by its complete `.done` item (`text.done`, `tool_call.done`, …); items never interleave.
 
 ### streaming_response_stateful
 
@@ -71,13 +78,13 @@ async def main():
 
     # First message
     async for event in client.streaming_response_stateful(
-        message={"role": "user", "content_items": [{"type": "text", "text": "My name is Alice"}]}, config={}
+        message={"role": "user", "content_items": [{"type": "text.done", "text": "My name is Alice"}]}, config={}
     ):
         print(event)
 
     # Second message - history is maintained automatically
     async for event in client.streaming_response_stateful(
-        message={"role": "user", "content_items": [{"type": "text", "text": "What's my name?"}]}, config={}
+        message={"role": "user", "content_items": [{"type": "text.done", "text": "What's my name?"}]}, config={}
     ):
         print(event)
 
@@ -159,16 +166,16 @@ async def main():
     # User asks about weather
     events = []
     async for event in client.streaming_response_stateful(
-        message={"role": "user", "content_items": [{"type": "text", "text": "What's the weather in London?"}]},
+        message={"role": "user", "content_items": [{"type": "text.done", "text": "What's the weather in London?"}]},
         config=config,
     ):
         events.append(event)
 
-    # Extract function call and tool_call_id
+    # Read the complete call from its tool_call.done item; tool_call.delta items are fragments
     tool_call = None
     for event in events:
         for item in event["content_items"]:
-            if item["type"] == "tool_call":
+            if item["type"] == "tool_call.done":
                 tool_call = item
                 break
 
@@ -185,7 +192,7 @@ async def main():
                 "role": "user",
                 "content_items": [
                     {
-                        "type": "tool_result",
+                        "type": "tool_result.done",
                         "text": result,
                         "tool_call_id": tool_call["tool_call_id"],  # Required for tool responses
                     }
@@ -207,10 +214,10 @@ asyncio.run(main())
 {
     "role": "user" | "assistant",
     "content_items": [
-        {"type": "text", "text": "Hello"},
-        {"type": "image_url", "image_url": "https://..."},
+        {"type": "text.done", "text": "Hello"},
+        {"type": "image_url.done", "image_url": "https://..."},
         {
-            "type": "tool_call",
+            "type": "tool_call.done",
             "name": "get_weather",
             "arguments": {"location": "London"},
             "tool_call_id": "call_abc123",
@@ -218,6 +225,8 @@ asyncio.run(main())
     ],
 }
 ```
+
+Messages hold complete items only, typed with a `.done` suffix. Item types without the suffix, saved before 0.5.0, are still accepted with a deprecation warning until 0.6.0; `normalize_legacy_messages(messages)` converts stored messages.
 
 ### Tool Response with tool_call_id
 
@@ -228,9 +237,9 @@ When responding to a tool call, include the `tool_call_id` in the result content
     "role": "user",
     "content_items": [
         {
-            "type": "tool_result",
+            "type": "tool_result.done",
             "text": "London is 22°C today.",
-            "tool_call_id": "call_abc123",  # From tool_call event
+            "tool_call_id": "call_abc123",  # From the tool_call.done item
         }
     ],
 }
@@ -269,7 +278,7 @@ client = AutoLLMClient(model="gpt-5.5")
 config = {"trace_id": "agent1/conversation_001"}
 
 async for event in client.streaming_response_stateful(
-    message={"role": "user", "content_items": [{"type": "text", "text": "Hello"}]}, config=config
+    message={"role": "user", "content_items": [{"type": "text.done", "text": "Hello"}]}, config=config
 ):
     pass  # Conversation is automatically saved
 ```

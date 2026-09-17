@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import shutil
 import tempfile
@@ -20,7 +21,7 @@ from pathlib import Path
 import pytest
 from flask import Flask
 
-from agenthub import AutoLLMClient
+from agenthub.base_client import LLMClient, done_marker
 from agenthub.integration.tracer import Tracer
 
 
@@ -46,8 +47,8 @@ def test_save_history(temp_cache_dir):
     # Create sample history
     model = "fake-model"
     history = [
-        {"role": "user", "content_items": [{"type": "text", "text": "Hello"}]},
-        {"role": "assistant", "content_items": [{"type": "text", "text": "Hi there!"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "Hello"}]},
+        {"role": "assistant", "content_items": [{"type": "text.done", "text": "Hi there!"}]},
     ]
 
     # Save history
@@ -70,8 +71,6 @@ def test_save_history(temp_cache_dir):
     assert "temperature" in content
 
     # Verify JSON content
-    import json
-
     with open(json_path) as f:
         data = json.load(f)
     assert "history" in data
@@ -84,7 +83,7 @@ def test_save_history_creates_directories(temp_cache_dir):
     tracer = Tracer(cache_dir=temp_cache_dir)
 
     model = "fake-model"
-    history = [{"role": "user", "content_items": [{"type": "text", "text": "Test"}]}]
+    history = [{"role": "user", "content_items": [{"type": "text.done", "text": "Test"}]}]
 
     file_id = "agent1/subfolder/conversation"
     config = {}
@@ -100,12 +99,12 @@ def test_save_history_overwrites_existing(temp_cache_dir):
     tracer = Tracer(cache_dir=temp_cache_dir)
 
     model = "fake-model"
-    history1 = [{"role": "user", "content_items": [{"type": "text", "text": "First message"}]}]
+    history1 = [{"role": "user", "content_items": [{"type": "text.done", "text": "First message"}]}]
 
     history2 = [
-        {"role": "user", "content_items": [{"type": "text", "text": "First message"}]},
-        {"role": "assistant", "content_items": [{"type": "text", "text": "Response"}]},
-        {"role": "user", "content_items": [{"type": "text", "text": "Second message"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "First message"}]},
+        {"role": "assistant", "content_items": [{"type": "text.done", "text": "Response"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "Second message"}]},
     ]
 
     file_id = "test/conversation"
@@ -132,23 +131,23 @@ def test_format_history_with_different_content_types(temp_cache_dir):
 
     model = "fake-model"
     history = [
-        {"role": "user", "content_items": [{"type": "text", "text": "What's in this image?"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "What's in this image?"}]},
         {
             "role": "assistant",
             "content_items": [
-                {"type": "thinking", "thinking": "Let me analyze..."},
-                {"type": "inline_thinking", "data": b"abc", "mime_type": "image/png"},
-                {"type": "text", "text": "This is a flower."},
-                {"type": "embedding", "embedding": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]},
+                {"type": "thinking.done", "thinking": "Let me analyze..."},
+                {"type": "inline_thinking.done", "data": b"abc", "mime_type": "image/png"},
+                {"type": "text.done", "text": "This is a flower."},
+                {"type": "embedding.done", "embedding": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]},
             ],
         },
         {
             "role": "assistant",
-            "content_items": [{"type": "inline_data", "data": b"\x00\x01\x02\x03", "mime_type": "audio/pcm"}],
+            "content_items": [{"type": "inline_data.done", "data": b"\x00\x01\x02\x03", "mime_type": "audio/pcm"}],
         },
         {
             "role": "user",
-            "content_items": [{"type": "tool_result", "text": "Temperature is 20C", "tool_call_id": "call_123"}],
+            "content_items": [{"type": "tool_result.done", "text": "Temperature is 20C", "tool_call_id": "call_123"}],
         },
     ]
 
@@ -204,7 +203,7 @@ def test_web_app_browse_with_files(temp_cache_dir):
 
     # Create some test files
     model = "fake-model"
-    history = [{"role": "user", "content_items": [{"type": "text", "text": "Test"}]}]
+    history = [{"role": "user", "content_items": [{"type": "text.done", "text": "Test"}]}]
     config = {}
     tracer.save_history(model, history, "agent1/conv1", config)
     tracer.save_history(model, history, "agent1/conv2", config)
@@ -253,49 +252,75 @@ def test_web_app_nonexistent_path(temp_cache_dir):
         assert response.status_code == 404
 
 
-def _fake_llm_client() -> AutoLLMClient:
-    """AutoLLMClient whose wire stream is a scripted UniEvent generator.
+class ScriptedClient(LLMClient):
+    """A client whose provider stream is a fixed list of events.
 
     The tracer hook under test lives in the base class's streaming_response (trace_id ->
-    save_history), above the seam replaced here — so the integration runs for real while
-    no network or API key is involved.
+    save_history), above this seam — so the integration runs for real while no network or
+    API key is involved.
     """
-    client = AutoLLMClient(model="gpt-5.5", api_key="test-key")
 
-    async def fake_stream(messages, config):
-        yield {
-            "role": "assistant",
-            "event_type": "delta",
-            "content_items": [{"type": "text", "text": "Hello there!"}],
-            "usage_metadata": None,
-            "finish_reason": None,
-        }
-        yield {
-            "role": "assistant",
-            "event_type": "stop",
-            "content_items": [],
-            "usage_metadata": {
-                "cached_tokens": 0,
-                "prompt_tokens": 1,
-                "thoughts_tokens": None,
-                "response_tokens": 1,
-            },
-            "finish_reason": "stop",
-        }
+    def __init__(self, events):
+        self._model = "fake-model"
+        self._history = []
+        self._events = events
 
-    client._client._streaming_response_internal = fake_stream  # noqa: SLF001
-    return client
+    def transform_uni_config_to_model_config(self, config):
+        return None
+
+    def transform_uni_message_to_model_input(self, messages):
+        return messages
+
+    def transform_model_output_to_uni_event(self, model_output):
+        return model_output
+
+    async def _streaming_response_internal(self, messages, config):
+        for event in self._events:
+            yield self.transform_model_output_to_uni_event(event)
+
+    async def list_models(self):
+        return []
+
+
+def _delta(item):
+    return {
+        "role": "assistant",
+        "event_type": "delta",
+        "content_items": [item],
+        "usage_metadata": None,
+        "finish_reason": None,
+    }
+
+
+_STOP = {
+    "role": "assistant",
+    "event_type": "stop",
+    "content_items": [],
+    "usage_metadata": {"cached_tokens": 0, "prompt_tokens": 1, "thoughts_tokens": None, "response_tokens": 2},
+    "finish_reason": "stop",
+}
+
+
+def _fake_llm_client() -> ScriptedClient:
+    return ScriptedClient(
+        [
+            _delta({"type": "text.delta", "text": "Hello ", "fidelity": {"item_id": "0"}}),
+            _delta({"type": "text.delta", "text": "there!", "fidelity": {"item_id": "0"}}),
+            _delta(done_marker("0")),
+            _STOP,
+        ]
+    )
 
 
 @pytest.mark.asyncio
 async def test_monitoring_integration(temp_cache_dir):
-    """Test monitoring integration with AutoLLMClient (scripted stream, no real model)."""
+    """Test monitoring integration with a client stream (scripted parts, no real model)."""
 
     os.environ["AGENTHUB_CACHE_DIR"] = temp_cache_dir
     client = _fake_llm_client()
     config = {"trace_id": "integration_test/conversation.txt"}
 
-    message = {"role": "user", "content_items": [{"type": "text", "text": "Say hello"}]}
+    message = {"role": "user", "content_items": [{"type": "text.done", "text": "Say hello"}]}
     async for _ in client.streaming_response_stateful(message=message, config=config):
         pass
 
@@ -319,7 +344,7 @@ async def test_monitoring_updates_on_multiple_messages(temp_cache_dir):
     config = {"trace_id": "multi_message_test/conversation.txt"}
 
     # First message
-    message1 = {"role": "user", "content_items": [{"type": "text", "text": "First question"}]}
+    message1 = {"role": "user", "content_items": [{"type": "text.done", "text": "First question"}]}
     async for _ in client.streaming_response_stateful(message=message1, config=config):
         pass
 
@@ -328,7 +353,7 @@ async def test_monitoring_updates_on_multiple_messages(temp_cache_dir):
     assert "First question" in content1
 
     # Second message
-    message2 = {"role": "user", "content_items": [{"type": "text", "text": "Second question"}]}
+    message2 = {"role": "user", "content_items": [{"type": "text.done", "text": "Second question"}]}
     async for _ in client.streaming_response_stateful(message=message2, config=config):
         pass
 
@@ -337,12 +362,111 @@ async def test_monitoring_updates_on_multiple_messages(temp_cache_dir):
     assert "Second question" in content2
 
 
+@pytest.mark.asyncio
+async def test_traced_response_is_saved_before_its_stop_event(temp_cache_dir, monkeypatch):
+    """Test that the trace is on disk by the time the stop event reaches the caller."""
+    monkeypatch.setenv("AGENTHUB_CACHE_DIR", temp_cache_dir)
+    client = _fake_llm_client()
+    message = {"role": "user", "content_items": [{"type": "text.done", "text": "Say hello"}]}
+
+    saved = None
+    transcript = ""
+    async for event in client.streaming_response_stateful(
+        message=message, config={"trace_id": "integration/conversation"}
+    ):
+        if event["event_type"] == "stop":
+            file_base = Path(temp_cache_dir) / "integration" / "conversation"
+            with open(file_base.with_suffix(".json"), encoding="utf-8") as f:
+                saved = json.load(f)
+            transcript = file_base.with_suffix(".txt").read_text(encoding="utf-8")
+            break
+
+    assert [saved_message["content_items"] for saved_message in saved["history"]] == [
+        [{"type": "text.done", "text": "Say hello"}],
+        [{"type": "text.done", "text": "Hello there!"}],
+    ]
+    assert "Text: Hello there!" in transcript
+    assert "Finish Reason: stop" in transcript
+
+
+@pytest.mark.asyncio
+async def test_traced_response_saves_its_fidelity_without_the_item_id(temp_cache_dir, monkeypatch):
+    """Test that the trace keeps a response's fidelity but not the item_id its client identified the item with."""
+    monkeypatch.setenv("AGENTHUB_CACHE_DIR", temp_cache_dir)
+    client = ScriptedClient(
+        [
+            _delta({"type": "text.delta", "text": "Hello", "fidelity": {"item_id": "0", "signature": "s"}}),
+            _delta(done_marker("0")),
+            _STOP,
+        ]
+    )
+    message = {"role": "user", "content_items": [{"type": "text.done", "text": "Say hello"}]}
+    async for _ in client.streaming_response(messages=[message], config={"trace_id": "integration/fidelity"}):
+        pass
+
+    with open(Path(temp_cache_dir) / "integration" / "fidelity.json", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["history"][1]["content_items"] == [
+        {"type": "text.done", "text": "Hello", "fidelity": {"signature": "s"}}
+    ]
+
+
+@pytest.mark.filterwarnings("ignore:Content item types without the .done suffix")
+def test_web_app_shows_trace_files_saved_before_0_5_with_current_item_types(temp_cache_dir):
+    """Test that a trace file with the item types used before 0.5.0 renders as the current types."""
+    tracer = Tracer(cache_dir=temp_cache_dir)
+    legacy_dir = Path(temp_cache_dir) / "legacy"
+    legacy_dir.mkdir()
+    legacy_trace = {
+        "history": [
+            {"role": "user", "content_items": [{"type": "text", "text": "Weather in Paris?"}]},
+            {
+                "role": "assistant",
+                "content_items": [
+                    {"type": "thinking", "thinking": "Look it up."},
+                    {
+                        "type": "partial_tool_call",
+                        "name": "get_weather",
+                        "arguments": '{"city": "Paris"}',
+                        "tool_call_id": "call_1",
+                    },
+                    {
+                        "type": "tool_call",
+                        "name": "get_weather",
+                        "arguments": {"city": "Paris"},
+                        "tool_call_id": "call_1",
+                    },
+                ],
+            },
+            {"role": "user", "content_items": [{"type": "tool_result", "text": "22 C", "tool_call_id": "call_1"}]},
+        ],
+        "config": {"model": "fake-model"},
+        "timestamp": "2026-01-01T00:00:00",
+    }
+    (legacy_dir / "conversation.json").write_text(json.dumps(legacy_trace), encoding="utf-8")
+
+    app = tracer.create_web_app()
+    with app.test_client() as client:
+        response = client.get("/legacy/conversation.json")
+        assert response.status_code == 200
+        html = response.data.decode()
+
+    for item_type in ["text.done", "thinking.done", "tool_call.done", "tool_result.done"]:
+        assert f'mb-2">{item_type}</div>' in html
+    assert "Weather in Paris?" in html
+    assert "Look it up." in html
+    assert 'get_weather(city="Paris")' in html
+    assert "22 C" in html
+    assert "• 2 item(s)" in html
+    assert "partial_tool_call" not in html
+
+
 def test_format_config_with_system_and_tools(temp_cache_dir):
     """Test formatting config with system prompt and tools."""
     tracer = Tracer(cache_dir=temp_cache_dir)
 
     model = "fake-model"
-    history = [{"role": "user", "content_items": [{"type": "text", "text": "Hello"}]}]
+    history = [{"role": "user", "content_items": [{"type": "text.done", "text": "Hello"}]}]
 
     config = {
         "system_prompt": "You are a helpful assistant.",
@@ -380,7 +504,7 @@ def test_web_app_sort_by_name(temp_cache_dir):
     tracer = Tracer(cache_dir=temp_cache_dir)
 
     model = "fake-model"
-    history = [{"role": "user", "content_items": [{"type": "text", "text": "Test"}]}]
+    history = [{"role": "user", "content_items": [{"type": "text.done", "text": "Test"}]}]
     config = {}
     tracer.save_history(model, history, "zebra/conv", config)
     tracer.save_history(model, history, "apple/conv", config)
@@ -409,7 +533,7 @@ def test_web_app_filters_ds_store(temp_cache_dir):
     tracer = Tracer(cache_dir=temp_cache_dir)
 
     model = "fake-model"
-    history = [{"role": "user", "content_items": [{"type": "text", "text": "Test"}]}]
+    history = [{"role": "user", "content_items": [{"type": "text.done", "text": "Test"}]}]
     config = {}
     tracer.save_history(model, history, "agent/conv", config)
     (Path(temp_cache_dir) / ".DS_Store").write_text("metadata")
@@ -432,7 +556,7 @@ def test_web_app_sort_by_mtime(temp_cache_dir):
     tracer = Tracer(cache_dir=temp_cache_dir)
 
     model = "fake-model"
-    history = [{"role": "user", "content_items": [{"type": "text", "text": "Test"}]}]
+    history = [{"role": "user", "content_items": [{"type": "text.done", "text": "Test"}]}]
     config = {}
 
     tracer.save_history(model, history, "alpha/conv", config)
@@ -469,7 +593,7 @@ def test_web_app_sort_default_is_name(temp_cache_dir):
     tracer = Tracer(cache_dir=temp_cache_dir)
 
     model = "fake-model"
-    history = [{"role": "user", "content_items": [{"type": "text", "text": "Test"}]}]
+    history = [{"role": "user", "content_items": [{"type": "text.done", "text": "Test"}]}]
     config = {}
     tracer.save_history(model, history, "zebra/conv", config)
     tracer.save_history(model, history, "apple/conv", config)

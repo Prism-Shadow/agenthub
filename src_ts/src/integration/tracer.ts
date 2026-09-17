@@ -22,6 +22,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import express, { Express, Request, Response } from "express";
+import { normalizeLegacyMessages } from "../legacy";
 import { UniConfig, UniMessage } from "../types";
 
 /**
@@ -311,23 +312,23 @@ export class Tracer {
       lines.push("-".repeat(80));
 
       for (const item of message.content_items) {
-        if (item.type === "text") {
+        if (item.type === "text.done") {
           lines.push(`Text: ${item.text}`);
-        } else if (item.type === "thinking") {
+        } else if (item.type === "thinking.done") {
           lines.push(`Thinking: ${item.thinking}`);
-        } else if (item.type === "inline_thinking") {
+        } else if (item.type === "inline_thinking.done") {
           lines.push(this._formatInlineDataSummary(item, true));
-        } else if (item.type === "image_url") {
+        } else if (item.type === "image_url.done") {
           lines.push(`Image URL: ${item.image_url}`);
-        } else if (item.type === "inline_data") {
+        } else if (item.type === "inline_data.done") {
           lines.push(this._formatInlineDataSummary(item));
-        } else if (item.type === "embedding") {
+        } else if (item.type === "embedding.done") {
           lines.push(this._formatEmbeddingPreview(item));
-        } else if (item.type === "tool_call") {
+        } else if (item.type === "tool_call.done") {
           lines.push(`Tool Call: ${item.name}`);
           lines.push(`  Arguments: ${JSON.stringify(item.arguments, null, 2)}`);
           lines.push(`  Tool Call ID: ${item.tool_call_id}`);
-        } else if (item.type === "tool_result") {
+        } else if (item.type === "tool_result.done") {
           lines.push(`Tool Result (ID: ${item.tool_call_id}): ${item.text}`);
           if (item.images && item.images.length > 0) {
             item.images.forEach((imageUrl, i) => {
@@ -593,7 +594,8 @@ export class Tracer {
                 </div>`
                 : "";
 
-            const history: UniMessage[] = data.history || [];
+            // trace files written before 0.5.0 carry the legacy content item types
+            const history = normalizeLegacyMessages(data.history || []);
             const totalRounds = Math.ceil(history.length / 2);
 
             const historyHtml = history
@@ -601,11 +603,11 @@ export class Tracer {
                 const contentItemsHtml = msg.content_items
                   .map((item) => {
                     let itemHtml = `<div class="mb-4 pb-4 border-b border-gray-100 last:border-b-0 last:mb-0 last:pb-0"><div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">${item.type}</div>`;
-                    if (item.type === "text") {
+                    if (item.type === "text.done") {
                       itemHtml += `<div class="bg-gray-50 p-4 rounded-md font-mono text-sm whitespace-pre-wrap text-gray-800">${this._escapeHtml(item.text)}</div>`;
-                    } else if (item.type === "thinking") {
+                    } else if (item.type === "thinking.done") {
                       itemHtml += `<div class="bg-blue-50 p-4 rounded-md border-l-4 border-blue-500 font-mono text-sm whitespace-pre-wrap text-gray-800">${this._escapeHtml(item.thinking)}</div>`;
-                    } else if (item.type === "inline_thinking") {
+                    } else if (item.type === "inline_thinking.done") {
                       const summary = this._formatInlineDataSummary(item, true);
                       itemHtml += `<div class="bg-blue-50 border-blue-500 p-4 rounded-md border-l-4"><div class="text-xs text-blue-700 mb-2">${this._escapeHtml(summary)}</div>`;
                       if (item.mime_type?.startsWith("image/")) {
@@ -614,7 +616,7 @@ export class Tracer {
                         itemHtml += `<div class="font-mono text-sm whitespace-pre-wrap text-gray-800">${this._escapeHtml(summary)}</div>`;
                       }
                       itemHtml += `</div>`;
-                    } else if (item.type === "tool_call") {
+                    } else if (item.type === "tool_call.done") {
                       const entries = Object.entries(item.arguments);
                       let args = "";
                       for (let i = 0; i < entries.length; i++) {
@@ -625,7 +627,7 @@ export class Tracer {
                         }
                       }
                       itemHtml += `<div class="bg-yellow-50 p-4 rounded-md border-l-4 border-yellow-500"><div class="font-mono text-sm whitespace-pre-wrap text-gray-800">${this._escapeHtml(item.name)}(${args})</div></div>`;
-                    } else if (item.type === "tool_result") {
+                    } else if (item.type === "tool_result.done") {
                       let resultHtml = `<div class="bg-green-50 p-4 rounded-md border-l-4 border-green-500"><strong class="text-sm text-gray-900">Result:</strong> <span class="text-sm text-gray-700">${this._escapeHtml(item.text)}</span><br><strong class="text-sm text-gray-900">Call ID:</strong> <span class="text-sm text-gray-700">${item.tool_call_id}</span>`;
                       if (item.images && item.images.length > 0) {
                         resultHtml += `<div class="mt-2 flex flex-wrap gap-2">`;
@@ -636,9 +638,9 @@ export class Tracer {
                       }
                       resultHtml += `</div>`;
                       itemHtml += resultHtml;
-                    } else if (item.type === "image_url") {
+                    } else if (item.type === "image_url.done") {
                       itemHtml += `<div class="bg-gray-50 p-4 rounded-md"><img src="${this._escapeHtml(item.image_url)}" class="max-w-xs max-h-48 rounded-md" alt="Preview"></div>`;
-                    } else if (item.type === "inline_data") {
+                    } else if (item.type === "inline_data.done") {
                       const summary = this._formatInlineDataSummary(item);
                       itemHtml += `<div class="bg-purple-50 border-purple-500 p-4 rounded-md border-l-4"><div class="text-xs text-purple-700 mb-2">${this._escapeHtml(summary)}</div>`;
                       if (item.mime_type?.startsWith("image/")) {
@@ -649,7 +651,7 @@ export class Tracer {
                         itemHtml += `<div class="font-mono text-sm whitespace-pre-wrap text-gray-800">${this._escapeHtml(summary)}</div>`;
                       }
                       itemHtml += `</div>`;
-                    } else if (item.type === "embedding") {
+                    } else if (item.type === "embedding.done") {
                       itemHtml += `<div class="bg-indigo-50 p-4 rounded-md border-l-4 border-indigo-500"><div class="font-mono text-sm whitespace-pre-wrap text-gray-800">${this._escapeHtml(this._formatEmbeddingPreview(item))}</div></div>`;
                     }
                     itemHtml += "</div>";

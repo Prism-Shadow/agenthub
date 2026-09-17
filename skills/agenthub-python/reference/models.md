@@ -4,13 +4,13 @@ Use exact model IDs. If a model ID is not listed, ask the user to confirm the ex
 
 | Family | Provider | Model IDs | API Key | Base URL |
 | --- | --- | --- | --- | --- |
-| Gemini 3 | Official / Vertex AI | `gemini-3.1-pro-preview`, `gemini-3.5-flash`, `gemini-3.1-flash-lite` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
-| Gemini 3.6 | Official / Vertex AI | `gemini-3.6-flash`, `gemini-3.5-flash-lite` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
-| Gemini 3.8 | Official / Vertex AI | `gemini-3.8-flash` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
-| Gemini 3.7 | Official / Vertex AI | `gemini-3.7-flash` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
-| Gemini 3 Image | Official / Vertex AI | `gemini-3.1-flash-image`, `gemini-3-pro-image` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
-| Gemini 3 TTS | Official / Vertex AI | `gemini-3.1-flash-tts-preview` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
-| Gemini Embedding | Official / Vertex AI | `gemini-embedding-2` | `GEMINI_API_KEY` | `GEMINI_BASE_URL` |
+| Gemini 3 | Official / Vertex AI | `gemini-3.1-pro-preview`, `gemini-3.5-flash`, `gemini-3.1-flash-lite` | `GEMINI_API_KEY` (Vertex AI: the service-account JSON as the key) | `GEMINI_BASE_URL` |
+| Gemini 3.6 | Official / Vertex AI | `gemini-3.6-flash`, `gemini-3.5-flash-lite` | `GEMINI_API_KEY` (Vertex AI: the service-account JSON as the key) | `GEMINI_BASE_URL` |
+| Gemini 3.8 | Official / Vertex AI | `gemini-3.8-flash` | `GEMINI_API_KEY` (Vertex AI: the service-account JSON as the key) | `GEMINI_BASE_URL` |
+| Gemini 3.7 | Official / Vertex AI | `gemini-3.7-flash` | `GEMINI_API_KEY` (Vertex AI: the service-account JSON as the key) | `GEMINI_BASE_URL` |
+| Gemini 3 Image | Official / Vertex AI | `gemini-3.1-flash-image`, `gemini-3-pro-image` | `GEMINI_API_KEY` (Vertex AI: the service-account JSON as the key) | `GEMINI_BASE_URL` |
+| Gemini 3 TTS | Official / Vertex AI | `gemini-3.1-flash-tts-preview` | `GEMINI_API_KEY` (Vertex AI: the service-account JSON as the key) | `GEMINI_BASE_URL` |
+| Gemini Embedding | Official / Vertex AI | `gemini-embedding-2` | `GEMINI_API_KEY` (Vertex AI: the service-account JSON as the key) | `GEMINI_BASE_URL` |
 | Claude 4.6 | Official / ModelVerse | `claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | Claude 4.6 | Bedrock | `global.anthropic.claude-sonnet-4-6` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
 | Claude 4.7 | Official / ModelVerse | `claude-opus-4-7` | `ANTHROPIC_API_KEY` | `ANTHROPIC_BASE_URL` |
@@ -43,6 +43,8 @@ Use exact model IDs. If a model ID is not listed, ask the user to confirm the ex
 | GLM-5.3 | Official | `glm-5.3`, `glm-5.3-flash` | `ZAI_API_KEY` | `ZAI_BASE_URL` |
 | GLM-5.3 | OpenRouter | `z-ai/glm-5.3` | `ZAI_API_KEY` | `ZAI_BASE_URL` |
 | MiniMax-M3 | Official | `MiniMax-M3` | `MINIMAX_API_KEY` | `MINIMAX_BASE_URL` |
+
+Gemini models are served through the Interactions API with an API key and through generateContent with a Vertex AI service-account key; embedding models use `embedContent` with either. Thought signatures only replay on the endpoint that issued them, so a history recorded with an API key cannot move to a Vertex AI key with its signatures, or the reverse.
 
 Common gateway base URLs:
 

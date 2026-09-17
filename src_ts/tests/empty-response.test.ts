@@ -17,12 +17,14 @@ import {
   AgentHubError,
   AutoLLMClient,
   EmptyResponseError,
-  TextContentItem,
+  EventContentItem,
+  TextDeltaItem,
   ToolCallArgumentParseError,
   UniConfig,
   UniEvent,
   UniMessage,
 } from "../src";
+import { assertStreamGrammar } from "./streamGrammar";
 
 type FakeCreateEndpoint = {
   create: () => Promise<AsyncIterable<unknown>>;
@@ -82,7 +84,7 @@ const REASONING_STREAM_CASES: ReasoningStreamCase[] = [
 const messages: UniMessage[] = [
   {
     role: "user",
-    content_items: [{ type: "text", text: "Create a memo." }],
+    content_items: [{ type: "text.done", text: "Create a memo." }],
   },
 ];
 
@@ -275,11 +277,11 @@ describe.each(REASONING_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
-      const texts = events.flatMap((event) =>
-        event.content_items
-          .filter((item): item is TextContentItem => item.type === "text")
-          .map((item) => item.text),
-      );
+      assertStreamGrammar(events);
+      const texts = events
+        .flatMap((event): EventContentItem[] => event.content_items)
+        .filter((item): item is TextDeltaItem => item.type === "text.delta")
+        .map((item) => item.text);
       expect(texts).toEqual(["Here is the memo."]);
     });
   },

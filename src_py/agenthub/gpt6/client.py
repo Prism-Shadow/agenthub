@@ -19,12 +19,12 @@ from typing import Any, AsyncIterator
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 
-from ..base_client import LLMClient
-from ..errors import UnsupportedParameterError, parse_tool_call_arguments
+from ..base_client import LLMClient, done_marker
+from ..errors import UnsupportedParameterError
 from ..types import (
+    EventContentItem,
     EventType,
     FinishReason,
-    PartialContentItem,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
@@ -155,7 +155,7 @@ class GPT6Client(LLMClient):
             for item in msg["content_items"]:
                 # anything that is not message content becomes an input item of its own, so the
                 # text collected so far is flushed first to keep the order the model produced
-                if item["type"] not in ("text", "image_url") and content_items:
+                if item["type"] not in ("text.done", "image_url.done") and content_items:
                     # Every turn goes back as a typed message item — the Responses API's EasyInputMessage
                     # shape, where type "message" is valid for any role. A vLLM-style Responses server
                     # answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn that
@@ -168,7 +168,7 @@ class GPT6Client(LLMClient):
                     input_list.append(entry)
                     content_items = []
 
-                if item["type"] == "text":
+                if item["type"] == "text.done":
                     phase = (item.get("fidelity") or {}).get("phase")
                     if msg["role"] == "assistant" and phase:  # split different phases
                         if last_phase is not None and last_phase != phase and content_items:
@@ -183,9 +183,9 @@ class GPT6Client(LLMClient):
                         content_items.append({"type": "input_text", "text": item["text"]})
                     else:
                         content_items.append({"type": "output_text", "text": item["text"]})
-                elif item["type"] == "image_url":
+                elif item["type"] == "image_url.done":
                     content_items.append(self._convert_image_url(item["image_url"]))
-                elif item["type"] == "thinking":
+                elif item["type"] == "thinking.done":
                     # rebuild the reasoning item from the recorded wire fields: the thinking
                     # text goes back through the channel that carried it (histories recorded
                     # by the pre-channel client carry encrypted_content and stream summaries)
@@ -205,7 +205,7 @@ class GPT6Client(LLMClient):
                             reasoning[key] = fidelity[key]
 
                     input_list.append(reasoning)
-                elif item["type"] == "tool_call":
+                elif item["type"] == "tool_call.done":
                     input_list.append(
                         {
                             "type": "function_call",
@@ -214,7 +214,7 @@ class GPT6Client(LLMClient):
                             "arguments": json.dumps(item["arguments"], ensure_ascii=False),
                         }
                     )
-                elif item["type"] == "tool_result":
+                elif item["type"] == "tool_result.done":
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
@@ -247,75 +247,114 @@ class GPT6Client(LLMClient):
 
     def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
         """
-        Transform OpenAI Responses API streaming event to universal event format.
+        Transform one OpenAI Responses API streaming event into a universal event, identifying items by output item id.
 
         Args:
             model_output: OpenAI Responses API streaming event
 
         Returns:
-            Universal event dictionary
+            Universal event dictionary, an empty delta event when the wire event carries nothing universal
         """
-        event_type: EventType | None = None
-        content_items: list[PartialContentItem] = []
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
         usage_metadata: UsageMetadata | None = None
         finish_reason: FinishReason | None = None
 
         openai_event_type = model_output.type
         if openai_event_type == "response.output_text.delta":
-            event_type = "delta"
-            content_items.append({"type": "text", "text": model_output.delta})
-
-        elif openai_event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
-            event_type = "delta"
-            content_items.append({"type": "thinking", "thinking": model_output.delta})
-
-        elif openai_event_type == "response.output_item.added":
-            if model_output.item.type == "function_call":
-                event_type = "start"
-                content_items.append(
-                    {
-                        "type": "partial_tool_call",
-                        "name": model_output.item.name,
-                        "arguments": "",
-                        "tool_call_id": model_output.item.call_id,
-                        "item_id": model_output.item.id,
-                    }
-                )
-            elif model_output.item.type == "message":
-                if hasattr(model_output.item, "phase"):
-                    event_type = "delta"
-                    content_items.append(
-                        {"type": "text", "text": "", "fidelity": {"phase": getattr(model_output.item, "phase", None)}}
-                    )
-                else:
-                    event_type = "unused"
-            else:
-                event_type = "unused"
-
-        elif openai_event_type == "response.function_call_arguments.delta":
-            event_type = "delta"
             content_items.append(
                 {
-                    "type": "partial_tool_call",
+                    "type": "text.delta",
+                    "text": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
+            )
+
+        elif openai_event_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            content_items.append(
+                {
+                    "type": "thinking.delta",
+                    "thinking": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
+            )
+
+        elif openai_event_type == "response.output_item.added":
+            # every item is announced with a delta, empty unless it carries the call or the phase,
+            # so a fragment a server sends without its item id belongs to the item announced last
+            item = model_output.item
+            if item.type == "function_call":
+                content_items.append(
+                    {
+                        "type": "tool_call.delta",
+                        "name": item.name,
+                        "arguments": "",
+                        "tool_call_id": item.call_id,
+                        # a server that sends no item id still sends the call id
+                        "fidelity": {"item_id": item.id or item.call_id},
+                    }
+                )
+            elif item.type == "message":
+                phase = getattr(item, "phase", None)
+                content_items.append(
+                    {
+                        "type": "text.delta",
+                        "text": "",
+                        "fidelity": {
+                            "item_id": getattr(item, "id", None),
+                            **({"phase": phase} if phase is not None else {}),
+                        },
+                    }
+                )
+            elif item.type == "reasoning":
+                content_items.append(
+                    {"type": "thinking.delta", "thinking": "", "fidelity": {"item_id": getattr(item, "id", None)}}
+                )
+
+        elif openai_event_type == "response.output_item.done":
+            item = model_output.item
+            if item.type == "reasoning":
+                # the completed item carries the canonical wire fields to send back on the
+                # next turn (identical to the response.completed copy, but adjacent to the
+                # thinking deltas so the fidelity lands on the item that carried the text);
+                # record the channel plus the fields the server demands back. This event is the
+                # only source of encrypted_content, because the streaming-events reference says
+                # of response.output_item.added: "For reasoning items, encrypted_content may be
+                # incomplete while the item is in progress. Use the reasoning item from the
+                # corresponding response.output_item.done event when passing it as input to a
+                # subsequent request."
+                fidelity = {"item_id": getattr(item, "id", None)}
+                if getattr(item, "summary", None):
+                    fidelity["channel"] = "summary"
+                elif getattr(item, "content", None):
+                    fidelity["channel"] = "content"
+                for key in ("encrypted_content", "signature", "format"):
+                    if getattr(item, key, None) is not None:
+                        fidelity[key] = getattr(item, key)
+
+                content_items.append({"type": "thinking.delta", "thinking": "", "fidelity": fidelity})
+                content_items.append(done_marker(getattr(item, "id", None)))
+            elif item.type == "function_call":
+                content_items.append(done_marker(item.id or item.call_id))
+            elif item.type == "message":
+                content_items.append(done_marker(getattr(item, "id", None)))
+
+        elif openai_event_type == "response.function_call_arguments.delta":
+            content_items.append(
+                {
+                    "type": "tool_call.delta",
                     "name": "",
                     "arguments": model_output.delta,
                     "tool_call_id": "",
-                    "item_id": model_output.item_id,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
             )
 
         elif openai_event_type == "response.function_call_arguments.done":
-            # a stop naming the item closes that call
-            event_type = "stop"
-            content_items.append(
-                {
-                    "type": "partial_tool_call",
-                    "name": "",
-                    "arguments": "",
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
-                }
-            )
+            # the call's output_item.done completes it instead: its item still names the call where
+            # a server leaves the item id off this event, and a call whose output_item.done never
+            # arrives is completed when the stream ends
+            pass
 
         elif openai_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
@@ -338,31 +377,6 @@ class GPT6Client(LLMClient):
                 "response_tokens": output_tokens - reasoning_tokens,
             }
 
-        elif openai_event_type == "response.output_item.done":
-            if model_output.item.type == "reasoning":
-                # the completed item carries the canonical wire fields to send back on the
-                # next turn (identical to the response.completed copy, but adjacent to the
-                # thinking deltas so the fidelity lands on the item that carried the text);
-                # record the channel plus the fields the server demands back. This event is the
-                # only source of encrypted_content, because the streaming-events reference says
-                # of response.output_item.added: "For reasoning items, encrypted_content may be
-                # incomplete while the item is in progress. Use the reasoning item from the
-                # corresponding response.output_item.done event when passing it as input to a
-                # subsequent request."
-                event_type = "delta"
-                fidelity = {}
-                if getattr(model_output.item, "summary", None):
-                    fidelity["channel"] = "summary"
-                elif getattr(model_output.item, "content", None):
-                    fidelity["channel"] = "content"
-                for key in ("encrypted_content", "signature", "format"):
-                    if getattr(model_output.item, key, None) is not None:
-                        fidelity[key] = getattr(model_output.item, key)
-
-                content_items.append({"type": "thinking", "thinking": "", "fidelity": fidelity})
-            else:
-                event_type = "unused"
-
         elif openai_event_type in [
             "response.created",
             "response.in_progress",
@@ -375,7 +389,8 @@ class GPT6Client(LLMClient):
             "response.content_part.done",
             "keepalive",  # gateway heartbeat on long generations; carries no content
         ]:
-            event_type = "unused"
+            # lifecycle events, and repeats of what the deltas carry
+            pass
 
         elif is_debug_enabled():
             raise ValueError(f"Unknown output: {model_output}")
@@ -383,7 +398,7 @@ class GPT6Client(LLMClient):
         else:
             # a gateway injects its own events (heartbeats, cost tickers) into the stream, and
             # killing a long generation over one costs more than dropping it
-            event_type = "unused"
+            pass
 
         return {
             "role": "assistant",
@@ -405,64 +420,43 @@ class GPT6Client(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
-        # server sends none): a gateway may open several before closing any of them.
-        open_tool_calls: dict[str, dict] = {}
-        last_opened = ""
-
-        def key_of(item_id: str | None) -> str:
-            return item_id if item_id in open_tool_calls else last_opened
+        # A server may leave the item ids out. An item without one belongs to the item announced or
+        # streamed last while that item is open and of the same kind, and starts an item of its own
+        # otherwise; an argument fragment whose id names no announced call counts as one without.
+        announced_calls: set[str] = set()
+        last_id = ""
+        last_type = ""
+        unkeyed_items = 0
 
         # Stream generate
         stream = await self._client.responses.create(**openai_config, input=input_list, stream=True)
         async for model_event in stream:
             event = self.transform_model_output_to_uni_event(model_event)
-            fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
-            if event["event_type"] == "start":
-                for item in fragments:
-                    last_opened = item.get("item_id") or item["tool_call_id"]
-                    open_tool_calls[last_opened] = {
-                        "name": item["name"],
-                        "tool_call_id": item["tool_call_id"],
-                        "arguments": "",
-                    }
-                yield event
-            elif event["event_type"] == "delta":
-                for item in fragments:
-                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
-                    if tool_call is not None:
-                        tool_call["arguments"] += item["arguments"]
-                yield event
-            elif event["event_type"] == "stop":
-                # a stop that names calls closes them; the end of the response closes whatever
-                # a gateway never closed on its own
-                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
-                for key in closing:
-                    tool_call = open_tool_calls.pop(key, None)
-                    if tool_call is None:
+            content_items: list[EventContentItem] = []
+            for item in event["content_items"]:
+                fidelity = item["fidelity"]
+                if item["type"].endswith(".done"):
+                    if not fidelity["item_id"] and not last_id:
                         continue
-                    yield {
-                        "role": "assistant",
-                        "event_type": "delta",
-                        "content_items": [
-                            {
-                                "type": "tool_call",
-                                "name": tool_call["name"],
-                                "arguments": parse_tool_call_arguments(
-                                    tool_call["arguments"],
-                                    self.__class__.__name__,
-                                    tool_call["name"],
-                                    tool_call["tool_call_id"],
-                                ),
-                                "tool_call_id": tool_call["tool_call_id"],
-                            }
-                        ],
-                        "usage_metadata": None,
-                        "finish_reason": None,
-                    }
-
-                if event["finish_reason"] or event["usage_metadata"]:
-                    yield event
+                    fidelity["item_id"] = fidelity["item_id"] or last_id
+                    if fidelity["item_id"] == last_id:
+                        last_id = ""
+                        last_type = ""
+                else:
+                    if item["type"] == "tool_call.delta" and item["tool_call_id"]:
+                        announced_calls.add(fidelity["item_id"])
+                    elif not fidelity["item_id"] or (
+                        item["type"] == "tool_call.delta" and fidelity["item_id"] not in announced_calls
+                    ):
+                        if last_type == item["type"]:
+                            fidelity["item_id"] = last_id
+                        else:
+                            fidelity["item_id"] = f"unkeyed-{unkeyed_items}"
+                            unkeyed_items += 1
+                    last_id = fidelity["item_id"]
+                    last_type = item["type"]
+                content_items.append(item)
+            yield {**event, "content_items": content_items}
 
     async def list_models(self) -> list[str]:
         """

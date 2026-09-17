@@ -59,24 +59,24 @@ async def main() -> None:
             {
                 "role": "user",
                 "content_items": [
-                    {"type": "text", "text": prompt},
+                    {"type": "text.done", "text": prompt},
                     # edit the input image or generate a new one
-                    {"type": "image_url", "image_url": CAT_IMAGE_URL},
+                    {"type": "image_url.done", "image_url": CAT_IMAGE_URL},
                 ],
             }
         ],
         config=config,
     ):
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.done":
                 print(f"Text: {item['text']}")
-            elif item["type"] == "inline_data":
+            elif item["type"] == "inline_data.done":
                 i += 1
                 image = Image.open(BytesIO(item["data"]))
                 output_format = image.format or "PNG"
                 output_path = Path.cwd() / f"generated_image_{i}.{output_format.lower()}"
                 image.save(output_path, format=output_format)
-                print(f"Saved image chunk to: {output_path}")
+                print(f"Saved image to: {output_path}")
 
     print("\n" + "=" * 60)
     print("Image generation complete!")

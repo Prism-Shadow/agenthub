@@ -45,13 +45,13 @@ async def main():
     print(f"Generating embeddings for {len(texts)} texts with dimensions=768...")
     events = []
     async for event in client.streaming_response(
-        messages=[{"role": "user", "content_items": [{"type": "text", "text": text}]} for text in texts],
+        messages=[{"role": "user", "content_items": [{"type": "text.done", "text": text}]} for text in texts],
         config={"embedding_config": {"dimensions": 768}},
     ):
         events.append(event)
 
     embeddings = [
-        item["embedding"] for event in events for item in event["content_items"] if item["type"] == "embedding"
+        item["embedding"] for event in events for item in event["content_items"] if item["type"] == "embedding.done"
     ]
 
     for i, embedding in enumerate(embeddings):

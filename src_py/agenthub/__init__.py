@@ -16,10 +16,12 @@ from .auto_client import AutoLLMClient
 from .errors import (
     AgentHubError,
     EmptyResponseError,
+    StreamProtocolError,
     ToolCallArgumentParseError,
     UnsupportedOperationError,
     UnsupportedParameterError,
 )
+from .legacy import normalize_legacy_messages
 from .registry import Currency, Modality, ModelPricing, SupportedModel, list_supported_models
 from .types import PromptCaching, ThinkingLevel
 
@@ -32,10 +34,12 @@ __all__ = [
     "Modality",
     "ModelPricing",
     "PromptCaching",
+    "StreamProtocolError",
     "SupportedModel",
     "ThinkingLevel",
     "ToolCallArgumentParseError",
     "UnsupportedOperationError",
     "UnsupportedParameterError",
     "list_supported_models",
+    "normalize_legacy_messages",
 ]
