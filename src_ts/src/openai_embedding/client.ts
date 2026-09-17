@@ -17,9 +17,9 @@ import type {
   CreateEmbeddingResponse,
   EmbeddingCreateParams,
 } from "openai/resources/embeddings";
-import { ClientPart, LLMClient } from "../baseClient";
+import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
-import { UniConfig, UniMessage } from "../types";
+import { UniConfig, UniEvent, UniMessage } from "../types";
 
 /**
  * OpenAI Embeddings-compatible client implementation.
@@ -92,24 +92,18 @@ export class OpenaiEmbeddingClient extends LLMClient {
   }
 
   /**
-   * Transform an OpenAI Embeddings response into client parts, one complete item per vector.
+   * Transform an OpenAI Embeddings response into a universal event, one complete item per vector.
    */
-  transformModelOutputToClientParts(
+  transformModelOutputToUniEvent(
     modelOutput: CreateEmbeddingResponse,
-  ): ClientPart[] {
-    const parts: ClientPart[] = [];
-    for (const [i, item] of modelOutput.data.entries()) {
-      const key = `embedding:${i}`;
-      parts.push({
-        type: "delta",
-        key,
-        item: { type: "embedding.delta", embedding: item.embedding },
-      });
-      parts.push({ type: "done", key });
-    }
-
-    parts.push({
-      type: "finish",
+  ): UniEvent {
+    return {
+      role: "assistant",
+      event_type: "stop",
+      content_items: modelOutput.data.map((item) => ({
+        type: "embedding.delta" as const,
+        embedding: item.embedding,
+      })),
       usage_metadata: {
         cached_tokens: null,
         prompt_tokens: modelOutput.usage?.prompt_tokens ?? null,
@@ -117,8 +111,7 @@ export class OpenaiEmbeddingClient extends LLMClient {
         response_tokens: null,
       },
       finish_reason: "stop",
-    });
-    return parts;
+    };
   }
 
   /**
@@ -128,7 +121,7 @@ export class OpenaiEmbeddingClient extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     const params: EmbeddingCreateParams = {
       ...this.transformUniConfigToModelConfig(options.config),
       input: this.transformUniMessageToModelInput(options.messages),
@@ -136,7 +129,7 @@ export class OpenaiEmbeddingClient extends LLMClient {
     const result = await this._client.embeddings.create(params, {
       signal: options.signal,
     });
-    yield* this.transformModelOutputToClientParts(result);
+    yield this.transformModelOutputToUniEvent(result);
   }
 
   /**

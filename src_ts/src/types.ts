@@ -193,33 +193,35 @@ export interface UniMessage {
 }
 
 /**
+ * Universal event format for streaming responses.
+ */
+export interface UniEvent {
+  role: Role;
+  event_type: EventType;
+  content_items: EventContentItem[];
+  usage_metadata: UsageMetadata | null;
+  finish_reason: FinishReason | null;
+  created_at?: number;
+}
+
+/**
  * A streamed event while the response is still running: exactly one delta or done item.
  */
-export interface UniDeltaEvent {
-  role: Role;
+export interface UniDeltaEvent extends UniEvent {
   event_type: "delta";
-  content_items: EventContentItem[];
   usage_metadata: null;
   finish_reason: null;
-  created_at?: number;
 }
 
 /**
  * The last event of every successful stream, carrying no content items.
  */
-export interface UniStopEvent {
-  role: Role;
+export interface UniStopEvent extends UniEvent {
   event_type: "stop";
   content_items: [];
   usage_metadata: UsageMetadata;
   finish_reason: FinishReason;
-  created_at?: number;
 }
-
-/**
- * Universal event format for streaming responses.
- */
-export type UniEvent = UniDeltaEvent | UniStopEvent;
 
 /**
  * Available tool schema.

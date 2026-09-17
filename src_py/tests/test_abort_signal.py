@@ -19,8 +19,8 @@ from typing import Any, AsyncIterator
 import pytest
 
 from agenthub.abort_signal import AbortSignal, run_with_abort
-from agenthub.base_client import ClientPart, LLMClient
-from agenthub.types import UniConfig, UniMessage
+from agenthub.base_client import LLMClient
+from agenthub.types import UniConfig, UniEvent, UniMessage
 
 
 class SlowStreamingClient(LLMClient):
@@ -36,8 +36,8 @@ class SlowStreamingClient(LLMClient):
     def transform_uni_message_to_model_input(self, messages: list[UniMessage]) -> list[UniMessage]:
         return messages
 
-    def transform_model_output_to_client_parts(self, model_output: ClientPart) -> list[ClientPart]:
-        return [model_output]
+    def transform_model_output_to_uni_event(self, model_output: UniEvent) -> UniEvent:
+        return model_output
 
     async def list_models(self) -> list[str]:
         return []
@@ -46,7 +46,7 @@ class SlowStreamingClient(LLMClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         self.started.set()
         try:
             await asyncio.sleep(60)
@@ -54,7 +54,9 @@ class SlowStreamingClient(LLMClient):
             self.cleaned.set()
 
         yield {
-            "type": "finish",
+            "role": "assistant",
+            "event_type": "stop",
+            "content_items": [],
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": None,
@@ -76,8 +78,8 @@ class MultiEventStreamingClient(LLMClient):
     def transform_uni_message_to_model_input(self, messages: list[UniMessage]) -> list[UniMessage]:
         return messages
 
-    def transform_model_output_to_client_parts(self, model_output: ClientPart) -> list[ClientPart]:
-        return [model_output]
+    def transform_model_output_to_uni_event(self, model_output: UniEvent) -> UniEvent:
+        return model_output
 
     async def list_models(self) -> list[str]:
         return []
@@ -86,14 +88,22 @@ class MultiEventStreamingClient(LLMClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         for text in ("hello", " world"):
             await asyncio.sleep(0)
-            yield {"type": "delta", "key": "0", "item": {"type": "text.delta", "text": text}}
+            yield {
+                "role": "assistant",
+                "event_type": "delta",
+                "content_items": [{"type": "text.delta", "text": text, "fidelity": {"item_id": "0"}}],
+                "usage_metadata": None,
+                "finish_reason": None,
+            }
 
         await asyncio.sleep(0)
         yield {
-            "type": "finish",
+            "role": "assistant",
+            "event_type": "stop",
+            "content_items": [],
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": 1,
@@ -123,7 +133,7 @@ class StreamCreationTrackingClient(MultiEventStreamingClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         self.stream_created = True
         return super()._streaming_response_internal(messages, config)
 

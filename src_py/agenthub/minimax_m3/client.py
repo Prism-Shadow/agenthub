@@ -19,14 +19,17 @@ from typing import Any, AsyncIterator
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseStreamEvent
 
-from ..base_client import ClientPart, LLMClient
+from ..base_client import LLMClient, done_marker
 from ..errors import UnsupportedParameterError
 from ..types import (
+    EventContentItem,
+    EventType,
     FinishReason,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
     UniConfig,
+    UniEvent,
     UniMessage,
     UsageMetadata,
 )
@@ -195,46 +198,47 @@ class MiniMaxM3Client(LLMClient):
 
         return input_list
 
-    def transform_model_output_to_client_parts(self, model_output: ResponseStreamEvent) -> list[ClientPart]:
-        """Transform one MiniMax streaming event into client parts, keyed by output item id."""
+    def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
+        """Transform one MiniMax streaming event into a universal event, identifying items by output item id."""
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
+        usage_metadata: UsageMetadata | None = None
+        finish_reason: FinishReason | None = None
+
         minimax_event_type = model_output.type
         if minimax_event_type == "response.output_text.delta":
-            return [
+            content_items.append(
                 {
-                    "type": "delta",
-                    "key": getattr(model_output, "item_id", None),
-                    "item": {"type": "text.delta", "text": model_output.delta},
+                    "type": "text.delta",
+                    "text": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
-            ]
+            )
 
         elif minimax_event_type == "response.reasoning_text.delta":
-            return [
+            content_items.append(
                 {
-                    "type": "delta",
-                    "key": getattr(model_output, "item_id", None),
-                    "item": {"type": "thinking.delta", "thinking": model_output.delta},
+                    "type": "thinking.delta",
+                    "thinking": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
-            ]
+            )
 
         elif minimax_event_type == "response.output_item.added":
             # a message or reasoning item is announced with an empty delta, so a fragment a server
             # sends without its item id belongs to the item announced last
             if model_output.item.type == "message":
-                return [
-                    {
-                        "type": "delta",
-                        "key": getattr(model_output.item, "id", None),
-                        "item": {"type": "text.delta", "text": ""},
-                    }
-                ]
+                content_items.append(
+                    {"type": "text.delta", "text": "", "fidelity": {"item_id": getattr(model_output.item, "id", None)}}
+                )
             elif model_output.item.type == "reasoning":
-                return [
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": getattr(model_output.item, "id", None),
-                        "item": {"type": "thinking.delta", "thinking": ""},
+                        "type": "thinking.delta",
+                        "thinking": "",
+                        "fidelity": {"item_id": getattr(model_output.item, "id", None)},
                     }
-                ]
+                )
 
         elif minimax_event_type == "response.output_item.done":
             # MiniMax's tool calls are read from the completed item alone: the argument deltas are
@@ -244,28 +248,27 @@ class MiniMaxM3Client(LLMClient):
             item = model_output.item
             if item.type == "function_call":
                 # a server that sends no item id still sends the call id
-                key = item.id or item.call_id
-                return [
+                item_id = item.id or item.call_id
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": key,
-                        "item": {
-                            "type": "tool_call.delta",
-                            "name": item.name,
-                            # a server may complete a call without its arguments field
-                            "arguments": item.arguments or "",
-                            "tool_call_id": item.call_id,
-                        },
-                    },
-                    {"type": "done", "key": key},
-                ]
+                        "type": "tool_call.delta",
+                        "name": item.name,
+                        # a server may complete a call without its arguments field
+                        "arguments": item.arguments or "",
+                        "tool_call_id": item.call_id,
+                        "fidelity": {"item_id": item_id},
+                    }
+                )
+                content_items.append(done_marker(item_id))
             elif item.type in ("message", "reasoning"):
-                return [{"type": "done", "key": getattr(item, "id", None)}]
+                content_items.append(done_marker(getattr(item, "id", None)))
 
         elif minimax_event_type in ("response.completed", "response.incomplete"):
+            event_type = "stop"
             response = model_output.response
             finish_reason_mapping: dict[str, FinishReason] = {"completed": "stop", "incomplete": "length"}
-            usage_metadata: UsageMetadata | None = None
+            finish_reason = finish_reason_mapping.get(response.status, "unknown")
+
             if response.usage:
                 # MiniMax drops the detail blocks on truncated responses, so default them to zero.
                 input_details = response.usage.input_tokens_details
@@ -278,14 +281,6 @@ class MiniMaxM3Client(LLMClient):
                     "thoughts_tokens": reasoning_tokens,
                     "response_tokens": response.usage.output_tokens - reasoning_tokens,
                 }
-
-            return [
-                {
-                    "type": "finish",
-                    "usage_metadata": usage_metadata,
-                    "finish_reason": finish_reason_mapping.get(response.status, "unknown"),
-                }
-            ]
 
         elif (
             minimax_event_type
@@ -304,42 +299,52 @@ class MiniMaxM3Client(LLMClient):
         ):
             raise ValueError(f"Unknown output: {model_output}")
 
-        return []
+        return {
+            "role": "assistant",
+            "event_type": event_type,
+            "content_items": content_items,
+            "usage_metadata": usage_metadata,
+            "finish_reason": finish_reason,
+        }
 
     async def _streaming_response_internal(
         self, messages: list[UniMessage], config: UniConfig
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         """Stream MiniMax Responses events with unified conversion methods."""
         minimax_config = self.transform_uni_config_to_model_config(config)
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # A server may leave the item ids out. A part without one belongs to the item announced or
+        # A server may leave the item ids out. An item without one belongs to the item announced or
         # streamed last while that item is open and of the same kind, and starts an item of its own
         # otherwise.
-        last_key = ""
+        last_id = ""
         last_type = ""
         unkeyed_items = 0
 
         stream = await self._client.responses.create(**minimax_config, input=input_list, stream=True)
         async for model_event in stream:
-            for part in self.transform_model_output_to_client_parts(model_event):
-                if part["type"] == "delta":
-                    if not part["key"]:
-                        if last_type == part["item"]["type"]:
-                            part["key"] = last_key
-                        else:
-                            part["key"] = f"unkeyed-{unkeyed_items}"
-                            unkeyed_items += 1
-                    last_key = part["key"]
-                    last_type = part["item"]["type"]
-                elif part["type"] == "done":
-                    if not part["key"] and not last_key:
+            event = self.transform_model_output_to_uni_event(model_event)
+            content_items: list[EventContentItem] = []
+            for item in event["content_items"]:
+                fidelity = item["fidelity"]
+                if item["type"].endswith(".done"):
+                    if not fidelity["item_id"] and not last_id:
                         continue
-                    part["key"] = part["key"] or last_key
-                    if part["key"] == last_key:
-                        last_key = ""
+                    fidelity["item_id"] = fidelity["item_id"] or last_id
+                    if fidelity["item_id"] == last_id:
+                        last_id = ""
                         last_type = ""
-                yield part
+                else:
+                    if not fidelity["item_id"]:
+                        if last_type == item["type"]:
+                            fidelity["item_id"] = last_id
+                        else:
+                            fidelity["item_id"] = f"unkeyed-{unkeyed_items}"
+                            unkeyed_items += 1
+                    last_id = fidelity["item_id"]
+                    last_type = item["type"]
+                content_items.append(item)
+            yield {**event, "content_items": content_items}
 
     async def list_models(self) -> list[str]:
         """

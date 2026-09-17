@@ -24,9 +24,20 @@ from google import genai
 from google.genai import types
 from google.oauth2 import service_account
 
-from ..base_client import ClientPart, LLMClient
+from ..base_client import LLMClient, done_marker
 from ..errors import UnsupportedParameterError
-from ..types import PromptCaching, ThinkingLevel, ToolChoice, UniConfig, UniMessage
+from ..types import (
+    EventContentItem,
+    EventType,
+    FinishReason,
+    PromptCaching,
+    ThinkingLevel,
+    ToolChoice,
+    UniConfig,
+    UniEvent,
+    UniMessage,
+    UsageMetadata,
+)
 from ..utils import is_debug_enabled
 
 
@@ -421,20 +432,23 @@ class Gemini3_8GenerateContentClient(LLMClient):
 
         return contents
 
-    def transform_model_output_to_client_parts(self, model_output: types.GenerateContentResponse) -> list[ClientPart]:
+    def transform_model_output_to_uni_event(self, model_output: types.GenerateContentResponse) -> UniEvent:
         """
-        Transform one generateContent stream chunk into client parts.
+        Transform one generateContent stream chunk into a universal event.
 
-        generateContent gives a part no identity, so each delta is keyed by the kind of wire part that
-        carried it; _streaming_response_internal turns those into one key per item.
+        generateContent gives a part no identity, so each delta's item_id is the kind of wire part that
+        carried it; _streaming_response_internal turns those into one item id per item.
 
         Args:
             model_output: Gemini response chunk
 
         Returns:
-            The parts the chunk carries, none when it carries nothing universal
+            Universal event dictionary
         """
-        client_parts: list[ClientPart] = []
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
+        usage_metadata: UsageMetadata | None = None
+        finish_reason: FinishReason | None = None
 
         if model_output.candidates:
             candidate = model_output.candidates[0]
@@ -442,103 +456,88 @@ class Gemini3_8GenerateContentClient(LLMClient):
             for part in getattr(content, "parts", None) or []:
                 # recorded as base64 text, the form the TypeScript SDK and the Interactions API use
                 signature = base64.b64encode(part.thought_signature).decode() if part.thought_signature else None
-                fidelity = {"fidelity": {"signature": signature}} if signature else {}
+                fidelity = {"signature": signature} if signature else {}
                 if part.function_call is not None:
                     # generateContent sends a call whole, so it streams as one complete delta
-                    client_parts.append(
+                    content_items.append(
                         {
-                            "type": "delta",
-                            "key": "function_call",
-                            "item": {
-                                "type": "tool_call.delta",
-                                "name": part.function_call.name or "",
-                                "arguments": json.dumps(part.function_call.args or {}, ensure_ascii=False),
-                                "tool_call_id": part.function_call.id or part.function_call.name or "",
-                                **fidelity,
-                            },
+                            "type": "tool_call.delta",
+                            "name": part.function_call.name or "",
+                            "arguments": json.dumps(part.function_call.args or {}, ensure_ascii=False),
+                            "tool_call_id": part.function_call.id or part.function_call.name or "",
+                            "fidelity": {"item_id": "function_call", **fidelity},
                         }
                     )
                 elif part.thought and part.text is not None:
                     if part.text or signature:
-                        client_parts.append(
+                        content_items.append(
                             {
-                                "type": "delta",
-                                "key": "thought",
-                                "item": {"type": "thinking.delta", "thinking": part.text, **fidelity},
+                                "type": "thinking.delta",
+                                "thinking": part.text,
+                                "fidelity": {"item_id": "thought", **fidelity},
                             }
                         )
                 elif part.thought and part.inline_data is not None:
-                    client_parts.append(
+                    content_items.append(
                         {
-                            "type": "delta",
-                            "key": "inline_thinking",
-                            "item": {
-                                "type": "inline_thinking.delta",
-                                "data": part.inline_data.data or b"",
-                                "mime_type": part.inline_data.mime_type or "application/octet-stream",
-                                **fidelity,
-                            },
+                            "type": "inline_thinking.delta",
+                            "data": part.inline_data.data or b"",
+                            "mime_type": part.inline_data.mime_type or "application/octet-stream",
+                            "fidelity": {"item_id": "inline_thinking", **fidelity},
                         }
                     )
                 elif part.inline_data is not None:
-                    client_parts.append(
+                    content_items.append(
                         {
-                            "type": "delta",
-                            "key": "inline_data",
-                            "item": {
-                                "type": "inline_data.delta",
-                                "data": part.inline_data.data or b"",
-                                "mime_type": part.inline_data.mime_type or "application/octet-stream",
-                                **fidelity,
-                            },
+                            "type": "inline_data.delta",
+                            "data": part.inline_data.data or b"",
+                            "mime_type": part.inline_data.mime_type or "application/octet-stream",
+                            "fidelity": {"item_id": "inline_data", **fidelity},
                         }
                     )
                 elif part.text is not None:
                     # a response ends on an empty text part, which carries something only when it brings the
                     # signature
                     if part.text or signature:
-                        client_parts.append(
-                            {
-                                "type": "delta",
-                                "key": "text",
-                                "item": {"type": "text.delta", "text": part.text, **fidelity},
-                            }
+                        content_items.append(
+                            {"type": "text.delta", "text": part.text, "fidelity": {"item_id": "text", **fidelity}}
                         )
                 elif is_debug_enabled():
                     raise ValueError(f"Unknown output: {part}")
 
             if candidate.finish_reason:
+                event_type = "stop"
                 stop_reason_mapping = {
                     types.FinishReason.STOP: "stop",
                     types.FinishReason.MAX_TOKENS: "length",
                 }
-                client_parts.append(
-                    {"type": "finish", "finish_reason": stop_reason_mapping.get(candidate.finish_reason, "unknown")}
-                )
+                finish_reason = stop_reason_mapping.get(candidate.finish_reason, "unknown")
 
         # Vertex AI puts a usage object carrying only its traffic type on every chunk; the counts arrive with
         # the last one
         usage = model_output.usage_metadata
         if usage is not None and usage.prompt_token_count is not None:
-            client_parts.append(
-                {
-                    "type": "finish",
-                    "usage_metadata": {
-                        "cached_tokens": usage.cached_content_token_count or None,
-                        "prompt_tokens": (usage.prompt_token_count or 0) - (usage.cached_content_token_count or 0),
-                        "thoughts_tokens": usage.thoughts_token_count or None,
-                        "response_tokens": usage.candidates_token_count or None,
-                    },
-                }
-            )
+            event_type = "stop"
+            usage_metadata = {
+                "cached_tokens": usage.cached_content_token_count or None,
+                "prompt_tokens": (usage.prompt_token_count or 0) - (usage.cached_content_token_count or 0),
+                "thoughts_tokens": usage.thoughts_token_count or None,
+                "response_tokens": usage.candidates_token_count or None,
+            }
 
-        return client_parts
+        return {
+            "role": "assistant",
+            "event_type": event_type,
+            "content_items": content_items,
+            "usage_metadata": usage_metadata,
+            "finish_reason": finish_reason,
+        }
 
     async def _embed_messages_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         """Embed messages through embedContent, one call per message, and yield one embedding item per message."""
         embedding_config = config.get("embedding_config") or {}
         gemini_config = None
@@ -548,7 +547,7 @@ class Gemini3_8GenerateContentClient(LLMClient):
         # Vertex AI embeds one content per call: a second content is a 400 there, and both SDKs refuse to send
         # one. It reports no billable characters either, only a token count per embedding.
         prompt_tokens = None
-        for i, msg in enumerate(messages):
+        for msg in messages:
             parts = []
             for item in msg["content_items"]:
                 if item["type"] == "text.done":
@@ -568,13 +567,14 @@ class Gemini3_8GenerateContentClient(LLMClient):
             )
 
             embedding = result.embeddings[0] if result.embeddings else types.ContentEmbedding()
-            key = f"embedding:{i}"
+            # a vector streams once its call returns; the usage, summed over the calls, follows the last one
             yield {
-                "type": "delta",
-                "key": key,
-                "item": {"type": "embedding.delta", "embedding": list(embedding.values or [])},
+                "role": "assistant",
+                "event_type": "delta",
+                "content_items": [{"type": "embedding.delta", "embedding": list(embedding.values or [])}],
+                "usage_metadata": None,
+                "finish_reason": None,
             }
-            yield {"type": "done", "key": key}
             if embedding.statistics is not None and embedding.statistics.token_count is not None:
                 token_count = int(embedding.statistics.token_count)
             else:
@@ -584,7 +584,9 @@ class Gemini3_8GenerateContentClient(LLMClient):
                 prompt_tokens = (prompt_tokens or 0) + token_count
 
         yield {
-            "type": "finish",
+            "role": "assistant",
+            "event_type": "stop",
+            "content_items": [],
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": prompt_tokens,
@@ -598,11 +600,11 @@ class Gemini3_8GenerateContentClient(LLMClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         """Stream generate using Gemini SDK with unified conversion methods."""
         if "embedding" in self._model.lower():
-            async for part in self._embed_messages_internal(messages, config):
-                yield part
+            async for event in self._embed_messages_internal(messages, config):
+                yield event
             return
 
         gemini_config = self.transform_uni_config_to_model_config(config)
@@ -633,35 +635,34 @@ class Gemini3_8GenerateContentClient(LLMClient):
         open_field = None
         saw_function_call = False
         async for chunk in response_stream:
-            for part in self.transform_model_output_to_client_parts(chunk):
-                if part["type"] != "delta":
-                    # generateContent reports STOP for a turn that stopped to call tools
-                    if part.get("finish_reason") == "stop" and saw_function_call:
-                        yield {**part, "finish_reason": "tool_call"}
-                    else:
-                        yield part
-
-                    continue
-
-                item = part["item"]
+            event = self.transform_model_output_to_uni_event(chunk)
+            content_items: list[EventContentItem] = []
+            for item in event["content_items"]:
                 own_item = item["type"] in ("tool_call.delta", "inline_thinking.delta") or (
                     item["type"] == "inline_data.delta" and item["mime_type"].startswith("image/")
                 )
-                if part["key"] != open_field or own_item:
+                if item["fidelity"]["item_id"] != open_field or own_item:
                     if open_field is not None:
-                        yield {"type": "done", "key": str(item_index)}
+                        content_items.append(done_marker(str(item_index)))
 
                     item_index += 1
-                    open_field = part["key"]
+                    open_field = item["fidelity"]["item_id"]
 
                 if item["type"] == "tool_call.delta":
                     saw_function_call = True
 
-                yield {**part, "key": str(item_index)}
+                item["fidelity"]["item_id"] = str(item_index)
+                content_items.append(item)
                 # a thoughtSignature is the last thing the API says about a part: it closes the item it rides on
-                if own_item or item.get("fidelity"):
-                    yield {"type": "done", "key": str(item_index)}
+                if own_item or "signature" in item["fidelity"]:
+                    content_items.append(done_marker(str(item_index)))
                     open_field = None
+
+            # generateContent reports STOP for a turn that stopped to call tools
+            finish_reason = (
+                "tool_call" if event["finish_reason"] == "stop" and saw_function_call else event["finish_reason"]
+            )
+            yield {**event, "content_items": content_items, "finish_reason": finish_reason}
 
     async def list_models(self) -> list[str]:
         """

@@ -23,7 +23,8 @@ def assert_stream_grammar(events: list[UniEvent]) -> None:
     Delta events carry one item each, then exactly one stop event carries usage and a finish
     reason; every item streams as contiguous deltas closed by its done item; at most one delta
     of an item carries fidelity, equal to the done item's; the done item holds what its deltas
-    streamed; the first tool_call.delta names the call.
+    streamed; the first tool_call.delta names the call; no item carries the fidelity.item_id a
+    client identifies its items with.
     """
     assert len(events) > 0
     stop = events[-1]
@@ -40,6 +41,7 @@ def assert_stream_grammar(events: list[UniEvent]) -> None:
         assert len(event["content_items"]) == 1
 
         item = event["content_items"][0]
+        assert "item_id" not in (item.get("fidelity") or {})
         kind, _, phase = item["type"].partition(".")
         assert phase in ("delta", "done")
         if open_deltas:

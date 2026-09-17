@@ -16,8 +16,8 @@ import os
 from typing import Any, AsyncIterator
 
 from .abort_signal import AbortSignal
-from .base_client import ClientPart, LLMClient
-from .types import UniConfig, UniEvent, UniMessage
+from .base_client import LLMClient
+from .types import UniConfig, UniDeltaEvent, UniEvent, UniMessage, UniStopEvent
 
 
 # The generic protocol clients are named explicitly rather than deduced from a model id.
@@ -158,9 +158,9 @@ class AutoLLMClient(LLMClient):
         # service-account JSON, told apart by the test both clients' constructors apply, speaks generateContent
         # unless Interactions is pinned. The pin and the key are checked first, so that no other client pays
         # for importing the Gemini SDK.
-        vertex = (api_key or os.getenv("GEMINI_API_KEY") or "").startswith("{")
+        is_vertex_ai = (api_key or os.getenv("GEMINI_API_KEY") or "").startswith("{")
         if "gemini-generate-content" in (client_type or "") or (
-            vertex and "gemini-interactions" not in (client_type or "")
+            is_vertex_ai and "gemini-interactions" not in (client_type or "")
         ):
             from .gemini3_8 import Gemini3_8Client
             from .gemini3_8_generate_content import Gemini3_8GenerateContentClient
@@ -178,15 +178,15 @@ class AutoLLMClient(LLMClient):
         """Delegate to underlying client's transform_uni_message_to_model_input."""
         return self._client.transform_uni_message_to_model_input(messages)
 
-    def transform_model_output_to_client_parts(self, model_output: Any) -> list[ClientPart]:
-        """Delegate to underlying client's transform_model_output_to_client_parts."""
-        return self._client.transform_model_output_to_client_parts(model_output)
+    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
+        """Delegate to underlying client's transform_model_output_to_uni_event."""
+        return self._client.transform_model_output_to_uni_event(model_output)
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         raise NotImplementedError("Please use streaming_response instead.")
 
     async def streaming_response(
@@ -194,7 +194,7 @@ class AutoLLMClient(LLMClient):
         messages: list[UniMessage],
         config: UniConfig,
         signal: AbortSignal | None = None,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[UniDeltaEvent | UniStopEvent]:
         """Route to underlying client's streaming_response."""
         async for event in self._client.streaming_response(
             messages=messages,
@@ -208,7 +208,7 @@ class AutoLLMClient(LLMClient):
         message: UniMessage,
         config: UniConfig,
         signal: AbortSignal | None = None,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[UniDeltaEvent | UniStopEvent]:
         """Route to underlying client's streaming_response_stateful."""
         async for event in self._client.streaming_response_stateful(
             message=message,

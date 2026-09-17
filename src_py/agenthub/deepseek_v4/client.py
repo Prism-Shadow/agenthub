@@ -20,14 +20,19 @@ from typing import Any, AsyncIterator
 from openai import AsyncOpenAI
 from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 
-from ..base_client import ClientPart, LLMClient
+from ..base_client import LLMClient, done_marker
 from ..errors import UnsupportedParameterError
 from ..types import (
+    EventContentItem,
+    EventType,
+    FinishReason,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
     UniConfig,
+    UniEvent,
     UniMessage,
+    UsageMetadata,
 )
 from ..utils import is_debug_enabled
 
@@ -228,103 +233,96 @@ class DeepSeekV4Client(LLMClient):
 
         return input_list
 
-    def transform_model_output_to_client_parts(self, model_output: ResponseStreamEvent) -> list[ClientPart]:
+    def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
         """
-        Transform one DeepSeek streaming event into client parts, keyed by output item id.
+        Transform one DeepSeek streaming event into a universal event, identifying items by output item id.
 
         Args:
             model_output: Responses API streaming event
 
         Returns:
-            The parts the event carries, none when it carries nothing universal
+            Universal event dictionary, an empty delta event when the wire event carries nothing universal
         """
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
+        usage_metadata: UsageMetadata | None = None
+        finish_reason: FinishReason | None = None
+
         deepseek_event_type = model_output.type
         if deepseek_event_type == "response.output_text.delta":
-            return [
+            content_items.append(
                 {
-                    "type": "delta",
-                    "key": getattr(model_output, "item_id", None),
-                    "item": {"type": "text.delta", "text": model_output.delta},
+                    "type": "text.delta",
+                    "text": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
-            ]
+            )
 
         elif deepseek_event_type == "response.reasoning_text.delta":
-            return [
+            content_items.append(
                 {
-                    "type": "delta",
-                    "key": getattr(model_output, "item_id", None),
-                    "item": {"type": "thinking.delta", "thinking": model_output.delta},
+                    "type": "thinking.delta",
+                    "thinking": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
-            ]
+            )
 
         elif deepseek_event_type == "response.output_item.added":
             # every item is announced with a delta, empty unless it carries the call, so a fragment
             # a server sends without its item id belongs to the item announced last
             item = model_output.item
             if item.type == "function_call":
-                return [
+                content_items.append(
                     {
-                        "type": "delta",
+                        "type": "tool_call.delta",
+                        "name": item.name,
+                        "arguments": "",
+                        "tool_call_id": item.call_id,
                         # a server that sends no item id still sends the call id
-                        "key": item.id or item.call_id,
-                        "item": {
-                            "type": "tool_call.delta",
-                            "name": item.name,
-                            "arguments": "",
-                            "tool_call_id": item.call_id,
-                        },
+                        "fidelity": {"item_id": item.id or item.call_id},
                     }
-                ]
+                )
             elif item.type == "message":
-                return [
-                    {"type": "delta", "key": getattr(item, "id", None), "item": {"type": "text.delta", "text": ""}}
-                ]
+                content_items.append(
+                    {"type": "text.delta", "text": "", "fidelity": {"item_id": getattr(item, "id", None)}}
+                )
             elif item.type == "reasoning":
-                return [
-                    {
-                        "type": "delta",
-                        "key": getattr(item, "id", None),
-                        "item": {"type": "thinking.delta", "thinking": ""},
-                    }
-                ]
-
-            return []
+                content_items.append(
+                    {"type": "thinking.delta", "thinking": "", "fidelity": {"item_id": getattr(item, "id", None)}}
+                )
 
         elif deepseek_event_type == "response.output_item.done":
             item = model_output.item
             if item.type == "function_call":
-                return [{"type": "done", "key": item.id or item.call_id}]
+                content_items.append(done_marker(item.id or item.call_id))
             elif item.type in ("message", "reasoning"):
-                return [{"type": "done", "key": getattr(item, "id", None)}]
-
-            return []
+                content_items.append(done_marker(getattr(item, "id", None)))
 
         elif deepseek_event_type == "response.function_call_arguments.delta":
-            return [
+            content_items.append(
                 {
-                    "type": "delta",
-                    "key": getattr(model_output, "item_id", None),
-                    "item": {
-                        "type": "tool_call.delta",
-                        "name": "",
-                        "arguments": model_output.delta,
-                        "tool_call_id": "",
-                    },
+                    "type": "tool_call.delta",
+                    "name": "",
+                    "arguments": model_output.delta,
+                    "tool_call_id": "",
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
-            ]
+            )
 
         elif deepseek_event_type == "response.function_call_arguments.done":
             # the call's output_item.done completes it instead: its item still names the call where
             # a server leaves the item id off this event, and a call whose output_item.done never
             # arrives is completed when the stream ends
-            return []
+            pass
 
         elif deepseek_event_type in ("response.completed", "response.incomplete"):
+            event_type = "stop"
             finish_reason_mapping = {
                 "completed": "stop",
                 "incomplete": "length",
             }
-            usage_metadata = None
+            finish_reason = finish_reason_mapping.get(model_output.response.status, "unknown")
+
             if model_output.response.usage:
                 input_details = model_output.response.usage.input_tokens_details
                 output_details = model_output.response.usage.output_tokens_details
@@ -337,14 +335,6 @@ class DeepSeekV4Client(LLMClient):
                     "response_tokens": model_output.response.usage.output_tokens - reasoning_tokens,
                 }
 
-            return [
-                {
-                    "type": "finish",
-                    "usage_metadata": usage_metadata,
-                    "finish_reason": finish_reason_mapping.get(model_output.response.status, "unknown"),
-                }
-            ]
-
         elif deepseek_event_type in (
             "response.created",
             "response.in_progress",
@@ -354,7 +344,8 @@ class DeepSeekV4Client(LLMClient):
             "response.content_part.done",
             "keepalive",  # gateway heartbeat on long generations; carries no content
         ):
-            return []
+            # lifecycle events, and repeats of what the deltas carry
+            pass
 
         elif is_debug_enabled():
             raise ValueError(f"Unknown output: {model_output}")
@@ -362,13 +353,21 @@ class DeepSeekV4Client(LLMClient):
         else:
             # a gateway injects its own events (heartbeats, cost tickers) into the stream, and
             # killing a long generation over one costs more than dropping it
-            return []
+            pass
+
+        return {
+            "role": "assistant",
+            "event_type": event_type,
+            "content_items": content_items,
+            "usage_metadata": usage_metadata,
+            "finish_reason": finish_reason,
+        }
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         """Stream generate using DeepSeek's OpenAI-compatible Responses API."""
         # Use unified config conversion
         deepseek_config = self.transform_uni_config_to_model_config(config)
@@ -376,38 +375,43 @@ class DeepSeekV4Client(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # A server may leave the item ids out. A part without one belongs to the item announced or
+        # A server may leave the item ids out. An item without one belongs to the item announced or
         # streamed last while that item is open and of the same kind, and starts an item of its own
         # otherwise; an argument fragment whose id names no announced call counts as one without.
         announced_calls: set[str] = set()
-        last_key = ""
+        last_id = ""
         last_type = ""
         unkeyed_items = 0
 
         # Stream generate
         stream = await self._client.responses.create(**deepseek_config, input=input_list, stream=True)
         async for model_event in stream:
-            for part in self.transform_model_output_to_client_parts(model_event):
-                if part["type"] == "delta":
-                    item = part["item"]
-                    if item["type"] == "tool_call.delta" and item["tool_call_id"]:
-                        announced_calls.add(part["key"])
-                    elif not part["key"] or (item["type"] == "tool_call.delta" and part["key"] not in announced_calls):
-                        if last_type == item["type"]:
-                            part["key"] = last_key
-                        else:
-                            part["key"] = f"unkeyed-{unkeyed_items}"
-                            unkeyed_items += 1
-                    last_key = part["key"]
-                    last_type = item["type"]
-                elif part["type"] == "done":
-                    if not part["key"] and not last_key:
+            event = self.transform_model_output_to_uni_event(model_event)
+            content_items: list[EventContentItem] = []
+            for item in event["content_items"]:
+                fidelity = item["fidelity"]
+                if item["type"].endswith(".done"):
+                    if not fidelity["item_id"] and not last_id:
                         continue
-                    part["key"] = part["key"] or last_key
-                    if part["key"] == last_key:
-                        last_key = ""
+                    fidelity["item_id"] = fidelity["item_id"] or last_id
+                    if fidelity["item_id"] == last_id:
+                        last_id = ""
                         last_type = ""
-                yield part
+                else:
+                    if item["type"] == "tool_call.delta" and item["tool_call_id"]:
+                        announced_calls.add(fidelity["item_id"])
+                    elif not fidelity["item_id"] or (
+                        item["type"] == "tool_call.delta" and fidelity["item_id"] not in announced_calls
+                    ):
+                        if last_type == item["type"]:
+                            fidelity["item_id"] = last_id
+                        else:
+                            fidelity["item_id"] = f"unkeyed-{unkeyed_items}"
+                            unkeyed_items += 1
+                    last_id = fidelity["item_id"]
+                    last_type = item["type"]
+                content_items.append(item)
+            yield {**event, "content_items": content_items}
 
     async def list_models(self) -> list[str]:
         """

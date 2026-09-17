@@ -17,7 +17,7 @@ import time
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal, NotRequired, TypedDict
+from typing import Any, AsyncIterator, Iterator
 
 from .abort_signal import AbortSignal
 from .errors import EmptyResponseError, StreamProtocolError, parse_tool_call_arguments
@@ -28,6 +28,7 @@ from .types import (
     EventContentItem,
     Fidelity,
     FinishReason,
+    TextDoneItem,
     UniConfig,
     UniDeltaEvent,
     UniEvent,
@@ -37,44 +38,13 @@ from .types import (
 )
 
 
-# What a client makes of its provider's stream; only the base class turns it into UniEvents.
+def done_marker(item_id: str) -> TextDoneItem:
+    """The item under item_id is complete: the base builds its done item from the deltas it streamed.
 
-
-class ClientDeltaPart(TypedDict):
-    """A fragment of the item identified by `key`.
-
-    The key is the provider's own identity for the item (a block index, an output item id, a
-    step index). A key is never reused once done.
+    Not every provider names the kind where an item ends (Anthropic content_block_stop, Interactions
+    step.stop), so a marker is a text.done the base reads only for its item_id.
     """
-
-    type: Literal["delta"]
-    key: str
-    item: DeltaContentItem
-
-
-class ClientDonePart(TypedDict):
-    """The item identified by `key` is complete.
-
-    Items still open when the provider's stream ends are completed by the base class.
-    """
-
-    type: Literal["done"]
-    key: str
-
-
-class ClientFinishPart(TypedDict):
-    """How the response finished.
-
-    It may arrive in pieces; a non-null field overwrites the one recorded before, including each
-    UsageMetadata field on its own.
-    """
-
-    type: Literal["finish"]
-    usage_metadata: NotRequired[UsageMetadata | None]
-    finish_reason: NotRequired[FinishReason | None]
-
-
-ClientPart = ClientDeltaPart | ClientDonePart | ClientFinishPart
+    return {"type": "text.done", "text": "", "fidelity": {"item_id": item_id}}
 
 
 def _has_fidelity(fidelity: Fidelity | None) -> bool:
@@ -119,7 +89,7 @@ class _ItemGroup:
 
 
 class _StreamAssembler:
-    """Turns client parts into the public stream.
+    """Turns the universal events a client makes of its provider's stream into the public stream.
 
     Every item streams as contiguous deltas closed by its done item, and items never interleave,
     so a caller attributes each delta to the item streaming at that moment. An item that starts
@@ -131,6 +101,7 @@ class _StreamAssembler:
         self._order: list[str] = []
         self._groups: dict[str, _ItemGroup] = {}
         self._finished_keys: set[str] = set()
+        self._embedding_count = 0
         self._usage_metadata: UsageMetadata | None = None
         self._finish_reason: FinishReason | None = None
         self.done_items: list[ContentItem] = []
@@ -138,27 +109,43 @@ class _StreamAssembler:
     def _protocol_error(self, message: str) -> StreamProtocolError:
         return StreamProtocolError(self._client, message)
 
-    def push(self, part: ClientPart) -> list[UniDeltaEvent]:
-        if part["type"] == "delta":
-            return self._push_delta(part["key"], part["item"])
+    def push(self, event: UniEvent) -> Iterator[UniDeltaEvent]:
+        # a generator, so the events of an item reach the caller even when a later item of the same
+        # wire event fails, as a whole tool call followed by its done marker does on bad arguments
+        if event["event_type"] == "delta" and (
+            event["usage_metadata"] is not None or event["finish_reason"] is not None
+        ):
+            raise self._protocol_error("a delta event carries usage_metadata or finish_reason")
 
-        if part["type"] == "done":
-            if part["key"] in self._finished_keys:
-                raise self._protocol_error(f"item {part['key']} was done twice")
+        for item in event["content_items"]:
+            if item["type"] == "embedding.delta":
+                # a vector is complete in itself, so the base names its item and closes it at once
+                key = f"embedding:{self._embedding_count}"
+                self._embedding_count += 1
+                yield from self._push_delta(key, item)
+                yield from self._push_done(key)
+                continue
 
-            group = self._groups.get(part["key"])
-            if group is None:
-                # an item that never produced content has nothing to close
-                self._finished_keys.add(part["key"])
-                return []
+            # item_id is stripped before any other rule runs, so it never reaches the public stream
+            fidelity = dict(item.get("fidelity") or {})
+            item_id = fidelity.pop("item_id", None)
+            if not isinstance(item_id, str) or item_id == "":
+                raise self._protocol_error(f"{item['type']} carries no fidelity.item_id")
 
-            if group.closed:
-                raise self._protocol_error(f"item {part['key']} was done twice")
+            if item["type"].endswith(".done"):
+                if _has_fidelity(fidelity):
+                    raise self._protocol_error(f"the done marker of item {item_id} carries fidelity beyond item_id")
 
-            group.closed = True
-            return self._flush()
+                yield from self._push_done(item_id)
+                continue
 
-        if part.get("usage_metadata") is not None:
+            if _has_fidelity(fidelity):
+                stripped = {**item, "fidelity": fidelity}
+            else:
+                stripped = {field_name: value for field_name, value in item.items() if field_name != "fidelity"}
+            yield from self._push_delta(item_id, stripped)
+
+        if event["usage_metadata"] is not None:
             if self._usage_metadata is None:
                 self._usage_metadata = {
                     "cached_tokens": None,
@@ -167,13 +154,27 @@ class _StreamAssembler:
                     "response_tokens": None,
                 }
             for usage_field in ("cached_tokens", "prompt_tokens", "thoughts_tokens", "response_tokens"):
-                if part["usage_metadata"].get(usage_field) is not None:
-                    self._usage_metadata[usage_field] = part["usage_metadata"][usage_field]
+                if event["usage_metadata"].get(usage_field) is not None:
+                    self._usage_metadata[usage_field] = event["usage_metadata"][usage_field]
 
-        if part.get("finish_reason"):
-            self._finish_reason = part["finish_reason"]
+        if event["finish_reason"]:
+            self._finish_reason = event["finish_reason"]
 
-        return []
+    def _push_done(self, key: str) -> list[UniDeltaEvent]:
+        if key in self._finished_keys:
+            raise self._protocol_error(f"item {key} was done twice")
+
+        group = self._groups.get(key)
+        if group is None:
+            # an item that never produced content has nothing to close
+            self._finished_keys.add(key)
+            return []
+
+        if group.closed:
+            raise self._protocol_error(f"item {key} was done twice")
+
+        group.closed = True
+        return self._flush()
 
     def _push_delta(self, key: str, item: DeltaContentItem) -> list[UniDeltaEvent]:
         kind = item["type"].removesuffix(".delta")
@@ -352,15 +353,24 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def transform_model_output_to_client_parts(self, model_output: Any) -> list[ClientPart]:
+    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
         """
-        Transform one event of the provider's stream into client parts.
+        Transform one event of the provider's stream into a universal event, which the base class
+        narrows into the public stream.
+
+        content_items holds any number of items in wire order — `.delta` fragments and done markers,
+        each carrying `fidelity.item_id`, the provider's identity for the item (a block index, an
+        output item id, a step index and run), except `embedding.delta`, which is complete in itself.
+        event_type is "stop" on the wire events that report usage_metadata and/or finish_reason, in
+        pieces the base class merges field by field, and "delta" otherwise; a "delta" event carries
+        neither.
 
         Args:
             model_output: Model-specific output object (streaming chunk)
 
         Returns:
-            The parts the event carries, none when it carries nothing universal
+            Universal event dictionary, an empty delta event when the wire event carries nothing
+            universal
         """
         pass
 
@@ -376,7 +386,7 @@ class LLMClient(ABC):
             usage, finish reason and timestamp of the stop event
         """
         content_items: list[ContentItem] = []
-        stop_event: UniStopEvent | None = None
+        stop_event: UniEvent | None = None
         for event in events:
             if event["event_type"] == "stop":
                 stop_event = event
@@ -399,19 +409,19 @@ class LLMClient(ABC):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         """
         Internal method to handle streaming response.
 
-        Each model client implements it to send the request and yield the client parts of the
-        provider's stream; streaming_response assembles them into universal events.
+        Each model client implements it to send the request and yield one universal event per event
+        of the provider's stream; streaming_response assembles them into the public stream.
 
         Args:
             messages: List of universal message dictionaries
             config: Universal configuration dict
 
         Yields:
-            Client parts of the streaming response
+            Universal events of the streaming response
         """
         pass
 
@@ -429,7 +439,7 @@ class LLMClient(ABC):
         messages: list[UniMessage],
         config: UniConfig,
         signal: AbortSignal | None = None,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[UniDeltaEvent | UniStopEvent]:
         """
         Generate content in streaming mode (stateless).
 
@@ -481,7 +491,7 @@ class LLMClient(ABC):
                         waiting_for_stream = True
                         signal.throw_if_aborted()
 
-                    part = await anext(stream)
+                    event = await anext(stream)
                 except StopAsyncIteration:
                     break
                 except asyncio.CancelledError:
@@ -491,8 +501,8 @@ class LLMClient(ABC):
                 finally:
                     waiting_for_stream = False
 
-                for event in assembler.push(part):
-                    yield event
+                for delta_event in assembler.push(event):
+                    yield delta_event
         finally:
             if abort_task is not None and not abort_task.done():
                 abort_task.cancel()
@@ -525,7 +535,7 @@ class LLMClient(ABC):
         message: UniMessage,
         config: UniConfig,
         signal: AbortSignal | None = None,
-    ) -> AsyncIterator[UniEvent]:
+    ) -> AsyncIterator[UniDeltaEvent | UniStopEvent]:
         """
         Generate content in streaming mode (stateful).
 

@@ -67,6 +67,15 @@ GENERATE_CONTENT_STREAM_CASES = [
 
 MESSAGES = [{"role": "user", "content_items": [{"type": "text.done", "text": "Create a memo."}]}]
 
+# what a client makes of a wire event that carries nothing universal
+EMPTY_EVENT = {
+    "role": "assistant",
+    "event_type": "delta",
+    "content_items": [],
+    "usage_metadata": None,
+    "finish_reason": None,
+}
+
 
 def _create_auto_client(case: StreamCase) -> AutoLLMClient:
     return AutoLLMClient(model=case.model, api_key="test-key", client_type=case.client_type)
@@ -382,7 +391,7 @@ async def test_responses_clients_skip_foreign_gateway_events(case: StreamCase):
 @pytest.mark.parametrize("case", RESPONSES_STREAM_CASES, ids=[case.client_type for case in RESPONSES_STREAM_CASES])
 async def test_responses_clients_skip_unknown_events(case: StreamCase, event_factory: Callable[[], object]):
     client = _create_auto_client(case)
-    assert client.transform_model_output_to_client_parts(event_factory()) == []
+    assert client.transform_model_output_to_uni_event(event_factory()) == EMPTY_EVENT
     _install_fake_responses_stream(
         client,
         [event_factory(), *[_responses_text_delta_event("Here is"), _responses_completed_event()]],
@@ -486,7 +495,7 @@ async def test_messages_clients_skip_foreign_gateway_events(case: StreamCase):
 @pytest.mark.parametrize("case", MESSAGES_STREAM_CASES, ids=[case.client_type for case in MESSAGES_STREAM_CASES])
 async def test_messages_clients_skip_unknown_events(case: StreamCase, event_factory: Callable[[], object]):
     client = _create_auto_client(case)
-    assert client.transform_model_output_to_client_parts(event_factory()) == []
+    assert client.transform_model_output_to_uni_event(event_factory()) == EMPTY_EVENT
     _install_fake_messages_stream(
         client,
         [event_factory(), *[_messages_start_event(), _messages_text_delta_event("Here is"), _messages_stop_event()]],
@@ -545,7 +554,7 @@ async def test_gemini_client_skips_keepalive_heartbeats(case: StreamCase):
 @pytest.mark.parametrize("case", GEMINI_STREAM_CASES, ids=[case.client_type for case in GEMINI_STREAM_CASES])
 async def test_gemini_client_skips_unknown_deltas(case: StreamCase):
     client = _create_auto_client(case)
-    assert client.transform_model_output_to_client_parts(_gemini_unknown_delta_event()) == []
+    assert client.transform_model_output_to_uni_event(_gemini_unknown_delta_event()) == EMPTY_EVENT
     _install_fake_gemini_stream(
         client,
         [_gemini_unknown_delta_event(), _gemini_text_delta_event("Here is"), _gemini_completed_event()],
@@ -682,7 +691,7 @@ async def test_generate_content_client_skips_keepalive_heartbeats(case: StreamCa
 )
 async def test_generate_content_client_skips_unknown_parts(case: StreamCase):
     client = _create_auto_client(case)
-    assert client.transform_model_output_to_client_parts(_generate_content_unknown_part_chunk()) == []
+    assert client.transform_model_output_to_uni_event(_generate_content_unknown_part_chunk()) == EMPTY_EVENT
     _install_fake_generate_content_stream(
         client,
         [
@@ -770,13 +779,13 @@ IGNORABLE_EVENT_CASES = [
     IGNORABLE_EVENT_CASES,
     ids=[case.client_type for case, _installer, _stream in IGNORABLE_EVENT_CASES],
 )
-async def test_clients_turn_ignorable_events_into_no_parts(
+async def test_clients_turn_ignorable_events_into_empty_events(
     case: StreamCase, installer: Callable[[AutoLLMClient, list[object]], None], stream: list[object], monkeypatch
 ):
     # with the debug guard on, an event the client did not know would raise instead of passing
     monkeypatch.setenv("AGENTHUB_DEBUG", "1")
     client = _create_auto_client(case)
-    assert client.transform_model_output_to_client_parts(stream[0]) == []
+    assert client.transform_model_output_to_uni_event(stream[0]) == EMPTY_EVENT
     installer(client, stream)
 
     events = [event async for event in client.streaming_response(MESSAGES, {})]

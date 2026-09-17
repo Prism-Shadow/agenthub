@@ -19,18 +19,22 @@ import {
   BetaRawMessageStreamEvent,
 } from "@anthropic-ai/sdk/resources/beta/messages";
 import { Stream } from "@anthropic-ai/sdk/core/streaming";
-import { ClientPart, LLMClient } from "../baseClient";
+import { doneMarker, LLMClient } from "../baseClient";
 import {
   UnsupportedOperationError,
   UnsupportedParameterError,
 } from "../errors";
 import {
+  EventContentItem,
+  EventType,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
+  UniEvent,
   UniMessage,
+  UsageMetadata,
 } from "../types";
 import { isDebugEnabled } from "../utils";
 
@@ -373,109 +377,83 @@ export class Claude5Client extends LLMClient {
   }
 
   /**
-   * Transform one Claude stream event into client parts, keyed by content block index.
+   * Transform one Claude stream event into a universal event, identifying items by content
+   * block index.
    */
-  transformModelOutputToClientParts(
+  transformModelOutputToUniEvent(
     modelOutput: BetaRawMessageStreamEvent,
-  ): ClientPart[] {
+  ): UniEvent {
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
+    let usageMetadata: UsageMetadata | null = null;
+    let finishReason: FinishReason | null = null;
+
     const claudeEventType = modelOutput.type;
     if (claudeEventType === "content_block_start") {
-      const key = String(modelOutput.index);
+      const itemId = String(modelOutput.index);
       const block = modelOutput.content_block;
       if (block.type === "tool_use") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "tool_call.delta",
-              name: block.name,
-              arguments: "",
-              tool_call_id: block.id,
-            },
-          },
-        ];
+        contentItems.push({
+          type: "tool_call.delta",
+          name: block.name,
+          arguments: "",
+          tool_call_id: block.id,
+          fidelity: { item_id: itemId },
+        });
       } else if (block.type === "redacted_thinking") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "thinking.delta",
-              thinking: REDACTED_THINKING,
-              fidelity: { signature: block.data },
-            },
-          },
-        ];
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: REDACTED_THINKING,
+          fidelity: { item_id: itemId, signature: block.data },
+        });
       }
-      return [];
     } else if (claudeEventType === "content_block_delta") {
-      const key = String(modelOutput.index);
+      const itemId = String(modelOutput.index);
       const delta = modelOutput.delta;
       if (delta.type === "thinking_delta") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: { type: "thinking.delta", thinking: delta.thinking },
-          },
-        ];
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: delta.thinking,
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "text_delta") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: { type: "text.delta", text: delta.text },
-          },
-        ];
+        contentItems.push({
+          type: "text.delta",
+          text: delta.text,
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "input_json_delta") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "tool_call.delta",
-              name: "",
-              arguments: delta.partial_json,
-              tool_call_id: "",
-            },
-          },
-        ];
+        contentItems.push({
+          type: "tool_call.delta",
+          name: "",
+          arguments: delta.partial_json,
+          tool_call_id: "",
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "signature_delta") {
         // the signature closes the thinking block it belongs to
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "thinking.delta",
-              thinking: "",
-              fidelity: { signature: delta.signature },
-            },
-          },
-        ];
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: itemId, signature: delta.signature },
+        });
       }
-      return [];
     } else if (claudeEventType === "content_block_stop") {
-      return [{ type: "done", key: String(modelOutput.index) }];
+      contentItems.push(doneMarker(String(modelOutput.index)));
     } else if (claudeEventType === "message_start") {
+      eventType = "stop";
       const usage = modelOutput.message.usage;
-      if (!usage) {
-        return [];
+      if (usage) {
+        const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
+        usageMetadata = {
+          cached_tokens: usage.cache_read_input_tokens || null,
+          prompt_tokens: usage.input_tokens + cacheCreationTokens,
+          thoughts_tokens: null,
+          response_tokens: null,
+        };
       }
-      const cacheCreationTokens = usage.cache_creation_input_tokens || 0;
-      return [
-        {
-          type: "finish",
-          usage_metadata: {
-            cached_tokens: usage.cache_read_input_tokens || null,
-            prompt_tokens: usage.input_tokens + cacheCreationTokens,
-            thoughts_tokens: null,
-            response_tokens: null,
-          },
-        },
-      ];
     } else if (claudeEventType === "message_delta") {
+      eventType = "stop";
       const stopReasonMapping: { [key: string]: FinishReason } = {
         end_turn: "stop",
         max_tokens: "length",
@@ -483,23 +461,19 @@ export class Claude5Client extends LLMClient {
         tool_use: "tool_call",
       };
       const stopReason = modelOutput.delta.stop_reason;
-      return [
-        {
-          type: "finish",
-          finish_reason: stopReason
-            ? stopReasonMapping[stopReason] || "unknown"
-            : null,
-          // message_delta reports the output tokens; the input side came with message_start
-          usage_metadata: modelOutput.usage
-            ? {
-                cached_tokens: null,
-                prompt_tokens: null,
-                thoughts_tokens: null,
-                response_tokens: modelOutput.usage.output_tokens,
-              }
-            : null,
-        },
-      ];
+      if (stopReason) {
+        finishReason = stopReasonMapping[stopReason] || "unknown";
+      }
+
+      if (modelOutput.usage) {
+        // message_delta reports the output tokens; the input side came with message_start
+        usageMetadata = {
+          cached_tokens: null,
+          prompt_tokens: null,
+          thoughts_tokens: null,
+          response_tokens: modelOutput.usage.output_tokens,
+        };
+      }
     } else if (
       [
         "message_stop",
@@ -512,14 +486,20 @@ export class Claude5Client extends LLMClient {
     ) {
       // the SDK drops the "ping" heartbeat at the SSE layer; it reaches here only
       // from gateways that relabel it onto another event
-      return [];
     } else if (isDebugEnabled()) {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     } else {
       // a gateway injects its own events (heartbeats, cost tickers) into the stream, and
       // killing a long generation over one costs more than dropping it
-      return [];
     }
+
+    return {
+      role: "assistant",
+      event_type: eventType,
+      content_items: contentItems,
+      usage_metadata: usageMetadata,
+      finish_reason: finishReason,
+    };
   }
 
   /**
@@ -529,7 +509,7 @@ export class Claude5Client extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     const claudeConfig = this.transformUniConfigToModelConfig(options.config);
     const claudeMessages = await this.transformUniMessageToModelInput(
       options.messages,
@@ -576,7 +556,7 @@ export class Claude5Client extends LLMClient {
     )) as unknown as Stream<BetaRawMessageStreamEvent>;
 
     for await (const event of stream) {
-      yield* this.transformModelOutputToClientParts(event);
+      yield this.transformModelOutputToUniEvent(event);
     }
   }
 

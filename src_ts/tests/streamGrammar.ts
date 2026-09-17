@@ -21,7 +21,8 @@ import { EventContentItem, UniEvent } from "../src/types";
  * delta events carrying one item each, then exactly one stop event with usage and a
  * finish reason; every item streams as contiguous deltas closed by its done item; at most
  * one delta of an item carries fidelity, equal to the done item's; the done item holds
- * what its deltas streamed; the first tool_call.delta names the call.
+ * what its deltas streamed; the first tool_call.delta names the call; no item carries the
+ * fidelity.item_id a client identifies its items with.
  */
 export function assertStreamGrammar(events: UniEvent[]): void {
   expect(events.length).toBeGreaterThan(0);
@@ -39,6 +40,9 @@ export function assertStreamGrammar(events: UniEvent[]): void {
     expect(event.content_items).toHaveLength(1);
 
     const item = event.content_items[0];
+    if ("fidelity" in item && item.fidelity != null) {
+      expect(item.fidelity).not.toHaveProperty("item_id");
+    }
     const [kind, phase] = item.type.split(".");
     expect(["delta", "done"]).toContain(phase);
     if (open.length > 0) {

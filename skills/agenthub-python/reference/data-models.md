@@ -93,7 +93,7 @@ Messages saved before 0.5.0 use item types without the suffix (`text`, `tool_cal
 
 ## UniEvent
 
-`UniEvent` is the streamed output shape: `delta` events while the response is running, then exactly one `stop` event.
+`UniEvent` is the general event shape. A stream yields `UniDeltaEvent` events while the response is running, then exactly one `UniStopEvent`.
 
 ```python
 delta_event = {

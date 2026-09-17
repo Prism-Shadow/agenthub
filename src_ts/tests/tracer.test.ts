@@ -14,9 +14,9 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { ClientPart, LLMClient } from "../src/baseClient";
+import { doneMarker, LLMClient } from "../src/baseClient";
 import { Tracer } from "../src/integration/tracer";
-import { UniMessage } from "../src/types";
+import { EventContentItem, UniEvent, UniMessage } from "../src/types";
 import {
   expect,
   describe,
@@ -27,12 +27,12 @@ import {
 } from "@jest/globals";
 
 /**
- * A client whose provider stream is a fixed list of parts. The tracer hook lives in the base
+ * A client whose provider stream is a fixed list of events. The tracer hook lives in the base
  * class's streamingResponse, above this seam, so a traced response runs for real without a
  * network or an API key.
  */
 class ScriptedClient extends LLMClient {
-  constructor(private readonly parts: ClientPart[]) {
+  constructor(private readonly events: UniEvent[]) {
     super();
     this._model = "fake-model";
   }
@@ -45,13 +45,13 @@ class ScriptedClient extends LLMClient {
     return messages;
   }
 
-  transformModelOutputToClientParts(modelOutput: ClientPart): ClientPart[] {
-    return [modelOutput];
+  transformModelOutputToUniEvent(modelOutput: UniEvent): UniEvent {
+    return modelOutput;
   }
 
-  async *_streamingResponseInternal(): AsyncGenerator<ClientPart> {
-    for (const part of this.parts) {
-      yield* this.transformModelOutputToClientParts(part);
+  async *_streamingResponseInternal(): AsyncGenerator<UniEvent> {
+    for (const event of this.events) {
+      yield this.transformModelOutputToUniEvent(event);
     }
   }
 
@@ -59,6 +59,29 @@ class ScriptedClient extends LLMClient {
     return [];
   }
 }
+
+function delta(item: EventContentItem): UniEvent {
+  return {
+    role: "assistant",
+    event_type: "delta",
+    content_items: [item],
+    usage_metadata: null,
+    finish_reason: null,
+  };
+}
+
+const STOP: UniEvent = {
+  role: "assistant",
+  event_type: "stop",
+  content_items: [],
+  usage_metadata: {
+    cached_tokens: 0,
+    prompt_tokens: 1,
+    thoughts_tokens: null,
+    response_tokens: 2,
+  },
+  finish_reason: "stop",
+};
 
 describe("Tracer", () => {
   let tempCacheDir: string;
@@ -415,19 +438,10 @@ describe("Tracer", () => {
     const previousCacheDir = process.env.AGENTHUB_CACHE_DIR;
     process.env.AGENTHUB_CACHE_DIR = tempCacheDir;
     const client = new ScriptedClient([
-      { type: "delta", key: "0", item: { type: "text.delta", text: "Hello " } },
-      { type: "delta", key: "0", item: { type: "text.delta", text: "there!" } },
-      { type: "done", key: "0" },
-      {
-        type: "finish",
-        usage_metadata: {
-          cached_tokens: 0,
-          prompt_tokens: 1,
-          thoughts_tokens: null,
-          response_tokens: 2,
-        },
-        finish_reason: "stop",
-      },
+      delta({ type: "text.delta", text: "Hello ", fidelity: { item_id: "0" } }),
+      delta({ type: "text.delta", text: "there!", fidelity: { item_id: "0" } }),
+      delta(doneMarker("0")),
+      STOP,
     ]);
 
     let saved: { history: UniMessage[] } | null = null;
@@ -465,6 +479,50 @@ describe("Tracer", () => {
     ]);
     expect(transcript).toContain("Text: Hello there!");
     expect(transcript).toContain("Finish Reason: stop");
+  });
+
+  test("should save a traced response's fidelity without its item_id", async () => {
+    const previousCacheDir = process.env.AGENTHUB_CACHE_DIR;
+    process.env.AGENTHUB_CACHE_DIR = tempCacheDir;
+    const client = new ScriptedClient([
+      delta({
+        type: "text.delta",
+        text: "Hello",
+        fidelity: { item_id: "0", signature: "s" },
+      }),
+      delta(doneMarker("0")),
+      STOP,
+    ]);
+
+    try {
+      for await (const event of client.streamingResponse({
+        messages: [
+          {
+            role: "user",
+            content_items: [{ type: "text.done", text: "Say hello" }],
+          },
+        ],
+        config: { trace_id: "integration/fidelity" },
+      })) {
+        void event;
+      }
+    } finally {
+      if (previousCacheDir === undefined) {
+        delete process.env.AGENTHUB_CACHE_DIR;
+      } else {
+        process.env.AGENTHUB_CACHE_DIR = previousCacheDir;
+      }
+    }
+
+    const saved = JSON.parse(
+      fs.readFileSync(
+        path.join(tempCacheDir, "integration", "fidelity.json"),
+        "utf-8",
+      ),
+    );
+    expect(saved.history[1].content_items).toEqual([
+      { type: "text.done", text: "Hello", fidelity: { signature: "s" } },
+    ]);
   });
 
   test("should sort directory listing by name", async () => {

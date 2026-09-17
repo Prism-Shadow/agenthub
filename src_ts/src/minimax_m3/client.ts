@@ -17,14 +17,18 @@ import type {
   ResponseCreateParamsStreaming,
   ResponseStreamEvent,
 } from "openai/resources/responses/responses";
-import { ClientPart, LLMClient } from "../baseClient";
+import { doneMarker, LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
 import {
+  EventContentItem,
+  EventType,
+  Fidelity,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
+  UniEvent,
   UniMessage,
   UsageMetadata,
 } from "../types";
@@ -246,47 +250,42 @@ export class MiniMaxM3Client extends LLMClient {
   }
 
   /**
-   * Transform one MiniMax stream event into client parts, keyed by output item id.
+   * Transform one MiniMax stream event into a universal event, identifying items by output item id.
    */
-  transformModelOutputToClientParts(
-    modelOutput: ResponseStreamEvent,
-  ): ClientPart[] {
+  transformModelOutputToUniEvent(modelOutput: ResponseStreamEvent): UniEvent {
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
+    let usageMetadata: UsageMetadata | null = null;
+    let finishReason: FinishReason | null = null;
+
     const minimaxEventType = modelOutput.type;
     if (minimaxEventType === "response.output_text.delta") {
-      return [
-        {
-          type: "delta",
-          key: modelOutput.item_id,
-          item: { type: "text.delta", text: modelOutput.delta },
-        },
-      ];
+      contentItems.push({
+        type: "text.delta",
+        text: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (minimaxEventType === "response.reasoning_text.delta") {
-      return [
-        {
-          type: "delta",
-          key: modelOutput.item_id,
-          item: { type: "thinking.delta", thinking: modelOutput.delta },
-        },
-      ];
+      contentItems.push({
+        type: "thinking.delta",
+        thinking: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (minimaxEventType === "response.output_item.added") {
       // a message or reasoning item is announced with an empty delta, so a fragment a server
       // sends without its item id belongs to the item announced last
       if (modelOutput.item.type === "message") {
-        return [
-          {
-            type: "delta",
-            key: modelOutput.item.id,
-            item: { type: "text.delta", text: "" },
-          },
-        ];
+        contentItems.push({
+          type: "text.delta",
+          text: "",
+          fidelity: { item_id: modelOutput.item.id },
+        });
       } else if (modelOutput.item.type === "reasoning") {
-        return [
-          {
-            type: "delta",
-            key: modelOutput.item.id,
-            item: { type: "thinking.delta", thinking: "" },
-          },
-        ];
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: modelOutput.item.id },
+        });
       }
     } else if (minimaxEventType === "response.output_item.done") {
       // MiniMax's tool calls are read from the completed item alone: the argument deltas are
@@ -296,34 +295,33 @@ export class MiniMaxM3Client extends LLMClient {
       const item = modelOutput.item;
       if (item.type === "function_call") {
         // a server that sends no item id still sends the call id
-        const key = item.id || item.call_id;
-        return [
+        const itemId = item.id || item.call_id;
+        contentItems.push(
           {
-            type: "delta",
-            key,
-            item: {
-              type: "tool_call.delta",
-              name: item.name,
-              // a server may complete a call without its arguments field
-              arguments: item.arguments || "",
-              tool_call_id: item.call_id,
-            },
+            type: "tool_call.delta",
+            name: item.name,
+            // a server may complete a call without its arguments field
+            arguments: item.arguments || "",
+            tool_call_id: item.call_id,
+            fidelity: { item_id: itemId },
           },
-          { type: "done", key },
-        ];
+          doneMarker(itemId),
+        );
       } else if (item.type === "message" || item.type === "reasoning") {
-        return [{ type: "done", key: item.id }];
+        contentItems.push(doneMarker(item.id));
       }
     } else if (
       minimaxEventType === "response.completed" ||
       minimaxEventType === "response.incomplete"
     ) {
+      eventType = "stop";
       const response = modelOutput.response;
       const finishReasonMapping: { [key: string]: FinishReason } = {
         completed: "stop",
         incomplete: "length",
       };
-      let usageMetadata: UsageMetadata | null = null;
+      finishReason = finishReasonMapping[response.status ?? ""] ?? "unknown";
+
       if (response.usage) {
         // MiniMax drops the detail blocks on truncated responses, so default them to zero.
         const cachedTokens =
@@ -337,14 +335,6 @@ export class MiniMaxM3Client extends LLMClient {
           response_tokens: response.usage.output_tokens - reasoningTokens,
         };
       }
-      return [
-        {
-          type: "finish",
-          usage_metadata: usageMetadata,
-          finish_reason:
-            finishReasonMapping[response.status ?? ""] ?? "unknown",
-        },
-      ];
     } else if (
       ![
         "response.created",
@@ -363,7 +353,13 @@ export class MiniMaxM3Client extends LLMClient {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     }
 
-    return [];
+    return {
+      role: "assistant",
+      event_type: eventType,
+      content_items: contentItems,
+      usage_metadata: usageMetadata,
+      finish_reason: finishReason,
+    };
   }
 
   /**
@@ -373,7 +369,7 @@ export class MiniMaxM3Client extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     const minimaxConfig = this.transformUniConfigToModelConfig(options.config);
     const inputList = this.transformUniMessageToModelInput(options.messages);
 
@@ -385,10 +381,10 @@ export class MiniMaxM3Client extends LLMClient {
       stream: true,
     } as ResponseCreateParamsStreaming;
 
-    // A server may leave the item ids out. A part without one belongs to the item announced or
+    // A server may leave the item ids out. An item without one belongs to the item announced or
     // streamed last while that item is open and of the same kind, and starts an item of its own
     // otherwise.
-    let lastKey = "";
+    let lastId = "";
     let lastType = "";
     let unkeyedItems = 0;
 
@@ -396,28 +392,30 @@ export class MiniMaxM3Client extends LLMClient {
       signal: options.signal,
     });
     for await (const event of stream) {
-      for (const part of this.transformModelOutputToClientParts(event)) {
-        if (part.type === "delta") {
-          if (!part.key) {
-            part.key =
-              lastType === part.item.type
-                ? lastKey
-                : `unkeyed-${unkeyedItems++}`;
-          }
-          lastKey = part.key;
-          lastType = part.item.type;
-        } else if (part.type === "done") {
-          if (!part.key && !lastKey) {
+      const uniEvent = this.transformModelOutputToUniEvent(event);
+      const contentItems: EventContentItem[] = [];
+      for (const item of uniEvent.content_items) {
+        const fidelity = (item as { fidelity: Fidelity }).fidelity;
+        if (item.type.endsWith(".done")) {
+          if (!fidelity.item_id && !lastId) {
             continue;
           }
-          part.key = part.key || lastKey;
-          if (part.key === lastKey) {
-            lastKey = "";
+          fidelity.item_id = fidelity.item_id || lastId;
+          if (fidelity.item_id === lastId) {
+            lastId = "";
             lastType = "";
           }
+        } else {
+          if (!fidelity.item_id) {
+            fidelity.item_id =
+              lastType === item.type ? lastId : `unkeyed-${unkeyedItems++}`;
+          }
+          lastId = fidelity.item_id;
+          lastType = item.type;
         }
-        yield part;
+        contentItems.push(item);
       }
+      yield { ...uniEvent, content_items: contentItems };
     }
   }
 

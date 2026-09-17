@@ -20,16 +20,20 @@ import {
   Part,
 } from "@google/genai";
 import * as path from "path";
-import { ClientPart, LLMClient } from "../baseClient";
+import { doneMarker, LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
 import {
-  DeltaContentItem,
+  EventContentItem,
+  EventType,
+  Fidelity,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
+  UniEvent,
   UniMessage,
+  UsageMetadata,
 } from "../types";
 import { isDebugEnabled } from "../utils";
 
@@ -561,11 +565,17 @@ export class Gemini3_8Client extends LLMClient {
   }
 
   /**
-   * Transform one Interactions API stream event into client parts, keyed by step index.
+   * Transform one Interactions API stream event into a universal event, its items identified by
+   * step index.
    */
-  transformModelOutputToClientParts(
+  transformModelOutputToUniEvent(
     modelOutput: Interactions.InteractionSSEEvent,
-  ): ClientPart[] {
+  ): UniEvent {
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
+    let usageMetadata: UsageMetadata | null = null;
+    let finishReason: FinishReason | null = null;
+
     if (modelOutput.event_type === "step.start") {
       const step = modelOutput.step;
       if (step.type === "function_call") {
@@ -574,132 +584,96 @@ export class Gemini3_8Client extends LLMClient {
           Object.keys(step.arguments ?? {}).length > 0
             ? JSON.stringify(step.arguments)
             : "";
-        return [
-          {
-            type: "delta",
-            key: String(modelOutput.index),
-            item: {
-              type: "tool_call.delta",
-              name: step.name,
-              arguments: startArguments,
-              tool_call_id: step.id,
-            },
-          },
-        ];
+        contentItems.push({
+          type: "tool_call.delta",
+          name: step.name,
+          arguments: startArguments,
+          tool_call_id: step.id,
+          fidelity: { item_id: String(modelOutput.index) },
+        });
       } else if (step.type === "thought" || step.type === "model_output") {
-        return [];
+        // their content arrives in the step's deltas
+      } else if (isDebugEnabled()) {
+        throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
       }
     } else if (modelOutput.event_type === "step.delta") {
-      const key = String(modelOutput.index);
+      const itemId = String(modelOutput.index);
       const delta = modelOutput.delta;
-      if (delta.type === "thought_summary") {
-        if (delta.content?.type === "text") {
-          return [
-            {
-              type: "delta",
-              key,
-              item: { type: "thinking.delta", thinking: delta.content.text },
-            },
-          ];
-        } else if (delta.content?.type === "image") {
-          // image models summarize their thinking with interim images too
-          return [
-            {
-              type: "delta",
-              key,
-              item: {
-                type: "inline_thinking.delta",
-                data: Buffer.from(delta.content.data || "", "base64"),
-                mime_type: delta.content.mime_type || "image/jpeg",
-              },
-            },
-          ];
-        }
+      if (delta.type === "thought_summary" && delta.content?.type === "text") {
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: delta.content.text,
+          fidelity: { item_id: itemId },
+        });
+      } else if (
+        delta.type === "thought_summary" &&
+        delta.content?.type === "image"
+      ) {
+        // image models summarize their thinking with interim images too
+        contentItems.push({
+          type: "inline_thinking.delta",
+          data: Buffer.from(delta.content.data || "", "base64"),
+          mime_type: delta.content.mime_type || "image/jpeg",
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "thought_signature") {
         // the signature is the last delta of its thought step
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "thinking.delta",
-              thinking: "",
-              fidelity: { signature: delta.signature },
-            },
-          },
-        ];
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: itemId, signature: delta.signature },
+        });
       } else if (delta.type === "arguments_delta") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "tool_call.delta",
-              name: "",
-              arguments: delta.arguments || "",
-              tool_call_id: "",
-            },
-          },
-        ];
+        contentItems.push({
+          type: "tool_call.delta",
+          name: "",
+          arguments: delta.arguments || "",
+          tool_call_id: "",
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "text") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: { type: "text.delta", text: delta.text },
-          },
-        ];
+        contentItems.push({
+          type: "text.delta",
+          text: delta.text,
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "image") {
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "inline_data.delta",
-              data: Buffer.from(delta.data || "", "base64"),
-              mime_type: delta.mime_type || "image/jpeg",
-            },
-          },
-        ];
+        contentItems.push({
+          type: "inline_data.delta",
+          data: Buffer.from(delta.data || "", "base64"),
+          mime_type: delta.mime_type || "image/jpeg",
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "audio") {
         // TTS streams raw PCM in 40 ms chunks; the MIME type carries the format a player needs
-        return [
-          {
-            type: "delta",
-            key,
-            item: {
-              type: "inline_data.delta",
-              data: Buffer.from(delta.data || "", "base64"),
-              mime_type: `${delta.mime_type}; rate=${delta.sample_rate}; channels=${delta.channels}`,
-            },
-          },
-        ];
+        contentItems.push({
+          type: "inline_data.delta",
+          data: Buffer.from(delta.data || "", "base64"),
+          mime_type: `${delta.mime_type}; rate=${delta.sample_rate}; channels=${delta.channels}`,
+          fidelity: { item_id: itemId },
+        });
+      } else if (isDebugEnabled()) {
+        throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
       }
     } else if (modelOutput.event_type === "step.stop") {
-      return [{ type: "done", key: String(modelOutput.index) }];
+      contentItems.push(doneMarker(String(modelOutput.index)));
     } else if (modelOutput.event_type === "interaction.completed") {
+      eventType = "stop";
       const statusMapping: { [key: string]: FinishReason } = {
         completed: "stop",
         requires_action: "tool_call",
         incomplete: "length",
       };
+      finishReason = statusMapping[modelOutput.interaction.status] || "unknown";
       const usage = modelOutput.interaction.usage;
       // total_input_tokens includes the cached tokens; total_output_tokens excludes the thoughts
-      return [
-        {
-          type: "finish",
-          finish_reason:
-            statusMapping[modelOutput.interaction.status] || "unknown",
-          usage_metadata: {
-            cached_tokens: usage?.total_cached_tokens || null,
-            prompt_tokens:
-              (usage?.total_input_tokens || 0) -
-              (usage?.total_cached_tokens || 0),
-            thoughts_tokens: usage?.total_thought_tokens || null,
-            response_tokens: usage?.total_output_tokens || null,
-          },
-        },
-      ];
+      usageMetadata = {
+        cached_tokens: usage?.total_cached_tokens || null,
+        prompt_tokens:
+          (usage?.total_input_tokens || 0) - (usage?.total_cached_tokens || 0),
+        thoughts_tokens: usage?.total_thought_tokens || null,
+        response_tokens: usage?.total_output_tokens || null,
+      };
     } else if (modelOutput.event_type === "error" && modelOutput.error) {
       // Neither Interactions SDK raises on an error event inside an open stream, so the provider's
       // failure is raised here rather than lost; an error event without an error, which the Python
@@ -712,22 +686,27 @@ export class Gemini3_8Client extends LLMClient {
         modelOutput.event_type,
       )
     ) {
-      return [];
-    }
-
-    if (isDebugEnabled()) {
+      // the interaction's lifecycle carries nothing universal
+    } else if (isDebugEnabled()) {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     }
     // the API adds event, step and delta types over time, and killing a long generation
     // over one costs more than dropping it
-    return [];
+
+    return {
+      role: "assistant",
+      event_type: eventType,
+      content_items: contentItems,
+      usage_metadata: usageMetadata,
+      finish_reason: finishReason,
+    };
   }
 
   private async *_embedMessagesInternal(options: {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     // the Interactions API does not serve embedding models (HTTP 404, verified live
     // 2026-09-16), so they stay on embedContent
     const contents: Content[] = [];
@@ -776,17 +755,14 @@ export class Gemini3_8Client extends LLMClient {
       config: geminiConfig,
     });
 
-    for (const [i, embedding] of (result.embeddings ?? []).entries()) {
-      const key = `embedding:${i}`;
-      yield {
-        type: "delta",
-        key,
-        item: { type: "embedding.delta", embedding: embedding.values ?? [] },
-      };
-      yield { type: "done", key };
-    }
     yield {
-      type: "finish",
+      role: "assistant",
+      event_type: "stop",
+      content_items:
+        result.embeddings?.map((embedding) => ({
+          type: "embedding.delta" as const,
+          embedding: embedding.values ?? [],
+        })) ?? [],
       usage_metadata: {
         cached_tokens: null,
         prompt_tokens: result.metadata?.billableCharacterCount ?? null,
@@ -804,7 +780,7 @@ export class Gemini3_8Client extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     if (this._model.toLowerCase().includes("embedding")) {
       yield* this._embedMessagesInternal(options);
       return;
@@ -839,33 +815,30 @@ export class Gemini3_8Client extends LLMClient {
     );
 
     // A step streams one item per run of a content kind: an image model's thought summary can
-    // go text, image, text, which is three items, so an item's key is its step index and the
+    // go text, image, text, which is three items, so an item's id is its step index and the
     // number of the run within the step. Every image delta is a whole image and a run of its
     // own, while audio streams in chunks of one run.
-    let stepKey = "";
+    let stepId = "";
     let run = 0;
-    let runItem: DeltaContentItem | null = null;
+    let runItem: EventContentItem | null = null;
     for await (const event of stream) {
-      for (const part of this.transformModelOutputToClientParts(event)) {
-        if (part.type === "finish") {
-          yield part;
-          continue;
-        }
-
-        if (part.key !== stepKey) {
-          stepKey = part.key;
+      const uniEvent = this.transformModelOutputToUniEvent(event);
+      const contentItems: EventContentItem[] = [];
+      for (let item of uniEvent.content_items) {
+        const fidelity = (item as { fidelity: Fidelity }).fidelity;
+        if (fidelity.item_id !== stepId) {
+          stepId = fidelity.item_id;
           run = 0;
           runItem = null;
         }
-        if (part.type === "done") {
-          yield { type: "done", key: `${stepKey}.${run}` };
+        if (item.type.endsWith(".done")) {
+          contentItems.push(doneMarker(`${stepId}.${run}`));
           continue;
         }
 
-        let item = part.item;
         if (
           item.type === "thinking.delta" &&
-          item.fidelity &&
+          "signature" in fidelity &&
           runItem?.type === "inline_thinking.delta"
         ) {
           // the signature closes the run its thought step ends with, an image one included
@@ -873,7 +846,7 @@ export class Gemini3_8Client extends LLMClient {
             type: "inline_thinking.delta",
             data: Buffer.alloc(0),
             mime_type: runItem.mime_type,
-            fidelity: item.fidelity,
+            fidelity,
           };
         } else if (
           runItem !== null &&
@@ -882,12 +855,14 @@ export class Gemini3_8Client extends LLMClient {
             (item.type === "inline_data.delta" &&
               item.mime_type.startsWith("image/")))
         ) {
-          yield { type: "done", key: `${stepKey}.${run}` };
+          contentItems.push(doneMarker(`${stepId}.${run}`));
           run += 1;
         }
         runItem = item;
-        yield { type: "delta", key: `${stepKey}.${run}`, item };
+        fidelity.item_id = `${stepId}.${run}`;
+        contentItems.push(item);
       }
+      yield { ...uniEvent, content_items: contentItems };
     }
   }
 

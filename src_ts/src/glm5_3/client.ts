@@ -18,14 +18,18 @@ import type {
   ChatCompletionMessageParam,
   ChatCompletionCreateParamsStreaming,
 } from "openai/resources/chat/completions";
-import { ClientPart, LLMClient } from "../baseClient";
+import { doneMarker, LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
 import {
+  EventContentItem,
+  EventType,
+  Fidelity,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
+  UniEvent,
   UniMessage,
   UsageMetadata,
 } from "../types";
@@ -336,15 +340,16 @@ export class GLM5_3Client extends LLMClient {
   }
 
   /**
-   * Transform one GLM streaming chunk into client parts.
+   * Transform one GLM streaming chunk into a universal event.
    *
-   * Chat Completions gives an item no identity, so each delta is keyed by the wire field
-   * that carried it; _streamingResponseInternal turns those into one key per item.
+   * Chat Completions gives an item no identity, so each delta's item_id is the wire field
+   * that carried it; _streamingResponseInternal turns those into one item id per item.
    */
-  transformModelOutputToClientParts(
-    modelOutput: ChatCompletionChunk,
-  ): ClientPart[] {
-    const parts: ClientPart[] = [];
+  transformModelOutputToUniEvent(modelOutput: ChatCompletionChunk): UniEvent {
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
+    let usageMetadata: UsageMetadata | null = null;
+    let finishReason: FinishReason | null = null;
 
     // gateways inject content-free heartbeat chunks on long generations, whose
     // choices arrive as undefined rather than an empty list
@@ -362,72 +367,64 @@ export class GLM5_3Client extends LLMClient {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const reasoning = (delta as any)?.reasoning;
       if (reasoningContent && reasoning) {
-        // ambiguous origin: record no fidelity so a replay sends both fields back
-        parts.push({
-          type: "delta",
-          key: "reasoning_content",
-          item: { type: "thinking.delta", thinking: reasoningContent },
+        // ambiguous origin: record no reasoning_field so a replay sends both fields back
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: reasoningContent,
+          fidelity: { item_id: "reasoning_content" },
         });
       } else if (reasoningContent) {
-        parts.push({
-          type: "delta",
-          key: "reasoning_content",
-          item: {
-            type: "thinking.delta",
-            thinking: reasoningContent,
-            fidelity: { reasoning_field: "reasoning_content" },
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: reasoningContent,
+          fidelity: {
+            item_id: "reasoning_content",
+            reasoning_field: "reasoning_content",
           },
         });
       } else if (reasoning) {
-        parts.push({
-          type: "delta",
-          key: "reasoning",
-          item: {
-            type: "thinking.delta",
-            thinking: reasoning,
-            fidelity: { reasoning_field: "reasoning" },
-          },
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: reasoning,
+          fidelity: { item_id: "reasoning", reasoning_field: "reasoning" },
         });
       }
 
       if (delta?.content) {
-        parts.push({
-          type: "delta",
-          key: "content",
-          item: { type: "text.delta", text: delta.content },
+        contentItems.push({
+          type: "text.delta",
+          text: delta.content,
+          fidelity: { item_id: "content" },
         });
       }
 
       if (delta?.tool_calls) {
         for (const toolCall of delta.tool_calls) {
-          parts.push({
-            type: "delta",
-            key: "tool_calls",
-            item: {
-              type: "tool_call.delta",
-              name: toolCall.function?.name || "",
-              arguments: toolCall.function?.arguments || "",
-              tool_call_id: toolCall.id || "",
-            },
+          contentItems.push({
+            type: "tool_call.delta",
+            name: toolCall.function?.name || "",
+            arguments: toolCall.function?.arguments || "",
+            tool_call_id: toolCall.id || "",
+            fidelity: { item_id: "tool_calls" },
           });
         }
       }
 
       if (choice?.finish_reason) {
+        eventType = "stop";
         const finishReasonMapping: { [key: string]: FinishReason } = {
           stop: "stop",
           length: "length",
           tool_calls: "tool_call",
           content_filter: "stop",
         };
-        parts.push({
-          type: "finish",
-          finish_reason: finishReasonMapping[choice.finish_reason] || "unknown",
-        });
+        finishReason = finishReasonMapping[choice.finish_reason] || "unknown";
       }
     }
 
     if (modelOutput.usage) {
+      eventType = "stop";
+
       const cachedTokens =
         modelOutput.usage.prompt_tokens_details?.cached_tokens || null;
       const reasoningTokens =
@@ -442,22 +439,25 @@ export class GLM5_3Client extends LLMClient {
           ? modelOutput.usage.completion_tokens - reasoningTokens
           : modelOutput.usage.completion_tokens;
 
-      const usageMetadata: UsageMetadata = {
+      usageMetadata = {
         cached_tokens: cachedTokens,
         prompt_tokens: promptTokens,
         thoughts_tokens: reasoningTokens,
         response_tokens: responseTokens,
       };
-      parts.push({
-        type: "finish",
-        usage_metadata: fixOpenrouterUsageMetadata(
-          usageMetadata,
-          this._client.baseURL,
-        ),
-      });
+      usageMetadata = fixOpenrouterUsageMetadata(
+        usageMetadata,
+        this._client.baseURL,
+      );
     }
 
-    return parts;
+    return {
+      role: "assistant",
+      event_type: eventType,
+      content_items: contentItems,
+      usage_metadata: usageMetadata,
+      finish_reason: finishReason,
+    };
   }
 
   /**
@@ -467,7 +467,7 @@ export class GLM5_3Client extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     const glmConfig = this.transformUniConfigToModelConfig(options.config);
     const glmMessages = this.transformUniMessageToModelInput(
       options.messages,
@@ -496,24 +496,24 @@ export class GLM5_3Client extends LLMClient {
     let itemIndex = -1;
     let openField: string | null = null;
     for await (const chunk of stream) {
-      for (const part of this.transformModelOutputToClientParts(chunk)) {
-        if (part.type !== "delta") {
-          yield part;
-          continue;
-        }
-
+      const event = this.transformModelOutputToUniEvent(chunk);
+      const contentItems: EventContentItem[] = [];
+      for (const item of event.content_items) {
+        const fidelity = (item as { fidelity: Fidelity }).fidelity;
         if (
-          part.key !== openField ||
-          (part.item.type === "tool_call.delta" && part.item.name)
+          fidelity.item_id !== openField ||
+          (item.type === "tool_call.delta" && item.name)
         ) {
           if (openField !== null) {
-            yield { type: "done", key: String(itemIndex) };
+            contentItems.push(doneMarker(String(itemIndex)));
           }
           itemIndex += 1;
-          openField = part.key;
+          openField = fidelity.item_id;
         }
-        yield { ...part, key: String(itemIndex) };
+        fidelity.item_id = String(itemIndex);
+        contentItems.push(item);
       }
+      yield { ...event, content_items: contentItems };
     }
   }
 

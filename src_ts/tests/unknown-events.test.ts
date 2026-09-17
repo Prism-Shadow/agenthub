@@ -118,6 +118,15 @@ const messages: UniMessage[] = [
   },
 ];
 
+// what a client makes of a wire event that carries nothing universal
+const EMPTY_EVENT: UniEvent = {
+  role: "assistant",
+  event_type: "delta",
+  content_items: [],
+  usage_metadata: null,
+  finish_reason: null,
+};
+
 function streamFromEvents(events: unknown[]): AsyncIterable<unknown> {
   return {
     async *[Symbol.asyncIterator]() {
@@ -453,9 +462,9 @@ describe.each(RESPONSES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        expect(
-          client.transformModelOutputToClientParts(unknownEvent()),
-        ).toEqual([]);
+        expect(client.transformModelOutputToUniEvent(unknownEvent())).toEqual(
+          EMPTY_EVENT,
+        );
         installFakeResponsesStream(client, [
           unknownEvent(),
           responsesTextDeltaEvent("Here is"),
@@ -560,9 +569,9 @@ describe.each(MESSAGES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        expect(
-          client.transformModelOutputToClientParts(unknownEvent()),
-        ).toEqual([]);
+        expect(client.transformModelOutputToUniEvent(unknownEvent())).toEqual(
+          EMPTY_EVENT,
+        );
         installFakeMessagesStream(client, [
           unknownEvent(),
           messagesStartEvent(),
@@ -624,8 +633,8 @@ describe.each(GEMINI_STREAM_CASES)(
     test("skips an unknown delta", async () => {
       const client = createAutoClient(testCase);
       expect(
-        client.transformModelOutputToClientParts(geminiUnknownDeltaEvent()),
-      ).toEqual([]);
+        client.transformModelOutputToUniEvent(geminiUnknownDeltaEvent()),
+      ).toEqual(EMPTY_EVENT);
       installFakeGeminiStream(client, [
         geminiUnknownDeltaEvent(),
         geminiTextDeltaEvent("Here is"),
@@ -790,10 +799,10 @@ describe.each(GENERATE_CONTENT_STREAM_CASES)(
     test("skips an unknown part", async () => {
       const client = createAutoClient(testCase);
       expect(
-        client.transformModelOutputToClientParts(
+        client.transformModelOutputToUniEvent(
           generateContentUnknownPartChunk(),
         ),
-      ).toEqual([]);
+      ).toEqual(EMPTY_EVENT);
       installFakeGenerateContentStream(client, [
         generateContentUnknownPartChunk(),
         generateContentTextChunk("Here is"),
@@ -903,13 +912,13 @@ const IGNORABLE_EVENT_CASES: Array<{
 describe.each(IGNORABLE_EVENT_CASES)(
   "Ignorable event handling for $testCase.clientType",
   ({ testCase, install, stream }) => {
-    test("turns an ignorable event into no parts and streams only deltas and a stop", async () => {
+    test("turns an ignorable event into an empty event and streams only deltas and a stop", async () => {
       // with the debug guard on, an event the client did not know would throw instead of passing
       process.env.AGENTHUB_DEBUG = "1";
       const client = createAutoClient(testCase);
       const [ignorableEvent] = stream();
-      expect(client.transformModelOutputToClientParts(ignorableEvent)).toEqual(
-        [],
+      expect(client.transformModelOutputToUniEvent(ignorableEvent)).toEqual(
+        EMPTY_EVENT,
       );
       install(client, stream());
 

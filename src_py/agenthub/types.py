@@ -194,6 +194,17 @@ class UniMessage(TypedDict):
     created_at: NotRequired[int]
 
 
+class UniEvent(TypedDict):
+    """Universal event format for streaming responses."""
+
+    role: Role
+    event_type: EventType
+    content_items: list[EventContentItem]
+    usage_metadata: UsageMetadata | None
+    finish_reason: FinishReason | None
+    created_at: NotRequired[int]
+
+
 class UniDeltaEvent(TypedDict):
     """A streamed event while the response is still running: exactly one delta or done item."""
 
@@ -214,10 +225,6 @@ class UniStopEvent(TypedDict):
     usage_metadata: UsageMetadata
     finish_reason: FinishReason
     created_at: int
-
-
-# Universal event format for streaming responses.
-UniEvent = UniDeltaEvent | UniStopEvent
 
 
 class ToolSchema(TypedDict):

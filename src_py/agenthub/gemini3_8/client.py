@@ -24,9 +24,20 @@ from google import genai
 from google.genai import interactions, types
 from google.oauth2 import service_account
 
-from ..base_client import ClientPart, LLMClient
+from ..base_client import LLMClient, done_marker
 from ..errors import UnsupportedParameterError
-from ..types import DeltaContentItem, FinishReason, PromptCaching, ThinkingLevel, ToolChoice, UniConfig, UniMessage
+from ..types import (
+    EventContentItem,
+    EventType,
+    FinishReason,
+    PromptCaching,
+    ThinkingLevel,
+    ToolChoice,
+    UniConfig,
+    UniEvent,
+    UniMessage,
+    UsageMetadata,
+)
 from ..utils import is_debug_enabled
 
 
@@ -406,137 +417,120 @@ class Gemini3_8Client(LLMClient):
 
         return steps
 
-    def transform_model_output_to_client_parts(
-        self, model_output: interactions.InteractionSSEEvent
-    ) -> list[ClientPart]:
+    def transform_model_output_to_uni_event(self, model_output: interactions.InteractionSSEEvent) -> UniEvent:
         """
-        Transform one Interactions API stream event into client parts, keyed by step index.
+        Transform one Interactions API stream event into a universal event, its items identified by step index.
 
         Args:
             model_output: Interactions API stream event
 
         Returns:
-            The parts the event carries, none when it carries nothing universal
+            Universal event dictionary
         """
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
+        usage_metadata: UsageMetadata | None = None
+        finish_reason: FinishReason | None = None
+
         if model_output.event_type == "step.start":
             step = model_output.step
             if step.type == "function_call":
                 # the start names the call; its arguments stream as deltas behind an empty object
                 start_arguments = json.dumps(step.arguments, ensure_ascii=False) if step.arguments else ""
-                return [
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": str(model_output.index),
-                        "item": {
-                            "type": "tool_call.delta",
-                            "name": step.name,
-                            "arguments": start_arguments,
-                            "tool_call_id": step.id,
-                        },
+                        "type": "tool_call.delta",
+                        "name": step.name,
+                        "arguments": start_arguments,
+                        "tool_call_id": step.id,
+                        "fidelity": {"item_id": str(model_output.index)},
                     }
-                ]
+                )
             elif step.type in ("thought", "model_output"):
-                return []
+                # their content arrives in the step's deltas
+                pass
+            elif is_debug_enabled():
+                raise ValueError(f"Unknown output: {model_output}")
 
         elif model_output.event_type == "step.delta":
-            key = str(model_output.index)
+            item_id = str(model_output.index)
             delta = model_output.delta
-            if delta.type == "thought_summary":
-                if delta.content is not None and delta.content.type == "text":
-                    return [
-                        {
-                            "type": "delta",
-                            "key": key,
-                            "item": {"type": "thinking.delta", "thinking": delta.content.text},
-                        }
-                    ]
-                elif delta.content is not None and delta.content.type == "image":
-                    # image models summarize their thinking with interim images too
-                    return [
-                        {
-                            "type": "delta",
-                            "key": key,
-                            "item": {
-                                "type": "inline_thinking.delta",
-                                "data": base64.b64decode(delta.content.data or ""),
-                                "mime_type": delta.content.mime_type or "image/jpeg",
-                            },
-                        }
-                    ]
-
+            if delta.type == "thought_summary" and delta.content is not None and delta.content.type == "text":
+                content_items.append(
+                    {"type": "thinking.delta", "thinking": delta.content.text, "fidelity": {"item_id": item_id}}
+                )
+            elif delta.type == "thought_summary" and delta.content is not None and delta.content.type == "image":
+                # image models summarize their thinking with interim images too
+                content_items.append(
+                    {
+                        "type": "inline_thinking.delta",
+                        "data": base64.b64decode(delta.content.data or ""),
+                        "mime_type": delta.content.mime_type or "image/jpeg",
+                        "fidelity": {"item_id": item_id},
+                    }
+                )
             elif delta.type == "thought_signature":
                 # the signature is the last delta of its thought step
-                return [
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": key,
-                        "item": {"type": "thinking.delta", "thinking": "", "fidelity": {"signature": delta.signature}},
+                        "type": "thinking.delta",
+                        "thinking": "",
+                        "fidelity": {"item_id": item_id, "signature": delta.signature},
                     }
-                ]
+                )
             elif delta.type == "arguments_delta":
-                return [
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": key,
-                        "item": {
-                            "type": "tool_call.delta",
-                            "name": "",
-                            "arguments": delta.arguments or "",
-                            "tool_call_id": "",
-                        },
+                        "type": "tool_call.delta",
+                        "name": "",
+                        "arguments": delta.arguments or "",
+                        "tool_call_id": "",
+                        "fidelity": {"item_id": item_id},
                     }
-                ]
+                )
             elif delta.type == "text":
-                return [{"type": "delta", "key": key, "item": {"type": "text.delta", "text": delta.text}}]
+                content_items.append({"type": "text.delta", "text": delta.text, "fidelity": {"item_id": item_id}})
             elif delta.type == "image":
-                return [
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": key,
-                        "item": {
-                            "type": "inline_data.delta",
-                            "data": base64.b64decode(delta.data or ""),
-                            "mime_type": delta.mime_type or "image/jpeg",
-                        },
+                        "type": "inline_data.delta",
+                        "data": base64.b64decode(delta.data or ""),
+                        "mime_type": delta.mime_type or "image/jpeg",
+                        "fidelity": {"item_id": item_id},
                     }
-                ]
+                )
             elif delta.type == "audio":
                 # TTS streams raw PCM in 40 ms chunks; the MIME type carries the format a player needs
-                return [
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": key,
-                        "item": {
-                            "type": "inline_data.delta",
-                            "data": base64.b64decode(delta.data or ""),
-                            "mime_type": f"{delta.mime_type}; rate={delta.sample_rate}; channels={delta.channels}",
-                        },
+                        "type": "inline_data.delta",
+                        "data": base64.b64decode(delta.data or ""),
+                        "mime_type": f"{delta.mime_type}; rate={delta.sample_rate}; channels={delta.channels}",
+                        "fidelity": {"item_id": item_id},
                     }
-                ]
+                )
+            elif is_debug_enabled():
+                raise ValueError(f"Unknown output: {model_output}")
 
         elif model_output.event_type == "step.stop":
-            return [{"type": "done", "key": str(model_output.index)}]
+            content_items.append(done_marker(str(model_output.index)))
 
         elif model_output.event_type == "interaction.completed":
+            event_type = "stop"
             status_mapping: dict[str, FinishReason] = {
                 "completed": "stop",
                 "requires_action": "tool_call",
                 "incomplete": "length",
             }
+            finish_reason = status_mapping.get(model_output.interaction.status, "unknown")
             usage = model_output.interaction.usage or interactions.Usage()
             # total_input_tokens includes the cached tokens; total_output_tokens excludes the thoughts
-            return [
-                {
-                    "type": "finish",
-                    "finish_reason": status_mapping.get(model_output.interaction.status, "unknown"),
-                    "usage_metadata": {
-                        "cached_tokens": usage.total_cached_tokens or None,
-                        "prompt_tokens": (usage.total_input_tokens or 0) - (usage.total_cached_tokens or 0),
-                        "thoughts_tokens": usage.total_thought_tokens or None,
-                        "response_tokens": usage.total_output_tokens or None,
-                    },
-                }
-            ]
+            usage_metadata = {
+                "cached_tokens": usage.total_cached_tokens or None,
+                "prompt_tokens": (usage.total_input_tokens or 0) - (usage.total_cached_tokens or 0),
+                "thoughts_tokens": usage.total_thought_tokens or None,
+                "response_tokens": usage.total_output_tokens or None,
+            }
 
         elif model_output.event_type == "error" and model_output.error is not None:
             # Neither Interactions SDK raises on an error event inside an open stream, so the provider's
@@ -545,21 +539,28 @@ class Gemini3_8Client(LLMClient):
             raise RuntimeError(f"Gemini stream error {model_output.error.code}: {model_output.error.message}")
 
         elif model_output.event_type in ("interaction.created", "interaction.status_update"):
-            return []
+            # the interaction's lifecycle carries nothing universal
+            pass
 
-        if is_debug_enabled():
+        elif is_debug_enabled():
             raise ValueError(f"Unknown output: {model_output}")
 
         # the API adds event, step and delta types over time (the SDK surfaces them as its Unknown*
         # types), and killing a long generation over one costs more than dropping it
-        return []
+        return {
+            "role": "assistant",
+            "event_type": event_type,
+            "content_items": content_items,
+            "usage_metadata": usage_metadata,
+            "finish_reason": finish_reason,
+        }
 
     async def _embed_messages_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
-        """Embed messages through embedContent and yield one embedding item per message."""
+    ) -> AsyncIterator[UniEvent]:
+        """Embed messages through embedContent and yield their embedding items, one per message, as one event."""
         # the Interactions API does not serve embedding models (HTTP 404, verified live
         # 2026-09-16), so they stay on embedContent
         contents = []
@@ -589,17 +590,13 @@ class Gemini3_8Client(LLMClient):
             config=gemini_config,
         )
 
-        for i, embedding in enumerate(result.embeddings or []):
-            key = f"embedding:{i}"
-            yield {
-                "type": "delta",
-                "key": key,
-                "item": {"type": "embedding.delta", "embedding": list(embedding.values or [])},
-            }
-            yield {"type": "done", "key": key}
-
         yield {
-            "type": "finish",
+            "role": "assistant",
+            "event_type": "stop",
+            "content_items": [
+                {"type": "embedding.delta", "embedding": list(embedding.values or [])}
+                for embedding in (result.embeddings or [])
+            ],
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": result.metadata.billable_character_count if result.metadata else None,
@@ -613,11 +610,11 @@ class Gemini3_8Client(LLMClient):
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         """Stream generate through the Interactions API with unified conversion methods."""
         if "embedding" in self._model.lower():
-            async for part in self._embed_messages_internal(messages, config):
-                yield part
+            async for event in self._embed_messages_internal(messages, config):
+                yield event
             return
 
         gemini_config = self.transform_uni_config_to_model_config(config)
@@ -640,31 +637,28 @@ class Gemini3_8Client(LLMClient):
         stream = await self._client.aio.interactions.create(**gemini_config, input=steps)
 
         # A step streams one item per run of a content kind: an image model's thought summary can go
-        # text, image, text, which is three items, so an item's key is its step index and the number
+        # text, image, text, which is three items, so an item's id is its step index and the number
         # of the run within the step. Every image delta is a whole image and a run of its own, while audio
         # streams in chunks of one run.
-        step_key = ""
+        step_id = ""
         run = 0
-        run_item: DeltaContentItem | None = None
+        run_item: EventContentItem | None = None
         async for event in stream:
-            for part in self.transform_model_output_to_client_parts(event):
-                if part["type"] == "finish":
-                    yield part
-                    continue
-
-                if part["key"] != step_key:
-                    step_key = part["key"]
+            uni_event = self.transform_model_output_to_uni_event(event)
+            content_items: list[EventContentItem] = []
+            for item in uni_event["content_items"]:
+                if item["fidelity"]["item_id"] != step_id:
+                    step_id = item["fidelity"]["item_id"]
                     run = 0
                     run_item = None
 
-                if part["type"] == "done":
-                    yield {"type": "done", "key": f"{step_key}.{run}"}
+                if item["type"].endswith(".done"):
+                    content_items.append(done_marker(f"{step_id}.{run}"))
                     continue
 
-                item = part["item"]
                 if (
                     item["type"] == "thinking.delta"
-                    and item.get("fidelity")
+                    and "signature" in item["fidelity"]
                     and run_item is not None
                     and run_item["type"] == "inline_thinking.delta"
                 ):
@@ -680,11 +674,14 @@ class Gemini3_8Client(LLMClient):
                     or item["type"] == "inline_thinking.delta"
                     or (item["type"] == "inline_data.delta" and item["mime_type"].startswith("image/"))
                 ):
-                    yield {"type": "done", "key": f"{step_key}.{run}"}
+                    content_items.append(done_marker(f"{step_id}.{run}"))
                     run += 1
 
                 run_item = item
-                yield {"type": "delta", "key": f"{step_key}.{run}", "item": item}
+                item["fidelity"]["item_id"] = f"{step_id}.{run}"
+                content_items.append(item)
+
+            yield {**uni_event, "content_items": content_items}
 
     async def list_models(self) -> list[str]:
         """

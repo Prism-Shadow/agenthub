@@ -37,15 +37,20 @@ import {
   EmbedContentConfig,
 } from "@google/genai";
 import * as path from "path";
-import { ClientPart, LLMClient } from "../baseClient";
+import { doneMarker, LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
 import {
+  EventContentItem,
+  EventType,
+  Fidelity,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
   UniConfig,
+  UniEvent,
   UniMessage,
+  UsageMetadata,
 } from "../types";
 import { isDebugEnabled } from "../utils";
 
@@ -622,78 +627,64 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
   }
 
   /**
-   * Transform one generateContent stream chunk into client parts.
+   * Transform one generateContent stream chunk into a universal event.
    *
-   * generateContent gives a part no identity, so each delta is keyed by the kind of wire part that
-   * carried it; _streamingResponseInternal turns those into one key per item.
+   * generateContent gives a part no identity, so each delta's item_id is the kind of wire part that
+   * carried it; _streamingResponseInternal turns those into one item id per item.
    */
-  transformModelOutputToClientParts(
+  transformModelOutputToUniEvent(
     modelOutput: GenerateContentResponse,
-  ): ClientPart[] {
-    const clientParts: ClientPart[] = [];
+  ): UniEvent {
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
+    let usageMetadata: UsageMetadata | null = null;
+    let finishReason: FinishReason | null = null;
 
     const candidate = modelOutput.candidates?.[0];
     if (candidate) {
       for (const part of candidate.content?.parts ?? []) {
         const fidelity = part.thoughtSignature
-          ? { fidelity: { signature: part.thoughtSignature } }
+          ? { signature: part.thoughtSignature }
           : {};
         if (part.functionCall) {
           // generateContent sends a call whole, so it streams as one complete delta
-          clientParts.push({
-            type: "delta",
-            key: "function_call",
-            item: {
-              type: "tool_call.delta",
-              name: part.functionCall.name ?? "",
-              arguments: JSON.stringify(part.functionCall.args ?? {}),
-              tool_call_id:
-                part.functionCall.id || part.functionCall.name || "",
-              ...fidelity,
-            },
+          contentItems.push({
+            type: "tool_call.delta",
+            name: part.functionCall.name ?? "",
+            arguments: JSON.stringify(part.functionCall.args ?? {}),
+            tool_call_id: part.functionCall.id || part.functionCall.name || "",
+            fidelity: { item_id: "function_call", ...fidelity },
           });
         } else if (part.thought && part.text != null) {
           if (part.text || part.thoughtSignature) {
-            clientParts.push({
-              type: "delta",
-              key: "thought",
-              item: {
-                type: "thinking.delta",
-                thinking: part.text,
-                ...fidelity,
-              },
+            contentItems.push({
+              type: "thinking.delta",
+              thinking: part.text,
+              fidelity: { item_id: "thought", ...fidelity },
             });
           }
         } else if (part.thought && part.inlineData) {
-          clientParts.push({
-            type: "delta",
-            key: "inline_thinking",
-            item: {
-              type: "inline_thinking.delta",
-              data: Buffer.from(part.inlineData.data || "", "base64"),
-              mime_type: part.inlineData.mimeType || "application/octet-stream",
-              ...fidelity,
-            },
+          contentItems.push({
+            type: "inline_thinking.delta",
+            data: Buffer.from(part.inlineData.data || "", "base64"),
+            mime_type: part.inlineData.mimeType || "application/octet-stream",
+            fidelity: { item_id: "inline_thinking", ...fidelity },
           });
         } else if (part.inlineData) {
-          clientParts.push({
-            type: "delta",
-            key: "inline_data",
-            item: {
-              type: "inline_data.delta",
-              data: Buffer.from(part.inlineData.data || "", "base64"),
-              mime_type: part.inlineData.mimeType || "application/octet-stream",
-              ...fidelity,
-            },
+          contentItems.push({
+            type: "inline_data.delta",
+            data: Buffer.from(part.inlineData.data || "", "base64"),
+            mime_type: part.inlineData.mimeType || "application/octet-stream",
+            fidelity: { item_id: "inline_data", ...fidelity },
           });
         } else if (part.text != null) {
           // a response ends on an empty text part, which carries something only when it brings
           // the signature
           if (part.text || part.thoughtSignature) {
-            clientParts.push({
-              type: "delta",
-              key: "text",
-              item: { type: "text.delta", text: part.text, ...fidelity },
+            contentItems.push({
+              type: "text.delta",
+              text: part.text,
+              fidelity: { item_id: "text", ...fidelity },
             });
           }
         } else if (isDebugEnabled()) {
@@ -702,14 +693,12 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
       }
 
       if (candidate.finishReason) {
+        eventType = "stop";
         const stopReasonMapping: { [key: string]: FinishReason } = {
           [GeminiFinishReason.STOP]: "stop",
           [GeminiFinishReason.MAX_TOKENS]: "length",
         };
-        clientParts.push({
-          type: "finish",
-          finish_reason: stopReasonMapping[candidate.finishReason] || "unknown",
-        });
+        finishReason = stopReasonMapping[candidate.finishReason] || "unknown";
       }
     }
 
@@ -717,27 +706,30 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
     // arrive with the last one
     const usage = modelOutput.usageMetadata;
     if (usage?.promptTokenCount != null) {
-      clientParts.push({
-        type: "finish",
-        usage_metadata: {
-          cached_tokens: usage.cachedContentTokenCount || null,
-          prompt_tokens:
-            (usage.promptTokenCount || 0) -
-            (usage.cachedContentTokenCount || 0),
-          thoughts_tokens: usage.thoughtsTokenCount || null,
-          response_tokens: usage.candidatesTokenCount || null,
-        },
-      });
+      eventType = "stop";
+      usageMetadata = {
+        cached_tokens: usage.cachedContentTokenCount || null,
+        prompt_tokens:
+          (usage.promptTokenCount || 0) - (usage.cachedContentTokenCount || 0),
+        thoughts_tokens: usage.thoughtsTokenCount || null,
+        response_tokens: usage.candidatesTokenCount || null,
+      };
     }
 
-    return clientParts;
+    return {
+      role: "assistant",
+      event_type: eventType,
+      content_items: contentItems,
+      usage_metadata: usageMetadata,
+      finish_reason: finishReason,
+    };
   }
 
   private async *_embedMessagesInternal(options: {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     const geminiConfig = this._withAbortSignal<EmbedContentConfig>(
       options.config.embedding_config?.dimensions != null
         ? {
@@ -750,7 +742,7 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
     // Vertex AI embeds one content per call: a second content is a 400 there, and both SDKs refuse
     // to send one. It reports no billable characters either, only a token count per embedding.
     let promptTokens: number | null = null;
-    for (const [i, msg] of options.messages.entries()) {
+    for (const msg of options.messages) {
       const parts: Part[] = [];
       for (const item of msg.content_items) {
         if (item.type === "text.done") {
@@ -785,13 +777,16 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
       });
 
       const embedding = result.embeddings?.[0];
-      const key = `embedding:${i}`;
+      // a vector streams once its call returns; the usage, summed over the calls, follows the last one
       yield {
-        type: "delta",
-        key,
-        item: { type: "embedding.delta", embedding: embedding?.values ?? [] },
+        role: "assistant",
+        event_type: "delta",
+        content_items: [
+          { type: "embedding.delta", embedding: embedding?.values ?? [] },
+        ],
+        usage_metadata: null,
+        finish_reason: null,
       };
-      yield { type: "done", key };
       const tokenCount =
         embedding?.statistics?.tokenCount ??
         result.metadata?.billableCharacterCount;
@@ -801,7 +796,9 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
     }
 
     yield {
-      type: "finish",
+      role: "assistant",
+      event_type: "stop",
+      content_items: [],
       usage_metadata: {
         cached_tokens: null,
         prompt_tokens: promptTokens,
@@ -819,7 +816,7 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart> {
+  }): AsyncGenerator<UniEvent> {
     if (this._model.toLowerCase().includes("embedding")) {
       yield* this._embedMessagesInternal(options);
       return;
@@ -864,44 +861,43 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
     let openField: string | null = null;
     let sawFunctionCall = false;
     for await (const chunk of responseStream) {
-      for (const part of this.transformModelOutputToClientParts(chunk)) {
-        if (part.type !== "delta") {
-          // generateContent reports STOP for a turn that stopped to call tools
-          if (
-            part.type === "finish" &&
-            part.finish_reason === "stop" &&
-            sawFunctionCall
-          ) {
-            yield { ...part, finish_reason: "tool_call" };
-          } else {
-            yield part;
-          }
-          continue;
-        }
-
-        const item = part.item;
+      const event = this.transformModelOutputToUniEvent(chunk);
+      const contentItems: EventContentItem[] = [];
+      for (const item of event.content_items) {
+        const fidelity = (item as { fidelity: Fidelity }).fidelity;
         const ownItem =
           item.type === "tool_call.delta" ||
           item.type === "inline_thinking.delta" ||
           (item.type === "inline_data.delta" &&
             item.mime_type.startsWith("image/"));
-        if (part.key !== openField || ownItem) {
+        if (fidelity.item_id !== openField || ownItem) {
           if (openField !== null) {
-            yield { type: "done", key: String(itemIndex) };
+            contentItems.push(doneMarker(String(itemIndex)));
           }
           itemIndex += 1;
-          openField = part.key;
+          openField = fidelity.item_id;
         }
         if (item.type === "tool_call.delta") {
           sawFunctionCall = true;
         }
-        yield { ...part, key: String(itemIndex) };
+        fidelity.item_id = String(itemIndex);
+        contentItems.push(item);
         // a thoughtSignature is the last thing the API says about a part: it closes the item it rides on
-        if (ownItem || ("fidelity" in item && item.fidelity)) {
-          yield { type: "done", key: String(itemIndex) };
+        if (ownItem || "signature" in fidelity) {
+          contentItems.push(doneMarker(String(itemIndex)));
           openField = null;
         }
       }
+      // generateContent reports STOP for a turn that stopped to call tools
+      const finishReason =
+        event.finish_reason === "stop" && sawFunctionCall
+          ? "tool_call"
+          : event.finish_reason;
+      yield {
+        ...event,
+        content_items: contentItems,
+        finish_reason: finishReason,
+      };
     }
   }
 

@@ -22,13 +22,17 @@ import httpx
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
 
-from ..base_client import ClientPart, LLMClient
+from ..base_client import LLMClient, done_marker
 from ..errors import UnsupportedParameterError
 from ..types import (
+    EventContentItem,
+    EventType,
+    FinishReason,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
     UniConfig,
+    UniEvent,
     UniMessage,
     UsageMetadata,
 )
@@ -255,20 +259,23 @@ class KimiK3Client(LLMClient):
 
         return openai_messages
 
-    def transform_model_output_to_client_parts(self, model_output: ChatCompletionChunk) -> list[ClientPart]:
+    def transform_model_output_to_uni_event(self, model_output: ChatCompletionChunk) -> UniEvent:
         """
-        Transform one Kimi K3 streaming chunk into client parts.
+        Transform one Kimi K3 streaming chunk into a universal event.
 
-        Chat Completions gives an item no identity, so each delta is keyed by the wire field that
-        carried it; _streaming_response_internal turns those into one key per item.
+        Chat Completions gives an item no identity, so each delta's item_id is the wire field that
+        carried it; _streaming_response_internal turns those into one item id per item.
 
         Args:
             model_output: OpenAI streaming chunk
 
         Returns:
-            The parts the chunk carries, none when it carries nothing universal
+            Universal event dictionary
         """
-        parts: list[ClientPart] = []
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
+        usage_metadata: UsageMetadata | None = None
+        finish_reason: FinishReason | None = None
 
         # gateways inject content-free heartbeat chunks on long generations, whose choices
         # the SDK leaves as None rather than an empty list
@@ -283,71 +290,59 @@ class KimiK3Client(LLMClient):
             reasoning_content = getattr(delta, "reasoning_content", None)
             reasoning = getattr(delta, "reasoning", None)
             if reasoning_content and reasoning:
-                # ambiguous origin: record no fidelity so a replay sends both fields back
-                parts.append(
+                # ambiguous origin: record no reasoning_field so a replay sends both fields back
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": "reasoning_content",
-                        "item": {"type": "thinking.delta", "thinking": reasoning_content},
+                        "type": "thinking.delta",
+                        "thinking": reasoning_content,
+                        "fidelity": {"item_id": "reasoning_content"},
                     }
                 )
             elif reasoning_content:
-                parts.append(
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": "reasoning_content",
-                        "item": {
-                            "type": "thinking.delta",
-                            "thinking": reasoning_content,
-                            "fidelity": {"reasoning_field": "reasoning_content"},
-                        },
+                        "type": "thinking.delta",
+                        "thinking": reasoning_content,
+                        "fidelity": {"item_id": "reasoning_content", "reasoning_field": "reasoning_content"},
                     }
                 )
             elif reasoning:
-                parts.append(
+                content_items.append(
                     {
-                        "type": "delta",
-                        "key": "reasoning",
-                        "item": {
-                            "type": "thinking.delta",
-                            "thinking": reasoning,
-                            "fidelity": {"reasoning_field": "reasoning"},
-                        },
+                        "type": "thinking.delta",
+                        "thinking": reasoning,
+                        "fidelity": {"item_id": "reasoning", "reasoning_field": "reasoning"},
                     }
                 )
 
             if delta.content:
-                parts.append(
-                    {"type": "delta", "key": "content", "item": {"type": "text.delta", "text": delta.content}}
-                )
+                content_items.append({"type": "text.delta", "text": delta.content, "fidelity": {"item_id": "content"}})
 
             if delta.tool_calls:
                 for tool_call in delta.tool_calls:
-                    parts.append(
+                    content_items.append(
                         {
-                            "type": "delta",
-                            "key": "tool_calls",
-                            "item": {
-                                "type": "tool_call.delta",
-                                "name": tool_call.function.name or "",
-                                "arguments": tool_call.function.arguments or "",
-                                "tool_call_id": tool_call.id or "",
-                            },
+                            "type": "tool_call.delta",
+                            "name": tool_call.function.name or "",
+                            "arguments": tool_call.function.arguments or "",
+                            "tool_call_id": tool_call.id or "",
+                            "fidelity": {"item_id": "tool_calls"},
                         }
                     )
 
             if choice.finish_reason:
+                event_type = "stop"
                 finish_reason_mapping = {
                     "stop": "stop",
                     "length": "length",
                     "tool_calls": "tool_call",
                     "content_filter": "stop",
                 }
-                parts.append(
-                    {"type": "finish", "finish_reason": finish_reason_mapping.get(choice.finish_reason, "unknown")}
-                )
+                finish_reason = finish_reason_mapping.get(choice.finish_reason, "unknown")
 
         if model_output.usage:
+            event_type = "stop"
+
             if model_output.usage.prompt_tokens_details:
                 cached_tokens = model_output.usage.prompt_tokens_details.cached_tokens
             else:
@@ -368,26 +363,27 @@ class KimiK3Client(LLMClient):
             else:
                 response_tokens = model_output.usage.completion_tokens
 
-            usage_metadata: UsageMetadata = {
+            usage_metadata = {
                 "cached_tokens": cached_tokens,
                 "prompt_tokens": prompt_tokens,
                 "thoughts_tokens": reasoning_tokens,
                 "response_tokens": response_tokens,
             }
-            parts.append(
-                {
-                    "type": "finish",
-                    "usage_metadata": fix_openrouter_usage_metadata(usage_metadata, str(self._client.base_url)),
-                }
-            )
+            usage_metadata = fix_openrouter_usage_metadata(usage_metadata, str(self._client.base_url))
 
-        return parts
+        return {
+            "role": "assistant",
+            "event_type": event_type,
+            "content_items": content_items,
+            "usage_metadata": usage_metadata,
+            "finish_reason": finish_reason,
+        }
 
     async def _streaming_response_internal(
         self,
         messages: list[UniMessage],
         config: UniConfig,
-    ) -> AsyncIterator[ClientPart]:
+    ) -> AsyncIterator[UniEvent]:
         """Stream generate using Kimi SDK with unified conversion methods."""
         kimi_config = self.transform_uni_config_to_model_config(config)
         kimi_messages = await self.transform_uni_message_to_model_input(messages)
@@ -404,19 +400,20 @@ class KimiK3Client(LLMClient):
         item_index = -1
         open_field = None
         async for chunk in stream:
-            for part in self.transform_model_output_to_client_parts(chunk):
-                if part["type"] != "delta":
-                    yield part
-                    continue
-
-                if part["key"] != open_field or (part["item"]["type"] == "tool_call.delta" and part["item"]["name"]):
+            event = self.transform_model_output_to_uni_event(chunk)
+            content_items: list[EventContentItem] = []
+            for item in event["content_items"]:
+                if item["fidelity"]["item_id"] != open_field or (item["type"] == "tool_call.delta" and item["name"]):
                     if open_field is not None:
-                        yield {"type": "done", "key": str(item_index)}
+                        content_items.append(done_marker(str(item_index)))
 
                     item_index += 1
-                    open_field = part["key"]
+                    open_field = item["fidelity"]["item_id"]
 
-                yield {**part, "key": str(item_index)}
+                item["fidelity"]["item_id"] = str(item_index)
+                content_items.append(item)
+
+            yield {**event, "content_items": content_items}
 
     async def list_models(self) -> list[str]:
         """

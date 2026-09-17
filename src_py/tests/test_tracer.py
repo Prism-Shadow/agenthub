@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from flask import Flask
 
-from agenthub.base_client import LLMClient
+from agenthub.base_client import LLMClient, done_marker
 from agenthub.integration.tracer import Tracer
 
 
@@ -253,17 +253,17 @@ def test_web_app_nonexistent_path(temp_cache_dir):
 
 
 class ScriptedClient(LLMClient):
-    """A client whose provider stream is a fixed list of parts.
+    """A client whose provider stream is a fixed list of events.
 
     The tracer hook under test lives in the base class's streaming_response (trace_id ->
     save_history), above this seam — so the integration runs for real while no network or
     API key is involved.
     """
 
-    def __init__(self, parts):
+    def __init__(self, events):
         self._model = "fake-model"
         self._history = []
-        self._parts = parts
+        self._events = events
 
     def transform_uni_config_to_model_config(self, config):
         return None
@@ -271,34 +271,43 @@ class ScriptedClient(LLMClient):
     def transform_uni_message_to_model_input(self, messages):
         return messages
 
-    def transform_model_output_to_client_parts(self, model_output):
-        return [model_output]
+    def transform_model_output_to_uni_event(self, model_output):
+        return model_output
 
     async def _streaming_response_internal(self, messages, config):
-        for part in self._parts:
-            for client_part in self.transform_model_output_to_client_parts(part):
-                yield client_part
+        for event in self._events:
+            yield self.transform_model_output_to_uni_event(event)
 
     async def list_models(self):
         return []
 
 
+def _delta(item):
+    return {
+        "role": "assistant",
+        "event_type": "delta",
+        "content_items": [item],
+        "usage_metadata": None,
+        "finish_reason": None,
+    }
+
+
+_STOP = {
+    "role": "assistant",
+    "event_type": "stop",
+    "content_items": [],
+    "usage_metadata": {"cached_tokens": 0, "prompt_tokens": 1, "thoughts_tokens": None, "response_tokens": 2},
+    "finish_reason": "stop",
+}
+
+
 def _fake_llm_client() -> ScriptedClient:
     return ScriptedClient(
         [
-            {"type": "delta", "key": "0", "item": {"type": "text.delta", "text": "Hello "}},
-            {"type": "delta", "key": "0", "item": {"type": "text.delta", "text": "there!"}},
-            {"type": "done", "key": "0"},
-            {
-                "type": "finish",
-                "usage_metadata": {
-                    "cached_tokens": 0,
-                    "prompt_tokens": 1,
-                    "thoughts_tokens": None,
-                    "response_tokens": 2,
-                },
-                "finish_reason": "stop",
-            },
+            _delta({"type": "text.delta", "text": "Hello ", "fidelity": {"item_id": "0"}}),
+            _delta({"type": "text.delta", "text": "there!", "fidelity": {"item_id": "0"}}),
+            _delta(done_marker("0")),
+            _STOP,
         ]
     )
 
@@ -378,6 +387,28 @@ async def test_traced_response_is_saved_before_its_stop_event(temp_cache_dir, mo
     ]
     assert "Text: Hello there!" in transcript
     assert "Finish Reason: stop" in transcript
+
+
+@pytest.mark.asyncio
+async def test_traced_response_saves_its_fidelity_without_the_item_id(temp_cache_dir, monkeypatch):
+    """Test that the trace keeps a response's fidelity but not the item_id its client identified the item with."""
+    monkeypatch.setenv("AGENTHUB_CACHE_DIR", temp_cache_dir)
+    client = ScriptedClient(
+        [
+            _delta({"type": "text.delta", "text": "Hello", "fidelity": {"item_id": "0", "signature": "s"}}),
+            _delta(done_marker("0")),
+            _STOP,
+        ]
+    )
+    message = {"role": "user", "content_items": [{"type": "text.done", "text": "Say hello"}]}
+    async for _ in client.streaming_response(messages=[message], config={"trace_id": "integration/fidelity"}):
+        pass
+
+    with open(Path(temp_cache_dir) / "integration" / "fidelity.json", encoding="utf-8") as f:
+        saved = json.load(f)
+    assert saved["history"][1]["content_items"] == [
+        {"type": "text.done", "text": "Hello", "fidelity": {"signature": "s"}}
+    ]
 
 
 @pytest.mark.filterwarnings("ignore:Content item types without the .done suffix")

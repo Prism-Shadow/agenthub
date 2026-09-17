@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { ClientPart, LLMClient } from "./baseClient";
+import { LLMClient } from "./baseClient";
 import { Gemini3_8Client } from "./gemini3_8";
 import { Gemini3_8GenerateContentClient } from "./gemini3_8_generate_content";
 import { Claude5Client } from "./claude5";
@@ -26,7 +26,13 @@ import { OpenaiEmbeddingClient } from "./openai_embedding";
 import { DeepSeekV4Client } from "./deepseek_v4";
 import { MiniMaxM3Client } from "./minimax_m3";
 import { OpenaiChatVllmAdapterClient } from "./openai_chat_vllm_adapter";
-import { UniConfig, UniEvent, UniMessage } from "./types";
+import {
+  UniConfig,
+  UniDeltaEvent,
+  UniEvent,
+  UniMessage,
+  UniStopEvent,
+} from "./types";
 
 type LLMClientConstructor = new (options: {
   model: string;
@@ -183,10 +189,14 @@ export class AutoLLMClient extends LLMClient {
       // Vertex AI's Interactions endpoint serves none of the Gemini models, so a service-account
       // JSON, told apart by the test both clients' constructors apply, speaks generateContent
       // unless Interactions is pinned
-      const key = apiKey || process.env.GEMINI_API_KEY || "";
+      const isVertexAi = (
+        apiKey ||
+        process.env.GEMINI_API_KEY ||
+        ""
+      ).startsWith("{");
       if (
         clientType?.includes("gemini-generate-content") ||
-        (key.startsWith("{") && !clientType?.includes("gemini-interactions"))
+        (isVertexAi && !clientType?.includes("gemini-interactions"))
       ) {
         ClientClass = Gemini3_8GenerateContentClient;
       }
@@ -216,18 +226,18 @@ export class AutoLLMClient extends LLMClient {
   /* eslint-enable @typescript-eslint/no-explicit-any */
 
   /**
-   * Delegate to underlying client's transformModelOutputToClientParts.
+   * Delegate to underlying client's transformModelOutputToUniEvent.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  transformModelOutputToClientParts(modelOutput: any): ClientPart[] {
-    return this._client.transformModelOutputToClientParts(modelOutput);
+  transformModelOutputToUniEvent(modelOutput: any): UniEvent {
+    return this._client.transformModelOutputToUniEvent(modelOutput);
   }
 
   /**
    * Not implemented - use streamingResponse instead.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any, require-yield
-  async *_streamingResponseInternal(_options: any): AsyncGenerator<ClientPart> {
+  async *_streamingResponseInternal(_options: any): AsyncGenerator<UniEvent> {
     throw new Error("Please use streamingResponse instead.");
   }
 
@@ -238,7 +248,7 @@ export class AutoLLMClient extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniEvent> {
+  }): AsyncGenerator<UniDeltaEvent | UniStopEvent> {
     for await (const event of this._client.streamingResponse({
       messages: options.messages,
       config: options.config,
@@ -255,7 +265,7 @@ export class AutoLLMClient extends LLMClient {
     message: UniMessage;
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniEvent> {
+  }): AsyncGenerator<UniDeltaEvent | UniStopEvent> {
     for await (const event of this._client.streamingResponseStateful({
       message: options.message,
       config: options.config,

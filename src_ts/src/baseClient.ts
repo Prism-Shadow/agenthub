@@ -24,6 +24,7 @@ import {
   DeltaContentItem,
   Fidelity,
   FinishReason,
+  TextDoneItem,
   UniConfig,
   UniDeltaEvent,
   UniEvent,
@@ -33,23 +34,13 @@ import {
 } from "./types";
 
 /**
- * What a client makes of its provider's stream; only the base class turns it into UniEvents.
- *
- * - `delta`: a fragment of the item identified by `key`, the provider's own identity for the
- *   item (a block index, an output item id, a step index). A key is never reused once done.
- * - `done`: the item identified by `key` is complete. Items still open when the provider's
- *   stream ends are completed by the base class.
- * - `finish`: how the response finished. It may arrive in pieces; a non-null field overwrites
- *   the one recorded before, including each UsageMetadata field on its own.
+ * The item under itemId is complete: the base builds its done item from the deltas it streamed.
+ * Not every provider names the kind where an item ends (Anthropic content_block_stop, Interactions
+ * step.stop), so a marker is a text.done the base reads only for its item_id.
  */
-export type ClientPart =
-  | { type: "delta"; key: string; item: DeltaContentItem }
-  | { type: "done"; key: string }
-  | {
-      type: "finish";
-      usage_metadata?: UsageMetadata | null;
-      finish_reason?: FinishReason | null;
-    };
+export function doneMarker(itemId: string): TextDoneItem {
+  return { type: "text.done", text: "", fidelity: { item_id: itemId } };
+}
 
 /**
  * Whether a content item carries a non-empty fidelity payload.
@@ -101,15 +92,16 @@ interface ItemGroup {
 }
 
 /**
- * Turns client parts into the public stream: every item streams as contiguous deltas closed
- * by its done item, and items never interleave, so a caller attributes each delta to the item
- * streaming at that moment. An item that starts while an earlier one is open is held back
- * until the earlier one is done.
+ * Turns the universal events a client makes of its provider's stream into the public stream:
+ * every item streams as contiguous deltas closed by its done item, and items never interleave,
+ * so a caller attributes each delta to the item streaming at that moment. An item that starts
+ * while an earlier one is open is held back until the earlier one is done.
  */
 class StreamAssembler {
   private readonly order: string[] = [];
   private readonly groups = new Map<string, ItemGroup>();
   private readonly finishedKeys = new Set<string>();
+  private embeddingCount = 0;
   private usageMetadata: UsageMetadata | null = null;
   private finishReason: FinishReason | null = null;
   readonly doneItems: ContentItem[] = [];
@@ -120,29 +112,53 @@ class StreamAssembler {
     return new StreamProtocolError({ client: this.client, message });
   }
 
-  push(part: ClientPart): UniDeltaEvent[] {
-    if (part.type === "delta") {
-      return this.pushDelta(part.key, part.item);
+  // a generator, so the events of an item reach the caller even when a later item of the same
+  // wire event fails, as a whole tool call followed by its done marker does on bad arguments
+  *push(event: UniEvent): Generator<UniDeltaEvent> {
+    if (
+      event.event_type === "delta" &&
+      (event.usage_metadata != null || event.finish_reason != null)
+    ) {
+      throw this.protocolError(
+        "a delta event carries usage_metadata or finish_reason",
+      );
     }
 
-    if (part.type === "done") {
-      if (this.finishedKeys.has(part.key)) {
-        throw this.protocolError(`item ${part.key} was done twice`);
+    for (const item of event.content_items) {
+      if (item.type === "embedding.delta") {
+        // a vector is complete in itself, so the base names its item and closes it at once
+        const key = `embedding:${this.embeddingCount}`;
+        this.embeddingCount += 1;
+        yield* this.pushDelta(key, item);
+        yield* this.pushDone(key);
+        continue;
       }
-      const group = this.groups.get(part.key);
-      if (!group) {
-        // an item that never produced content has nothing to close
-        this.finishedKeys.add(part.key);
-        return [];
+
+      // item_id is stripped before any other rule runs, so it never reaches the public stream
+      const { item_id: itemId, ...fidelity }: Fidelity =
+        ("fidelity" in item ? item.fidelity : undefined) ?? {};
+      if (typeof itemId !== "string" || itemId === "") {
+        throw this.protocolError(`${item.type} carries no fidelity.item_id`);
       }
-      if (group.closed) {
-        throw this.protocolError(`item ${part.key} was done twice`);
+      if (item.type.endsWith(".done")) {
+        if (hasFidelity(fidelity)) {
+          throw this.protocolError(
+            `the done marker of item ${itemId} carries fidelity beyond item_id`,
+          );
+        }
+        yield* this.pushDone(itemId);
+        continue;
       }
-      group.closed = true;
-      return this.flush();
+
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { fidelity: withItemId, ...content } = item as {
+        fidelity?: Fidelity;
+      };
+      const stripped = hasFidelity(fidelity) ? { ...item, fidelity } : content;
+      yield* this.pushDelta(itemId, stripped as DeltaContentItem);
     }
 
-    if (part.usage_metadata) {
+    if (event.usage_metadata) {
       const usage: UsageMetadata = this.usageMetadata ?? {
         cached_tokens: null,
         prompt_tokens: null,
@@ -155,16 +171,32 @@ class StreamAssembler {
         "thoughts_tokens",
         "response_tokens",
       ] as const) {
-        if (part.usage_metadata[field] != null) {
-          usage[field] = part.usage_metadata[field];
+        if (event.usage_metadata[field] != null) {
+          usage[field] = event.usage_metadata[field];
         }
       }
       this.usageMetadata = usage;
     }
-    if (part.finish_reason) {
-      this.finishReason = part.finish_reason;
+    if (event.finish_reason) {
+      this.finishReason = event.finish_reason;
     }
-    return [];
+  }
+
+  private pushDone(key: string): UniDeltaEvent[] {
+    if (this.finishedKeys.has(key)) {
+      throw this.protocolError(`item ${key} was done twice`);
+    }
+    const group = this.groups.get(key);
+    if (!group) {
+      // an item that never produced content has nothing to close
+      this.finishedKeys.add(key);
+      return [];
+    }
+    if (group.closed) {
+      throw this.protocolError(`item ${key} was done twice`);
+    }
+    group.closed = true;
+    return this.flush();
   }
 
   private pushDelta(key: string, item: DeltaContentItem): UniDeltaEvent[] {
@@ -408,13 +440,22 @@ export abstract class LLMClient {
   ): any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
   /**
-   * Transform one event of the provider's stream into client parts.
+   * Transform one event of the provider's stream into a universal event, which the base class
+   * narrows into the public stream.
+   *
+   * content_items holds any number of items in wire order — `.delta` fragments and done markers,
+   * each carrying `fidelity.item_id`, the provider's identity for the item (a block index, an
+   * output item id, a step index and run), except `embedding.delta`, which is complete in itself.
+   * event_type is "stop" on the wire events that report usage_metadata and/or finish_reason, in
+   * pieces the base class merges field by field, and "delta" otherwise; a "delta" event carries
+   * neither.
    *
    * @param modelOutput - Model-specific output object (streaming chunk)
-   * @returns The parts the event carries, none when it carries nothing universal
+   * @returns Universal event object, an empty delta event when the wire event carries nothing
+   *   universal
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  abstract transformModelOutputToClientParts(modelOutput: any): ClientPart[];
+  abstract transformModelOutputToUniEvent(modelOutput: any): UniEvent;
 
   /**
    * Concatenate a stream of universal events into a single universal message.
@@ -425,7 +466,7 @@ export abstract class LLMClient {
    */
   concatUniEventsToUniMessage(events: UniEvent[]): UniMessage {
     const contentItems: ContentItem[] = [];
-    let stopEvent: UniStopEvent | null = null;
+    let stopEvent: UniEvent | null = null;
     for (const event of events) {
       if (event.event_type === "stop") {
         stopEvent = event;
@@ -450,17 +491,17 @@ export abstract class LLMClient {
   /**
    * Internal method to handle streaming response.
    *
-   * Each model client implements it to send the request and yield the client parts of the
-   * provider's stream; streamingResponse assembles them into universal events.
+   * Each model client implements it to send the request and yield one universal event per event
+   * of the provider's stream; streamingResponse assembles them into the public stream.
    *
    * @param options - Object containing messages and config
-   * @yields Client parts of the streaming response
+   * @yields Universal events of the streaming response
    */
   abstract _streamingResponseInternal(options: {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<ClientPart>;
+  }): AsyncGenerator<UniEvent>;
 
   /**
    * List the model ids the configured endpoint serves.
@@ -480,7 +521,7 @@ export abstract class LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniEvent> {
+  }): AsyncGenerator<UniDeltaEvent | UniStopEvent> {
     const { messages, config } = options;
 
     // Stamp any messages that don't yet have a created_at timestamp
@@ -492,12 +533,12 @@ export abstract class LLMClient {
     const requestMessages = normalizeLegacyMessages(messages);
 
     const assembler = new StreamAssembler(this.constructor.name);
-    for await (const part of this._streamingResponseInternal({
+    for await (const event of this._streamingResponseInternal({
       messages: requestMessages,
       config,
       signal: options.signal,
     })) {
-      yield* assembler.push(part);
+      yield* assembler.push(event);
     }
     yield* assembler.closeAll();
     const stopEvent = assembler.stop();
@@ -535,7 +576,7 @@ export abstract class LLMClient {
     message: UniMessage;
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniEvent> {
+  }): AsyncGenerator<UniDeltaEvent | UniStopEvent> {
     const { config } = options;
     const [message] = normalizeLegacyMessages([options.message]);
 
