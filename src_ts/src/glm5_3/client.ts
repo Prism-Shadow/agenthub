@@ -59,7 +59,12 @@ export class GLM5_3Client extends LLMClient {
   }) {
     super();
     this._model = options.model;
-    const key = options.apiKey || process.env.ZAI_API_KEY || undefined;
+    // The wrapped OpenAI SDK falls back to OPENAI_API_KEY when handed undefined, which would send
+    // an OpenAI credential to the Z.AI host, so resolve the key here and fail loudly instead.
+    const key = options.apiKey || process.env.ZAI_API_KEY;
+    if (!key) {
+      throw new Error("ZAI_API_KEY is required for GLM5_3Client.");
+    }
     const url =
       options.baseUrl ||
       process.env.ZAI_BASE_URL ||

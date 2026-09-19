@@ -56,7 +56,11 @@ class DeepSeekV4Client(LLMClient):
     ):
         """Initialize DeepSeek client with model, API key, and base URL."""
         self._model = model
+        # The wrapped OpenAI SDK falls back to OPENAI_API_KEY when handed None, which would send an
+        # OpenAI credential to the DeepSeek host, so resolve the key here and fail loudly instead.
         api_key = api_key or os.getenv("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise ValueError("DEEPSEEK_API_KEY is required for DeepSeekV4Client.")
         base_url = base_url or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com"
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         self._history: list[UniMessage] = []

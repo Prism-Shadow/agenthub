@@ -51,7 +51,11 @@ class KimiK3Client(LLMClient):
     ):
         """Initialize Kimi K3 client with model and API key."""
         self._model = model
+        # The wrapped OpenAI SDK falls back to OPENAI_API_KEY when handed None, which would send an
+        # OpenAI credential to the Moonshot host, so resolve the key here and fail loudly instead.
         api_key = api_key or os.getenv("MOONSHOT_API_KEY")
+        if not api_key:
+            raise ValueError("MOONSHOT_API_KEY is required for KimiK3Client.")
         base_url = base_url or os.getenv("MOONSHOT_BASE_URL") or "https://api.moonshot.cn/v1"
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         self._history: list[UniMessage] = []

@@ -52,7 +52,11 @@ class GLM5_3Client(LLMClient):
     ):
         """Initialize GLM client with model and API key."""
         self._model = model
+        # The wrapped OpenAI SDK falls back to OPENAI_API_KEY when handed None, which would send an
+        # OpenAI credential to the Z.AI host, so resolve the key here and fail loudly instead.
         api_key = api_key or os.getenv("ZAI_API_KEY")
+        if not api_key:
+            raise ValueError("ZAI_API_KEY is required for GLM5_3Client.")
         base_url = base_url or os.getenv("ZAI_BASE_URL") or "https://api.z.ai/api/paas/v4/"
         self._client = AsyncOpenAI(api_key=api_key, base_url=base_url, default_headers=default_headers)
         self._history: list[UniMessage] = []
