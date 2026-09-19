@@ -68,16 +68,25 @@ export class Claude5Client extends LLMClient {
       // example: bedrock://us-east-1
       const region = url.replace("bedrock://", "");
       const [accessKey, secretKey] = (key || "").split(",");
-      this._client = new AnthropicBedrock({
+      const bedrock = new AnthropicBedrock({
         awsSecretKey: secretKey,
         awsAccessKey: accessKey,
         awsRegion: region,
         defaultHeaders: options.defaultHeaders,
       });
+      // AnthropicBedrock's options type leaves out apiKey and authToken, yet the Anthropic client
+      // it extends still fills both from ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN and sends them
+      // to AWS beside the SigV4 signature, so clear them: the AWS credentials sign alone.
+      bedrock.apiKey = null;
+      bedrock.authToken = null;
+      this._client = bedrock;
       this._use_bedrock = true;
     } else {
       this._client = new Anthropic({
         apiKey: key,
+        // null, not undefined: the SDK fills an undefined authToken from ANTHROPIC_AUTH_TOKEN and
+        // sends it as Authorization: Bearer beside the key, to whatever base URL this client uses
+        authToken: null,
         baseURL: url,
         defaultHeaders: options.defaultHeaders,
       });

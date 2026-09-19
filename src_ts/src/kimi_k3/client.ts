@@ -57,7 +57,12 @@ export class KimiK3Client extends LLMClient {
   }) {
     super();
     this._model = options.model;
-    const key = options.apiKey || process.env.MOONSHOT_API_KEY || undefined;
+    // The wrapped OpenAI SDK falls back to OPENAI_API_KEY when handed undefined, which would send
+    // an OpenAI credential to the Moonshot host, so resolve the key here and fail loudly instead.
+    const key = options.apiKey || process.env.MOONSHOT_API_KEY;
+    if (!key) {
+      throw new Error("MOONSHOT_API_KEY is required for KimiK3Client.");
+    }
     const url =
       options.baseUrl ||
       process.env.MOONSHOT_BASE_URL ||

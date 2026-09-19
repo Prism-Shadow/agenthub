@@ -58,6 +58,9 @@ class AntMessagesClient(LLMClient):
         self._client = AsyncAnthropic(
             api_key=api_key, auth_token=api_key, base_url=base_url, default_headers=default_headers
         )
+        # With no credential the SDK reads the None auth_token as unset and may fill it from
+        # ANTHROPIC_AUTH_TOKEN, so pin the token to the key it was given.
+        self._client.auth_token = api_key
         self._history: list[UniMessage] = []
 
     def _convert_image_url_to_source(self, url: str) -> dict[str, Any]:

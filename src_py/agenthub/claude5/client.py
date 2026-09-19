@@ -68,6 +68,9 @@ class Claude5Client(LLMClient):
             self._use_bedrock = True
         else:
             self._client = AsyncAnthropic(api_key=api_key, base_url=base_url, default_headers=default_headers)
+            # The SDK reads a None auth_token as unset and may fill it from ANTHROPIC_AUTH_TOKEN, which it
+            # sends as Authorization: Bearer beside the key, to whatever base URL this client uses.
+            self._client.auth_token = None
             self._use_bedrock = False
 
         self._history: list[UniMessage] = []

@@ -64,10 +64,12 @@ export class AntMessagesClient extends LLMClient {
     const key = options.apiKey || process.env.ANTHROPIC_API_KEY || undefined;
     const url = options.baseUrl || process.env.ANTHROPIC_BASE_URL || undefined;
     // send the credential through both header conventions: Anthropic and DeepSeek read
-    // x-api-key while gateways such as OpenRouter and Z.AI read Authorization: Bearer
+    // x-api-key while gateways such as OpenRouter and Z.AI read Authorization: Bearer. With no
+    // credential the token has to be null, not undefined, or the SDK fills it from
+    // ANTHROPIC_AUTH_TOKEN.
     this._client = new Anthropic({
       apiKey: key,
-      authToken: key,
+      authToken: key ?? null,
       baseURL: url,
       defaultHeaders: options.defaultHeaders,
     });
