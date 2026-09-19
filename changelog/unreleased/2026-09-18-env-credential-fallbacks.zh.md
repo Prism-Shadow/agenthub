@@ -3,6 +3,7 @@
 - **Date:** 2026-09-18
 - **Type:** fix
 - **Scope:** `deepseek_v4`, `glm5_3`, `kimi_k3`, `claude5`, `ant_messages`
+- **PR:** [#224](https://github.com/Prism-Shadow/agenthub/pull/224)
 - **Breaking:** yes — 没有自身密钥的 DeepSeek、GLM 或 Kimi 客户端改为抛出异常，不再使用 `OPENAI_API_KEY`；任何客户端都不再读取 `ANTHROPIC_AUTH_TOKEN`
 
 [English](2026-09-18-env-credential-fallbacks.md)
