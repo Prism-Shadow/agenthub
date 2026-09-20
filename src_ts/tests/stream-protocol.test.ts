@@ -13,14 +13,16 @@
 // limitations under the License.
 
 import { describe, expect, jest, test } from "@jest/globals";
-import { doneMarker, LLMClient } from "../src/baseClient";
+import { LLMClient } from "../src/baseClient";
 import {
   EmptyResponseError,
   StreamProtocolError,
   ToolCallArgumentParseError,
 } from "../src/errors";
 import { normalizeLegacyMessages } from "../src/legacy";
+import { StreamItems } from "../src/streamItems";
 import {
+  DeltaContentItem,
   EventContentItem,
   Fidelity,
   FinishReason,
@@ -81,7 +83,8 @@ function withId(itemId: string, item: EventContentItem): EventContentItem {
 const FINISH = stop(USAGE, "stop");
 
 /**
- * A client that replays a fixed list of events and records the messages it was sent.
+ * A client that replays a fixed list of events, complete items included, and records the
+ * messages it was sent.
  */
 class ScriptedClient extends LLMClient {
   sentMessages: UniMessage[][] = [];
@@ -118,12 +121,60 @@ class ScriptedClient extends LLMClient {
   }
 }
 
+// one wire event of a provider: a fragment of an item, the end of an item, or the usage
+type Step =
+  | ["delta", string | undefined, DeltaContentItem]
+  | ["done", string | undefined]
+  | ["stop", UsageMetadata | null, FinishReason | null];
+
+/**
+ * A client that assembles its items with StreamItems the way every real client does, one wire
+ * event per step.
+ */
+class AssembledClient extends LLMClient {
+  constructor(private readonly steps: Step[]) {
+    super();
+    this._model = "assembled";
+  }
+
+  transformUniConfigToModelConfig(): undefined {
+    return undefined;
+  }
+
+  transformUniMessageToModelInput(messages: UniMessage[]): UniMessage[] {
+    return messages;
+  }
+
+  transformModelOutputToUniEvent(step: Step, items: StreamItems): UniEvent {
+    if (step[0] === "stop") {
+      return stop(step[1], step[2]);
+    }
+    return delta(
+      ...(step[0] === "delta"
+        ? items.delta(step[1], step[2])
+        : items.done(step[1])),
+    );
+  }
+
+  async *_streamingResponseInternal(): AsyncGenerator<UniEvent> {
+    const items = new StreamItems(this.constructor.name);
+    for (const step of this.steps) {
+      yield this.transformModelOutputToUniEvent(step, items);
+    }
+    yield delta(...items.end());
+  }
+
+  async listModels(): Promise<string[]> {
+    return [];
+  }
+}
+
 async function collect(
-  script: UniEvent[],
+  client: LLMClient,
   config: UniConfig = {},
 ): Promise<UniEvent[]> {
   const events: UniEvent[] = [];
-  for await (const event of new ScriptedClient(script).streamingResponse({
+  for await (const event of client.streamingResponse({
     messages: [USER],
     config,
   })) {
@@ -136,14 +187,16 @@ function items(events: UniEvent[]) {
   return events.flatMap((event) => event.content_items);
 }
 
-describe("stream assembly", () => {
+describe("the public stream", () => {
   test("text streams as deltas, a done item, then the stop event", async () => {
-    const events = await collect([
-      delta(withId("0", { type: "text.delta", text: "Hel" })),
-      delta(withId("0", { type: "text.delta", text: "lo" })),
-      delta(doneMarker("0")),
-      FINISH,
-    ]);
+    const events = await collect(
+      new ScriptedClient([
+        delta(withId("0", { type: "text.delta", text: "Hel" })),
+        delta(withId("0", { type: "text.delta", text: "lo" })),
+        delta(withId("0", { type: "text.done", text: "Hello" })),
+        FINISH,
+      ]),
+    );
 
     assertStreamGrammar(events);
     expect(items(events)).toEqual([
@@ -158,87 +211,69 @@ describe("stream assembly", () => {
     });
   });
 
-  test("the fidelity a delta carries is the done item's fidelity", async () => {
-    const events = await collect([
-      delta(
-        withId("msg", {
-          type: "text.delta",
-          text: "",
-          fidelity: { phase: "commentary" },
-        }),
-      ),
-      delta(withId("msg", { type: "text.delta", text: "Checking" })),
-      delta(doneMarker("msg")),
-      FINISH,
-    ]);
+  test("thinking closed by a signature, then a tool call", async () => {
+    const events = await collect(
+      new ScriptedClient([
+        delta(withId("0", { type: "thinking.delta", thinking: "Let me" })),
+        delta(withId("0", { type: "thinking.delta", thinking: " look" })),
+        delta(
+          withId("0", {
+            type: "thinking.delta",
+            thinking: "",
+            fidelity: { signature: "sig" },
+          }),
+        ),
+        delta(
+          withId("0", {
+            type: "thinking.done",
+            thinking: "Let me look",
+            fidelity: { signature: "sig" },
+          }),
+        ),
+        delta(
+          withId("1", {
+            type: "tool_call.delta",
+            name: "get_weather",
+            arguments: "",
+            tool_call_id: "toolu_1",
+          }),
+        ),
+        delta(
+          withId("1", {
+            type: "tool_call.delta",
+            name: "",
+            arguments: '{"city":"Paris"}',
+            tool_call_id: "",
+          }),
+        ),
+        delta(
+          withId("1", {
+            type: "tool_call.done",
+            name: "get_weather",
+            arguments: { city: "Paris" },
+            tool_call_id: "toolu_1",
+          }),
+        ),
+        stop(USAGE, "tool_call"),
+      ]),
+    );
 
     assertStreamGrammar(events);
-    expect(items(events)).toEqual([
-      { type: "text.delta", text: "", fidelity: { phase: "commentary" } },
-      { type: "text.delta", text: "Checking" },
-      {
-        type: "text.done",
-        text: "Checking",
-        fidelity: { phase: "commentary" },
-      },
-    ]);
-  });
-
-  test("thinking closed by a signature, then a tool call built from its fragments", async () => {
-    const events = await collect([
-      delta(withId("0", { type: "thinking.delta", thinking: "Let me" })),
-      delta(withId("0", { type: "thinking.delta", thinking: " look" })),
-      delta(
-        withId("0", {
-          type: "thinking.delta",
-          thinking: "",
+    expect(items(events).filter((item) => item.type.endsWith(".done"))).toEqual(
+      [
+        {
+          type: "thinking.done",
+          thinking: "Let me look",
           fidelity: { signature: "sig" },
-        }),
-      ),
-      delta(doneMarker("0")),
-      delta(
-        withId("1", {
-          type: "tool_call.delta",
+        },
+        {
+          type: "tool_call.done",
           name: "get_weather",
-          arguments: "",
+          arguments: { city: "Paris" },
           tool_call_id: "toolu_1",
-        }),
-      ),
-      delta(
-        withId("1", {
-          type: "tool_call.delta",
-          name: "",
-          arguments: '{"city":',
-          tool_call_id: "",
-        }),
-      ),
-      delta(
-        withId("1", {
-          type: "tool_call.delta",
-          name: "",
-          arguments: '"Paris"}',
-          tool_call_id: "",
-        }),
-      ),
-      delta(doneMarker("1")),
-      stop(USAGE, "tool_call"),
-    ]);
-
-    assertStreamGrammar(events);
-    const done = items(events).filter((item) => item.type.endsWith(".done"));
-    expect(done).toEqual([
-      {
-        type: "thinking.done",
-        thinking: "Let me look",
-        fidelity: { signature: "sig" },
-      },
-      {
-        type: "tool_call.done",
-        name: "get_weather",
-        arguments: { city: "Paris" },
-        tool_call_id: "toolu_1",
-      },
-    ]);
+        },
+      ],
+    );
   });
 
   test("an item that starts while another streams is held back until that one is done", async () => {
@@ -260,17 +295,28 @@ describe("stream assembly", () => {
           tool_call_id: "",
         }),
       );
+    const done = (id: string, args: Record<string, number>) =>
+      delta(
+        withId(id, {
+          type: "tool_call.done",
+          name: `tool_${id}`,
+          arguments: args,
+          tool_call_id: `call_${id}`,
+        }),
+      );
 
-    const events = await collect([
-      call("a"),
-      call("b"),
-      fragment("a", '{"x":'),
-      fragment("b", '{"y":2}'),
-      fragment("a", "1}"),
-      delta(doneMarker("a")),
-      delta(doneMarker("b")),
-      FINISH,
-    ]);
+    const events = await collect(
+      new ScriptedClient([
+        call("a"),
+        call("b"),
+        fragment("a", '{"x":'),
+        fragment("b", '{"y":2}'),
+        done("b", { y: 2 }),
+        fragment("a", "1}"),
+        done("a", { x: 1 }),
+        FINISH,
+      ]),
+    );
 
     assertStreamGrammar(events);
     expect(items(events).map((item) => item.type)).toEqual([
@@ -286,103 +332,31 @@ describe("stream assembly", () => {
     expect(items(events)[6]).toMatchObject({ arguments: { y: 2 } });
   });
 
-  test("items still open when the provider's stream ends are done before the stop", async () => {
-    const events = await collect([
-      delta(withId("0", { type: "text.delta", text: "a" })),
-      delta(withId("1", { type: "text.delta", text: "b" })),
-      FINISH,
-    ]);
-
-    assertStreamGrammar(events);
-    expect(items(events)).toEqual([
-      { type: "text.delta", text: "a" },
-      { type: "text.done", text: "a" },
-      { type: "text.delta", text: "b" },
-      { type: "text.done", text: "b" },
-    ]);
-  });
-
-  test("a repeated identical fidelity goes out once, empty fragments not at all", async () => {
-    const fidelity = { reasoning_field: "reasoning_content" };
-    const events = await collect([
-      delta(withId("0", { type: "thinking.delta", thinking: "" })),
-      delta(withId("0", { type: "thinking.delta", thinking: "a", fidelity })),
-      delta(withId("0", { type: "thinking.delta", thinking: "b", fidelity })),
-      delta(withId("1", { type: "text.delta", text: "ok" })),
-      FINISH,
-    ]);
-
-    assertStreamGrammar(events);
-    expect(items(events)).toEqual([
-      { type: "thinking.delta", thinking: "a", fidelity },
-      { type: "thinking.delta", thinking: "b" },
-      { type: "thinking.done", thinking: "ab", fidelity },
-      { type: "text.delta", text: "ok" },
-      { type: "text.done", text: "ok" },
-    ]);
-  });
-
-  test("audio chunks join into one done item and embeddings stream one vector per item", async () => {
-    const audio = await collect([
-      delta(
-        withId("0", {
-          type: "inline_data.delta",
-          data: Buffer.from([1, 2]),
-          mime_type: "audio/L16",
-        }),
-      ),
-      delta(
-        withId("0", {
-          type: "inline_data.delta",
-          data: Buffer.from([3]),
-          mime_type: "audio/L16",
-        }),
-      ),
-      FINISH,
-    ]);
-    assertStreamGrammar(audio);
-    expect(items(audio)[2]).toEqual({
-      type: "inline_data.done",
-      data: Buffer.from([1, 2, 3]),
-      mime_type: "audio/L16",
-    });
-
-    const embeddings = await collect([
-      delta({ type: "embedding.delta", embedding: [0.1] }),
-      delta({ type: "embedding.delta", embedding: [0.2] }),
-      FINISH,
-    ]);
-    assertStreamGrammar(embeddings);
-    expect(items(embeddings)).toEqual([
-      { type: "embedding.delta", embedding: [0.1] },
-      { type: "embedding.done", embedding: [0.1] },
-      { type: "embedding.delta", embedding: [0.2] },
-      { type: "embedding.done", embedding: [0.2] },
-    ]);
-  });
-
   test("usage pieces merge field by field", async () => {
-    const events = await collect([
-      delta(withId("0", { type: "text.delta", text: "a" })),
-      stop(
-        {
-          cached_tokens: 3,
-          prompt_tokens: 7,
-          thoughts_tokens: null,
-          response_tokens: null,
-        },
-        null,
-      ),
-      stop(
-        {
-          cached_tokens: null,
-          prompt_tokens: null,
-          thoughts_tokens: null,
-          response_tokens: 9,
-        },
-        "length",
-      ),
-    ]);
+    const events = await collect(
+      new ScriptedClient([
+        delta(withId("0", { type: "text.delta", text: "a" })),
+        delta(withId("0", { type: "text.done", text: "a" })),
+        stop(
+          {
+            cached_tokens: 3,
+            prompt_tokens: 7,
+            thoughts_tokens: null,
+            response_tokens: null,
+          },
+          null,
+        ),
+        stop(
+          {
+            cached_tokens: null,
+            prompt_tokens: null,
+            thoughts_tokens: null,
+            response_tokens: 9,
+          },
+          "length",
+        ),
+      ]),
+    );
 
     expect(events[events.length - 1]).toMatchObject({
       usage_metadata: {
@@ -404,8 +378,15 @@ describe("stream assembly", () => {
           fidelity: { signature: "s" },
         }),
       ),
-      delta(doneMarker("0")),
+      delta(
+        withId("0", {
+          type: "thinking.done",
+          thinking: "a",
+          fidelity: { signature: "s" },
+        }),
+      ),
       delta(withId("1", { type: "text.delta", text: "b" })),
+      delta(withId("1", { type: "text.done", text: "b" })),
       FINISH,
     ]);
     const events: UniEvent[] = [];
@@ -432,19 +413,26 @@ describe("stream assembly", () => {
 
   test("an event carries several items in wire order", async () => {
     // Responses reasoning: the fidelity arrives with the item's end, in one wire event
-    const reasoning = await collect([
-      delta(withId("rs_1", { type: "thinking.delta", thinking: "Plan" })),
-      delta(
-        withId("rs_1", {
-          type: "thinking.delta",
-          thinking: "",
-          fidelity: { encrypted_content: "enc" },
-        }),
-        doneMarker("rs_1"),
-      ),
-      delta(withId("msg_1", { type: "text.delta", text: "Done" })),
-      FINISH,
-    ]);
+    const reasoning = await collect(
+      new ScriptedClient([
+        delta(withId("rs_1", { type: "thinking.delta", thinking: "Plan" })),
+        delta(
+          withId("rs_1", {
+            type: "thinking.delta",
+            thinking: "",
+            fidelity: { encrypted_content: "enc" },
+          }),
+          withId("rs_1", {
+            type: "thinking.done",
+            thinking: "Plan",
+            fidelity: { encrypted_content: "enc" },
+          }),
+        ),
+        delta(withId("msg_1", { type: "text.delta", text: "Done" })),
+        delta(withId("msg_1", { type: "text.done", text: "Done" })),
+        FINISH,
+      ]),
+    );
     assertStreamGrammar(reasoning);
     expect(items(reasoning)).toEqual([
       { type: "thinking.delta", thinking: "Plan" },
@@ -464,12 +452,18 @@ describe("stream assembly", () => {
 
     // Chat Completions: the switch to content closes the reasoning, and the last content chunk
     // carries the finish reason, while the usage follows in a chunk of its own
-    const chat = await collect([
-      delta(withId("0", { type: "thinking.delta", thinking: "Hmm" })),
-      delta(doneMarker("0"), withId("1", { type: "text.delta", text: "Hel" })),
-      stop(null, "stop", [withId("1", { type: "text.delta", text: "lo" })]),
-      stop(USAGE, null),
-    ]);
+    const chat = await collect(
+      new ScriptedClient([
+        delta(withId("0", { type: "thinking.delta", thinking: "Hmm" })),
+        delta(
+          withId("0", { type: "thinking.done", thinking: "Hmm" }),
+          withId("1", { type: "text.delta", text: "Hel" }),
+        ),
+        stop(null, "stop", [withId("1", { type: "text.delta", text: "lo" })]),
+        delta(withId("1", { type: "text.done", text: "Hello" })),
+        stop(USAGE, null),
+      ]),
+    );
     assertStreamGrammar(chat);
     expect(items(chat)).toEqual([
       { type: "thinking.delta", thinking: "Hmm" },
@@ -484,63 +478,17 @@ describe("stream assembly", () => {
     });
   });
 
-  test("a done marker closes the item under its id whatever kind the item streams", async () => {
-    const call = delta(
-      withId("0", {
-        type: "tool_call.delta",
-        name: "f",
-        arguments: "{}",
-        tool_call_id: "call_1",
-      }),
-    );
-    const events = await collect([call, delta(doneMarker("0")), FINISH]);
-
-    assertStreamGrammar(events);
-    expect(items(events)).toEqual([
-      {
-        type: "tool_call.delta",
-        name: "f",
-        arguments: "{}",
-        tool_call_id: "call_1",
-      },
-      {
-        type: "tool_call.done",
-        name: "f",
-        arguments: {},
-        tool_call_id: "call_1",
-      },
-    ]);
-    // closed by the marker itself, not by the end of the stream
-    await expect(
-      collect([call, delta(doneMarker("0")), call, FINISH]),
-    ).rejects.toThrow("arrived after item 0 was done");
-  });
-
-  test("embedding vectors need no item_id and no done marker", async () => {
-    const events = await collect([
-      stop(USAGE, "stop", [
-        { type: "embedding.delta", embedding: [0.1, 0.2] },
-        { type: "embedding.delta", embedding: [0.3, 0.4] },
-      ]),
-    ]);
-
-    assertStreamGrammar(events);
-    expect(items(events)).toEqual([
-      { type: "embedding.delta", embedding: [0.1, 0.2] },
-      { type: "embedding.done", embedding: [0.1, 0.2] },
-      { type: "embedding.delta", embedding: [0.3, 0.4] },
-      { type: "embedding.done", embedding: [0.3, 0.4] },
-    ]);
-  });
-
   test("an empty delta event and a stop event carrying nothing are ignored", async () => {
-    const events = await collect([
-      delta(),
-      delta(withId("0", { type: "text.delta", text: "a" })),
-      FINISH,
-      stop(null, null),
-      delta(),
-    ]);
+    const events = await collect(
+      new ScriptedClient([
+        delta(),
+        delta(withId("0", { type: "text.delta", text: "a" })),
+        delta(withId("0", { type: "text.done", text: "a" })),
+        FINISH,
+        stop(null, null),
+        delta(),
+      ]),
+    );
 
     assertStreamGrammar(events);
     expect(items(events)).toEqual([
@@ -552,20 +500,148 @@ describe("stream assembly", () => {
       finish_reason: "stop",
     });
   });
+});
 
-  test("a done marker for an item that never streamed is ignored", async () => {
-    const events = await collect([
-      delta(withId("msg_1", { type: "text.delta", text: "" })),
-      delta(doneMarker("msg_1")),
-      delta(doneMarker("msg_2")),
-      delta(withId("msg_3", { type: "text.delta", text: "a" })),
-      FINISH,
+describe("a client assembling its items with StreamItems", () => {
+  test("an Anthropic-shaped stream: blocks under their index, done on their stop", async () => {
+    const events = await collect(
+      new AssembledClient([
+        ["stop", USAGE, null],
+        ["delta", "0", { type: "thinking.delta", thinking: "Let me" }],
+        ["delta", "0", { type: "thinking.delta", thinking: " look" }],
+        [
+          "delta",
+          "0",
+          {
+            type: "thinking.delta",
+            thinking: "",
+            fidelity: { signature: "sig" },
+          },
+        ],
+        ["done", "0"],
+        [
+          "delta",
+          "1",
+          {
+            type: "tool_call.delta",
+            name: "get_weather",
+            arguments: "",
+            tool_call_id: "toolu_1",
+          },
+        ],
+        [
+          "delta",
+          "1",
+          {
+            type: "tool_call.delta",
+            name: "",
+            arguments: '{"city":',
+            tool_call_id: "",
+          },
+        ],
+        [
+          "delta",
+          "1",
+          {
+            type: "tool_call.delta",
+            name: "",
+            arguments: '"Paris"}',
+            tool_call_id: "",
+          },
+        ],
+        ["done", "1"],
+        ["stop", null, "tool_call"],
+      ]),
+    );
+
+    assertStreamGrammar(events);
+    expect(items(events)).toEqual([
+      { type: "thinking.delta", thinking: "Let me" },
+      { type: "thinking.delta", thinking: " look" },
+      { type: "thinking.delta", thinking: "", fidelity: { signature: "sig" } },
+      {
+        type: "thinking.done",
+        thinking: "Let me look",
+        fidelity: { signature: "sig" },
+      },
+      {
+        type: "tool_call.delta",
+        name: "get_weather",
+        arguments: "",
+        tool_call_id: "toolu_1",
+      },
+      {
+        type: "tool_call.delta",
+        name: "",
+        arguments: '{"city":',
+        tool_call_id: "",
+      },
+      {
+        type: "tool_call.delta",
+        name: "",
+        arguments: '"Paris"}',
+        tool_call_id: "",
+      },
+      {
+        type: "tool_call.done",
+        name: "get_weather",
+        arguments: { city: "Paris" },
+        tool_call_id: "toolu_1",
+      },
     ]);
+    expect(events[events.length - 1]).toMatchObject({
+      usage_metadata: USAGE,
+      finish_reason: "tool_call",
+    });
+  });
+
+  test("items still open when the provider's stream ends are done before the stop", async () => {
+    const events = await collect(
+      new AssembledClient([
+        ["delta", "0", { type: "text.delta", text: "a" }],
+        ["delta", "1", { type: "text.delta", text: "b" }],
+        ["stop", USAGE, "stop"],
+      ]),
+    );
 
     assertStreamGrammar(events);
     expect(items(events)).toEqual([
       { type: "text.delta", text: "a" },
       { type: "text.done", text: "a" },
+      { type: "text.delta", text: "b" },
+      { type: "text.done", text: "b" },
+    ]);
+  });
+
+  test("a tool call's fragments reach the caller before its malformed arguments fail", async () => {
+    const events: UniEvent[] = [];
+    const run = async () => {
+      for await (const event of new AssembledClient([
+        [
+          "delta",
+          "0",
+          {
+            type: "tool_call.delta",
+            name: "f",
+            arguments: '{"a":',
+            tool_call_id: "c",
+          },
+        ],
+        ["done", "0"],
+        ["stop", USAGE, "stop"],
+      ]).streamingResponse({ messages: [USER], config: {} })) {
+        events.push(event);
+      }
+    };
+
+    await expect(run()).rejects.toBeInstanceOf(ToolCallArgumentParseError);
+    expect(items(events)).toEqual([
+      {
+        type: "tool_call.delta",
+        name: "f",
+        arguments: '{"a":',
+        tool_call_id: "c",
+      },
     ]);
   });
 });
@@ -576,12 +652,12 @@ describe("stream protocol violations and rejected responses", () => {
       "a delta after its item was done",
       [
         delta(withId("0", { type: "text.delta", text: "a" })),
-        delta(doneMarker("0")),
+        delta(withId("0", { type: "text.done", text: "a" })),
         delta(withId("0", { type: "text.delta", text: "b" })),
       ],
     ],
     [
-      "two different fidelity payloads in one item",
+      "a second delta carrying fidelity in one item",
       [
         delta(
           withId("0", {
@@ -594,7 +670,20 @@ describe("stream protocol violations and rejected responses", () => {
           withId("0", {
             type: "thinking.delta",
             thinking: "",
-            fidelity: { signature: "2" },
+            fidelity: { signature: "1" },
+          }),
+        ),
+      ],
+    ],
+    [
+      "a done item whose fidelity differs from its deltas'",
+      [
+        delta(withId("0", { type: "thinking.delta", thinking: "a" })),
+        delta(
+          withId("0", {
+            type: "thinking.done",
+            thinking: "a",
+            fidelity: { signature: "s" },
           }),
         ),
       ],
@@ -620,19 +709,19 @@ describe("stream protocol violations and rejected responses", () => {
       ],
     ],
     [
-      "a delta without fidelity.item_id",
-      [delta({ type: "text.delta", text: "a" })],
+      "a done item of another kind under an item's id",
+      [
+        delta(withId("0", { type: "text.delta", text: "a" })),
+        delta(withId("0", { type: "thinking.done", thinking: "a" })),
+      ],
     ],
     [
-      "a done marker carrying fidelity beyond item_id",
-      [
-        delta(withId("0", { type: "thinking.delta", thinking: "a" })),
-        delta({
-          type: "text.done",
-          text: "",
-          fidelity: { item_id: "0", signature: "s" },
-        }),
-      ],
+      "a done item no delta of which streamed",
+      [delta(withId("0", { type: "text.done", text: "a" }))],
+    ],
+    [
+      "a delta without fidelity.item_id",
+      [delta({ type: "text.delta", text: "a" })],
     ],
     [
       "a delta event carrying a finish reason",
@@ -643,10 +732,32 @@ describe("stream protocol violations and rejected responses", () => {
         },
       ],
     ],
+    [
+      "an item still open when the stream ends",
+      [delta(withId("0", { type: "text.delta", text: "a" }))],
+    ],
   ])("%s raises StreamProtocolError", async (_name, script) => {
-    await expect(collect([...script, FINISH])).rejects.toBeInstanceOf(
-      StreamProtocolError,
-    );
+    await expect(
+      collect(new ScriptedClient([...script, FINISH])),
+    ).rejects.toBeInstanceOf(StreamProtocolError);
+  });
+
+  test("the items of an event reach the caller up to the one that fails", async () => {
+    const events: UniEvent[] = [];
+    const run = async () => {
+      for await (const event of new ScriptedClient([
+        delta(
+          withId("0", { type: "text.delta", text: "a" }),
+          withId("0", { type: "thinking.delta", thinking: "b" }),
+        ),
+        FINISH,
+      ]).streamingResponse({ messages: [USER], config: {} })) {
+        events.push(event);
+      }
+    };
+
+    await expect(run()).rejects.toBeInstanceOf(StreamProtocolError);
+    expect(items(events)).toEqual([{ type: "text.delta", text: "a" }]);
   });
 
   test("a stream without usage or finish reason yields no stop event", async () => {
@@ -654,6 +765,7 @@ describe("stream protocol violations and rejected responses", () => {
     const run = async () => {
       for await (const event of new ScriptedClient([
         delta(withId("0", { type: "text.delta", text: "a" })),
+        delta(withId("0", { type: "text.done", text: "a" })),
         stop(null, "stop"),
       ]).streamingResponse({ messages: [USER], config: {} })) {
         events.push(event);
@@ -665,58 +777,24 @@ describe("stream protocol violations and rejected responses", () => {
   });
 
   test("a thinking-only response raises EmptyResponseError carrying its usage", async () => {
-    const error = await collect([
-      delta(withId("0", { type: "thinking.delta", thinking: "hmm" })),
-      FINISH,
-    ]).catch((caught) => caught);
+    const error = await collect(
+      new ScriptedClient([
+        delta(withId("0", { type: "thinking.delta", thinking: "hmm" })),
+        delta(withId("0", { type: "thinking.done", thinking: "hmm" })),
+        FINISH,
+      ]),
+    ).catch((caught) => caught);
 
     expect(error).toBeInstanceOf(EmptyResponseError);
     expect(error.usageMetadata).toEqual(USAGE);
     expect(error.finishReason).toBe("stop");
-  });
-
-  test("malformed tool call arguments raise when the call is done", async () => {
-    await expect(
-      collect([
-        delta(
-          withId("0", {
-            type: "tool_call.delta",
-            name: "f",
-            arguments: '{"a":',
-            tool_call_id: "c",
-          }),
-        ),
-        delta(doneMarker("0")),
-        FINISH,
-      ]),
-    ).rejects.toBeInstanceOf(ToolCallArgumentParseError);
-  });
-
-  test("a whole tool call reaches the caller before its done marker in the same event fails", async () => {
-    const call = {
-      type: "tool_call.delta" as const,
-      name: "f",
-      arguments: '{"a":',
-      tool_call_id: "c",
-    };
-    const events: UniEvent[] = [];
-    const run = async () => {
-      for await (const event of new ScriptedClient([
-        delta(withId("0", call), doneMarker("0")),
-        FINISH,
-      ]).streamingResponse({ messages: [USER], config: {} })) {
-        events.push(event);
-      }
-    };
-
-    await expect(run()).rejects.toBeInstanceOf(ToolCallArgumentParseError);
-    expect(items(events)).toEqual([call]);
   });
 });
 
 describe("history and legacy messages", () => {
   const reply: UniEvent[] = [
     delta(withId("0", { type: "text.delta", text: "hello" })),
+    delta(withId("0", { type: "text.done", text: "hello" })),
     FINISH,
   ];
 
@@ -742,7 +820,7 @@ describe("history and legacy messages", () => {
   });
 
   test("concatUniEventsToUniMessage keeps the done items and the stop event's metadata", async () => {
-    const events = await collect(reply);
+    const events = await collect(new ScriptedClient(reply));
     const message = new ScriptedClient([]).concatUniEventsToUniMessage(events);
     expect(message).toMatchObject({
       role: "assistant",

@@ -78,9 +78,9 @@ class EmptyResponseError(AgentHubError):
 class StreamProtocolError(AgentHubError):
     """Raised when a client produces a stream that breaks the streaming protocol.
 
-    Examples are a fragment after its item was completed, a second different fidelity within
-    one item, a tool call whose first fragment lacks its name or id, or a fragment of another
-    kind under an item's key.
+    Examples are a fragment after its item was done, a second different fidelity within one
+    item, a tool call whose first fragment lacks its name or id, a fragment of another kind
+    under an item's id, or an item still open when the stream ends.
 
     It always reports a bug in the client rather than in the provider's output, so it is
     raised in every mode instead of being repaired into a stream that breaks the contract.

@@ -93,10 +93,10 @@ Messages saved before 0.5.0 use item types without the suffix (`text`, `tool_cal
 
 ## UniEvent
 
-`UniEvent` is the general event shape. A stream yields `UniDeltaEvent` events while the response is running, then exactly one `UniStopEvent`.
+`UniEvent` is the one event shape. A stream yields `delta` events while the response is running, then exactly one `stop` event.
 
 ```typescript
-const deltaEvent: UniDeltaEvent = {
+const deltaEvent: UniEvent = {
   role: "assistant",
   event_type: "delta",
   content_items: [{ type: "text.delta", text: "Hel" }],
@@ -105,7 +105,7 @@ const deltaEvent: UniDeltaEvent = {
   created_at: 1694502400000,
 };
 
-const stopEvent: UniStopEvent = {
+const stopEvent: UniEvent = {
   role: "assistant",
   event_type: "stop",
   content_items: [],

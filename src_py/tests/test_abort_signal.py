@@ -102,6 +102,13 @@ class MultiEventStreamingClient(LLMClient):
         await asyncio.sleep(0)
         yield {
             "role": "assistant",
+            "event_type": "delta",
+            "content_items": [{"type": "text.done", "text": "hello world", "fidelity": {"item_id": "0"}}],
+            "usage_metadata": None,
+            "finish_reason": None,
+        }
+        yield {
+            "role": "assistant",
             "event_type": "stop",
             "content_items": [],
             "usage_metadata": {

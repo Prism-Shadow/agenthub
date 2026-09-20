@@ -14,7 +14,7 @@
 
 import * as fs from "fs";
 import * as path from "path";
-import { doneMarker, LLMClient } from "../src/baseClient";
+import { LLMClient } from "../src/baseClient";
 import { Tracer } from "../src/integration/tracer";
 import { EventContentItem, UniEvent, UniMessage } from "../src/types";
 import {
@@ -440,7 +440,11 @@ describe("Tracer", () => {
     const client = new ScriptedClient([
       delta({ type: "text.delta", text: "Hello ", fidelity: { item_id: "0" } }),
       delta({ type: "text.delta", text: "there!", fidelity: { item_id: "0" } }),
-      delta(doneMarker("0")),
+      delta({
+        type: "text.done",
+        text: "Hello there!",
+        fidelity: { item_id: "0" },
+      }),
       STOP,
     ]);
 
@@ -490,7 +494,11 @@ describe("Tracer", () => {
         text: "Hello",
         fidelity: { item_id: "0", signature: "s" },
       }),
-      delta(doneMarker("0")),
+      delta({
+        type: "text.done",
+        text: "Hello",
+        fidelity: { item_id: "0", signature: "s" },
+      }),
       STOP,
     ]);
 

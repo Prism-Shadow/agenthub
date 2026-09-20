@@ -22,8 +22,9 @@ import httpx
 from anthropic import AsyncAnthropic, AsyncAnthropicBedrock
 from anthropic.types.beta import BetaMessageParam, BetaRawMessageStreamEvent
 
-from ..base_client import LLMClient, done_marker
+from ..base_client import LLMClient
 from ..errors import UnsupportedOperationError, UnsupportedParameterError
+from ..stream_items import StreamItems
 from ..types import (
     EventContentItem,
     EventType,
@@ -284,12 +285,16 @@ class Claude5Client(LLMClient):
 
         return claude_messages
 
-    def transform_model_output_to_uni_event(self, model_output: BetaRawMessageStreamEvent) -> UniEvent:
+    def transform_model_output_to_uni_event(
+        self, model_output: BetaRawMessageStreamEvent, items: StreamItems
+    ) -> UniEvent:
         """
-        Transform one Claude stream event into a universal event, identifying items by content block index.
+        Transform one Claude stream event into a universal event. A content block is an item, under its
+        index: its start and deltas are fragments, its stop completes it.
 
         Args:
             model_output: Claude streaming event
+            items: The items of the stream this event belongs to
 
         Returns:
             Universal event dictionary, an empty delta event when the wire event carries nothing universal
@@ -304,55 +309,48 @@ class Claude5Client(LLMClient):
             item_id = str(model_output.index)
             block = model_output.content_block
             if block.type == "tool_use":
-                content_items.append(
-                    {
-                        "type": "tool_call.delta",
-                        "name": block.name,
-                        "arguments": "",
-                        "tool_call_id": block.id,
-                        "fidelity": {"item_id": item_id},
-                    }
+                content_items.extend(
+                    items.delta(
+                        item_id,
+                        {"type": "tool_call.delta", "name": block.name, "arguments": "", "tool_call_id": block.id},
+                    )
                 )
             elif block.type == "redacted_thinking":
-                content_items.append(
-                    {
-                        "type": "thinking.delta",
-                        "thinking": REDACTED_THINKING,
-                        "fidelity": {"item_id": item_id, "signature": block.data},
-                    }
+                content_items.extend(
+                    items.delta(
+                        item_id,
+                        {
+                            "type": "thinking.delta",
+                            "thinking": REDACTED_THINKING,
+                            "fidelity": {"signature": block.data},
+                        },
+                    )
                 )
 
         elif claude_event_type == "content_block_delta":
             item_id = str(model_output.index)
             delta = model_output.delta
             if delta.type == "thinking_delta":
-                content_items.append(
-                    {"type": "thinking.delta", "thinking": delta.thinking, "fidelity": {"item_id": item_id}}
-                )
+                content_items.extend(items.delta(item_id, {"type": "thinking.delta", "thinking": delta.thinking}))
             elif delta.type == "text_delta":
-                content_items.append({"type": "text.delta", "text": delta.text, "fidelity": {"item_id": item_id}})
+                content_items.extend(items.delta(item_id, {"type": "text.delta", "text": delta.text}))
             elif delta.type == "input_json_delta":
-                content_items.append(
-                    {
-                        "type": "tool_call.delta",
-                        "name": "",
-                        "arguments": delta.partial_json,
-                        "tool_call_id": "",
-                        "fidelity": {"item_id": item_id},
-                    }
+                content_items.extend(
+                    items.delta(
+                        item_id,
+                        {"type": "tool_call.delta", "name": "", "arguments": delta.partial_json, "tool_call_id": ""},
+                    )
                 )
             elif delta.type == "signature_delta":
-                # the signature closes the thinking block it belongs to
-                content_items.append(
-                    {
-                        "type": "thinking.delta",
-                        "thinking": "",
-                        "fidelity": {"item_id": item_id, "signature": delta.signature},
-                    }
+                # the last delta of a thinking block: its signature
+                content_items.extend(
+                    items.delta(
+                        item_id, {"type": "thinking.delta", "thinking": "", "fidelity": {"signature": delta.signature}}
+                    )
                 )
 
         elif claude_event_type == "content_block_stop":
-            content_items.append(done_marker(str(model_output.index)))
+            content_items.extend(items.done(str(model_output.index)))
 
         elif claude_event_type == "message_start":
             event_type = "stop"
@@ -436,8 +434,18 @@ class Claude5Client(LLMClient):
                     pass
 
         stream = await self._client.beta.messages.create(**claude_config, messages=claude_messages)
+        items = StreamItems(self.__class__.__name__)
         async for event in stream:
-            yield self.transform_model_output_to_uni_event(event)
+            yield self.transform_model_output_to_uni_event(event, items)
+
+        # the provider's stream ended: whatever is still open is done
+        yield {
+            "role": "assistant",
+            "event_type": "delta",
+            "content_items": items.end(),
+            "usage_metadata": None,
+            "finish_reason": None,
+        }
 
     async def list_models(self) -> list[str]:
         """

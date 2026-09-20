@@ -17,7 +17,8 @@ from typing import Any, AsyncIterator
 
 from .abort_signal import AbortSignal
 from .base_client import LLMClient
-from .types import UniConfig, UniDeltaEvent, UniEvent, UniMessage, UniStopEvent
+from .stream_items import StreamItems
+from .types import UniConfig, UniEvent, UniMessage
 
 
 # The generic protocol clients are named explicitly rather than deduced from a model id.
@@ -178,9 +179,9 @@ class AutoLLMClient(LLMClient):
         """Delegate to underlying client's transform_uni_message_to_model_input."""
         return self._client.transform_uni_message_to_model_input(messages)
 
-    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
+    def transform_model_output_to_uni_event(self, model_output: Any, items: StreamItems) -> UniEvent:
         """Delegate to underlying client's transform_model_output_to_uni_event."""
-        return self._client.transform_model_output_to_uni_event(model_output)
+        return self._client.transform_model_output_to_uni_event(model_output, items)
 
     async def _streaming_response_internal(
         self,
@@ -194,7 +195,7 @@ class AutoLLMClient(LLMClient):
         messages: list[UniMessage],
         config: UniConfig,
         signal: AbortSignal | None = None,
-    ) -> AsyncIterator[UniDeltaEvent | UniStopEvent]:
+    ) -> AsyncIterator[UniEvent]:
         """Route to underlying client's streaming_response."""
         async for event in self._client.streaming_response(
             messages=messages,
@@ -208,7 +209,7 @@ class AutoLLMClient(LLMClient):
         message: UniMessage,
         config: UniConfig,
         signal: AbortSignal | None = None,
-    ) -> AsyncIterator[UniDeltaEvent | UniStopEvent]:
+    ) -> AsyncIterator[UniEvent]:
         """Route to underlying client's streaming_response_stateful."""
         async for event in self._client.streaming_response_stateful(
             message=message,

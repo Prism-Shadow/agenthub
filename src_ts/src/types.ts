@@ -193,7 +193,9 @@ export interface UniMessage {
 }
 
 /**
- * Universal event format for streaming responses.
+ * Universal event format for streaming responses: a "delta" event carries exactly one delta or
+ * done item and no usage or finish reason; the one "stop" event that ends every successful
+ * stream carries no items and both.
  */
 export interface UniEvent {
   role: Role;
@@ -202,25 +204,6 @@ export interface UniEvent {
   usage_metadata: UsageMetadata | null;
   finish_reason: FinishReason | null;
   created_at?: number;
-}
-
-/**
- * A streamed event while the response is still running: exactly one delta or done item.
- */
-export interface UniDeltaEvent extends UniEvent {
-  event_type: "delta";
-  usage_metadata: null;
-  finish_reason: null;
-}
-
-/**
- * The last event of every successful stream, carrying no content items.
- */
-export interface UniStopEvent extends UniEvent {
-  event_type: "stop";
-  content_items: [];
-  usage_metadata: UsageMetadata;
-  finish_reason: FinishReason;
 }
 
 /**

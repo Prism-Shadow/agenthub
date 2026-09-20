@@ -21,6 +21,7 @@ import {
   UniEvent,
   UniMessage,
 } from "../src";
+import { StreamItems } from "../src/streamItems";
 import { assertStreamGrammar } from "./streamGrammar";
 
 type StreamClient = {
@@ -119,6 +120,9 @@ const messages: UniMessage[] = [
 ];
 
 // what a client makes of a wire event that carries nothing universal
+// a fresh StreamItems for a transform called on its own
+const items = () => new StreamItems("test");
+
 const EMPTY_EVENT: UniEvent = {
   role: "assistant",
   event_type: "delta",
@@ -462,9 +466,9 @@ describe.each(RESPONSES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        expect(client.transformModelOutputToUniEvent(unknownEvent())).toEqual(
-          EMPTY_EVENT,
-        );
+        expect(
+          client.transformModelOutputToUniEvent(unknownEvent(), items()),
+        ).toEqual(EMPTY_EVENT);
         installFakeResponsesStream(client, [
           unknownEvent(),
           responsesTextDeltaEvent("Here is"),
@@ -569,9 +573,9 @@ describe.each(MESSAGES_STREAM_CASES)(
       "skips an unknown event that is %s",
       async (_label, unknownEvent) => {
         const client = createAutoClient(testCase);
-        expect(client.transformModelOutputToUniEvent(unknownEvent())).toEqual(
-          EMPTY_EVENT,
-        );
+        expect(
+          client.transformModelOutputToUniEvent(unknownEvent(), items()),
+        ).toEqual(EMPTY_EVENT);
         installFakeMessagesStream(client, [
           unknownEvent(),
           messagesStartEvent(),
@@ -633,7 +637,10 @@ describe.each(GEMINI_STREAM_CASES)(
     test("skips an unknown delta", async () => {
       const client = createAutoClient(testCase);
       expect(
-        client.transformModelOutputToUniEvent(geminiUnknownDeltaEvent()),
+        client.transformModelOutputToUniEvent(
+          geminiUnknownDeltaEvent(),
+          items(),
+        ),
       ).toEqual(EMPTY_EVENT);
       installFakeGeminiStream(client, [
         geminiUnknownDeltaEvent(),
@@ -801,6 +808,7 @@ describe.each(GENERATE_CONTENT_STREAM_CASES)(
       expect(
         client.transformModelOutputToUniEvent(
           generateContentUnknownPartChunk(),
+          items(),
         ),
       ).toEqual(EMPTY_EVENT);
       installFakeGenerateContentStream(client, [
@@ -917,9 +925,9 @@ describe.each(IGNORABLE_EVENT_CASES)(
       process.env.AGENTHUB_DEBUG = "1";
       const client = createAutoClient(testCase);
       const [ignorableEvent] = stream();
-      expect(client.transformModelOutputToUniEvent(ignorableEvent)).toEqual(
-        EMPTY_EVENT,
-      );
+      expect(
+        client.transformModelOutputToUniEvent(ignorableEvent, items()),
+      ).toEqual(EMPTY_EVENT);
       install(client, stream());
 
       const events = await collectEvents(

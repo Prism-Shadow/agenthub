@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { LLMClient } from "./baseClient";
+import { StreamItems } from "./streamItems";
 import { Gemini3_8Client } from "./gemini3_8";
 import { Gemini3_8GenerateContentClient } from "./gemini3_8_generate_content";
 import { Claude5Client } from "./claude5";
@@ -26,13 +27,7 @@ import { OpenaiEmbeddingClient } from "./openai_embedding";
 import { DeepSeekV4Client } from "./deepseek_v4";
 import { MiniMaxM3Client } from "./minimax_m3";
 import { OpenaiChatVllmAdapterClient } from "./openai_chat_vllm_adapter";
-import {
-  UniConfig,
-  UniDeltaEvent,
-  UniEvent,
-  UniMessage,
-  UniStopEvent,
-} from "./types";
+import { UniConfig, UniEvent, UniMessage } from "./types";
 
 type LLMClientConstructor = new (options: {
   model: string;
@@ -228,9 +223,12 @@ export class AutoLLMClient extends LLMClient {
   /**
    * Delegate to underlying client's transformModelOutputToUniEvent.
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  transformModelOutputToUniEvent(modelOutput: any): UniEvent {
-    return this._client.transformModelOutputToUniEvent(modelOutput);
+  transformModelOutputToUniEvent(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    modelOutput: any,
+    items: StreamItems,
+  ): UniEvent {
+    return this._client.transformModelOutputToUniEvent(modelOutput, items);
   }
 
   /**
@@ -248,7 +246,7 @@ export class AutoLLMClient extends LLMClient {
     messages: UniMessage[];
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniDeltaEvent | UniStopEvent> {
+  }): AsyncGenerator<UniEvent> {
     for await (const event of this._client.streamingResponse({
       messages: options.messages,
       config: options.config,
@@ -265,7 +263,7 @@ export class AutoLLMClient extends LLMClient {
     message: UniMessage;
     config: UniConfig;
     signal?: AbortSignal;
-  }): AsyncGenerator<UniDeltaEvent | UniStopEvent> {
+  }): AsyncGenerator<UniEvent> {
     for await (const event of this._client.streamingResponseStateful({
       message: options.message,
       config: options.config,
