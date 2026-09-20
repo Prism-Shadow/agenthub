@@ -74,7 +74,10 @@ const tracer = new Tracer("./cache");
 const model = "gpt-5.5";
 const history = [
   { role: "user", content_items: [{ type: "text.done", text: "Hello!" }] },
-  { role: "assistant", content_items: [{ type: "text.done", text: "Hi there!" }] },
+  {
+    role: "assistant",
+    content_items: [{ type: "text.done", text: "Hi there!" }],
+  },
 ];
 const config = {};
 tracer.saveHistory(model, history, "session/conv_001", config);
