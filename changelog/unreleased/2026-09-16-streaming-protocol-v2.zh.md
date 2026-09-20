@@ -29,7 +29,7 @@
 - `StreamItems` 对所有种类只用一条组装规则：每种内容项只有一个增长字段（`text`、`thinking`、`arguments`、`data`、`embedding`），done 项就是该内容项的第一个片段，把增长字段替换为所有片段的拼接（工具调用参数会被解析），再加上该内容项的 fidelity。片段归属于其 id 所指的内容项；没有 id 的片段，或 id 指不到任何内容项的续传片段，归属于最近流出的内容项（须仍未结束且种类相同）；在某个内容项的 id 下送来的 fidelity 属于该内容项，无论它流出的是哪种内容。一次只流一个内容项且不给出结束信号的服务商（Chat Completions、generateContent、Interactions）使用 `sequential`：下一个内容项的第一个片段结束前一个。片段与 done 项流出时携带 `fidelity.item_id`，即该内容项在流中的序号。
 - `usage_metadata` 与 `finish_reason` 在线路给出它们的位置随 `stop` 事件到达，可以分段到达，由基类逐字段合并；客户端的 `stop` 事件不会结束流。
 - 基类把事件收窄成流：某个内容项在另一个仍在流式输出时开始，会被暂存到前一个完成之后；逐项检查语法、剥离 `item_id`、合并用量并构造唯一的 `stop` 事件，因此 `item_id` 不会到达消费方、trace 或历史记录。基类不构建任何内容。各客户端中的工具调用累加器、参数解析、用量合并、id 记账与合成 stop 的逻辑被移除，基类中针对 `unused` 事件的防护也一并移除。
-- 内容项 id：`claude5` 与 `ant_messages` 使用 content block 的 index；`gpt6`、`openai_responses`、`deepseek_v4` 与 `minimax_m3` 使用输出 item 的 id；`openai_chat`、`openai_chat_vllm_adapter`、`glm5_3` 与 `kimi_k3` 使用线路字段名（`reasoning_content`、`reasoning`、`content`、`tool_calls.<index>`）；`gemini3_8_generate_content` 使用 part 的种类；`gemini3_8` 使用 step 的 index；embedding 客户端使用向量的位置。
+- 内容项 id：`claude5` 与 `ant_messages` 使用 content block 的 index；`gpt6`、`openai_responses`、`deepseek_v4` 与 `minimax_m3` 使用输出 item 的 id；`openai_chat`、`openai_chat_vllm_adapter`、`glm5_3` 与 `kimi_k3` 使用线路字段名（`reasoning_content`、`reasoning`、`content`、`tool_calls`），带名称的工具调用片段会先结束上一个调用；`gemini3_8_generate_content` 使用 part 的种类；`gemini3_8` 使用 step 的 index；embedding 向量不带 id，每个向量自成一项。
 - fidelity 只附加一次，附在它完整可知的那个增量上：Claude 的 signature 附在一个空的 `thinking.delta` 上，Responses 的推理 fidelity 附在 `response.output_item.done` 时的一个空 `thinking.delta` 上，GPT 的 `phase` 附在 `response.output_item.added` 时的一个空 `text.delta` 上。Chat Completions 客户端给每个推理增量附加的 `reasoning_field` 只输出一次。
 
 ## 兼容性

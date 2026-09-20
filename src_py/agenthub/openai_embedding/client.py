@@ -19,7 +19,8 @@ from openai import AsyncOpenAI
 
 from ..base_client import LLMClient
 from ..errors import UnsupportedParameterError
-from ..types import UniConfig, UniEvent, UniMessage
+from ..stream_items import StreamItems
+from ..types import EventContentItem, UniConfig, UniEvent, UniMessage
 
 
 class OpenaiEmbeddingClient(LLMClient):
@@ -64,13 +65,21 @@ class OpenaiEmbeddingClient(LLMClient):
             texts.append(msg_text or " ")
         return texts
 
-    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
-        """Transform an OpenAI Embeddings response into a universal event, one complete item per vector."""
+    def transform_model_output_to_uni_event(self, model_output: Any, items: StreamItems) -> UniEvent:
+        """
+        Transform an OpenAI Embeddings response into a universal event. A vector is an item of its own,
+        complete in its one fragment.
+        """
         usage = getattr(model_output, "usage", None)
+        content_items: list[EventContentItem] = []
+        for item in model_output.data:
+            content_items.extend(items.delta(None, {"type": "embedding.delta", "embedding": item.embedding}))
+            content_items.extend(items.done())
+
         return {
             "role": "assistant",
             "event_type": "stop",
-            "content_items": [{"type": "embedding.delta", "embedding": item.embedding} for item in model_output.data],
+            "content_items": content_items,
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": usage.prompt_tokens if usage else None,
@@ -89,7 +98,7 @@ class OpenaiEmbeddingClient(LLMClient):
         params = self.transform_uni_config_to_model_config(config)
         params["input"] = self.transform_uni_message_to_model_input(messages)
         result = await self._client.embeddings.create(**params)
-        yield self.transform_model_output_to_uni_event(result)
+        yield self.transform_model_output_to_uni_event(result, StreamItems(self.__class__.__name__))
 
     async def list_models(self) -> list[str]:
         """

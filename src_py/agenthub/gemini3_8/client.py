@@ -24,8 +24,9 @@ from google import genai
 from google.genai import interactions, types
 from google.oauth2 import service_account
 
-from ..base_client import LLMClient, done_marker
+from ..base_client import LLMClient
 from ..errors import UnsupportedParameterError
+from ..stream_items import StreamItems
 from ..types import (
     EventContentItem,
     EventType,
@@ -417,12 +418,19 @@ class Gemini3_8Client(LLMClient):
 
         return steps
 
-    def transform_model_output_to_uni_event(self, model_output: interactions.InteractionSSEEvent) -> UniEvent:
+    def transform_model_output_to_uni_event(
+        self, model_output: interactions.InteractionSSEEvent, items: StreamItems
+    ) -> UniEvent:
         """
-        Transform one Interactions API stream event into a universal event, its items identified by step index.
+        Transform one Interactions API stream event into a universal event.
+
+        A step's items go under its index: step.stop completes the one streaming, and within a step an
+        item runs until a fragment of another kind arrives, since a thought summary can go text, image,
+        text. Every image is a whole item of its own, while audio streams in chunks of one item.
 
         Args:
             model_output: Interactions API stream event
+            items: The items of the stream this event belongs to
 
         Returns:
             Universal event dictionary
@@ -437,14 +445,16 @@ class Gemini3_8Client(LLMClient):
             if step.type == "function_call":
                 # the start names the call; its arguments stream as deltas behind an empty object
                 start_arguments = json.dumps(step.arguments, ensure_ascii=False) if step.arguments else ""
-                content_items.append(
-                    {
-                        "type": "tool_call.delta",
-                        "name": step.name,
-                        "arguments": start_arguments,
-                        "tool_call_id": step.id,
-                        "fidelity": {"item_id": str(model_output.index)},
-                    }
+                content_items.extend(
+                    items.delta(
+                        str(model_output.index),
+                        {
+                            "type": "tool_call.delta",
+                            "name": step.name,
+                            "arguments": start_arguments,
+                            "tool_call_id": step.id,
+                        },
+                    )
                 )
             elif step.type in ("thought", "model_output"):
                 # their content arrives in the step's deltas
@@ -456,64 +466,73 @@ class Gemini3_8Client(LLMClient):
             item_id = str(model_output.index)
             delta = model_output.delta
             if delta.type == "thought_summary" and delta.content is not None and delta.content.type == "text":
-                content_items.append(
-                    {"type": "thinking.delta", "thinking": delta.content.text, "fidelity": {"item_id": item_id}}
-                )
+                content_items.extend(items.delta(item_id, {"type": "thinking.delta", "thinking": delta.content.text}))
             elif delta.type == "thought_summary" and delta.content is not None and delta.content.type == "image":
-                # image models summarize their thinking with interim images too
-                content_items.append(
-                    {
-                        "type": "inline_thinking.delta",
-                        "data": base64.b64decode(delta.content.data or ""),
-                        "mime_type": delta.content.mime_type or "image/jpeg",
-                        "fidelity": {"item_id": item_id},
-                    }
+                # image models summarize their thinking with interim images too; the image before is
+                # done, and this one stays open for the signature its step may end with
+                content_items.extend(items.done(item_id))
+                content_items.extend(
+                    items.delta(
+                        item_id,
+                        {
+                            "type": "inline_thinking.delta",
+                            "data": base64.b64decode(delta.content.data or ""),
+                            "mime_type": delta.content.mime_type or "image/jpeg",
+                        },
+                    )
                 )
             elif delta.type == "thought_signature":
-                # the signature is the last delta of its thought step
-                content_items.append(
-                    {
-                        "type": "thinking.delta",
-                        "thinking": "",
-                        "fidelity": {"item_id": item_id, "signature": delta.signature},
-                    }
+                # the signature is the last delta of its thought step, and belongs to the item the
+                # step ends with, an image one included
+                content_items.extend(
+                    items.delta(
+                        item_id, {"type": "thinking.delta", "thinking": "", "fidelity": {"signature": delta.signature}}
+                    )
                 )
             elif delta.type == "arguments_delta":
-                content_items.append(
-                    {
-                        "type": "tool_call.delta",
-                        "name": "",
-                        "arguments": delta.arguments or "",
-                        "tool_call_id": "",
-                        "fidelity": {"item_id": item_id},
-                    }
+                content_items.extend(
+                    items.delta(
+                        item_id,
+                        {
+                            "type": "tool_call.delta",
+                            "name": "",
+                            "arguments": delta.arguments or "",
+                            "tool_call_id": "",
+                        },
+                    )
                 )
             elif delta.type == "text":
-                content_items.append({"type": "text.delta", "text": delta.text, "fidelity": {"item_id": item_id}})
+                content_items.extend(items.delta(item_id, {"type": "text.delta", "text": delta.text}))
             elif delta.type == "image":
-                content_items.append(
-                    {
-                        "type": "inline_data.delta",
-                        "data": base64.b64decode(delta.data or ""),
-                        "mime_type": delta.mime_type or "image/jpeg",
-                        "fidelity": {"item_id": item_id},
-                    }
+                content_items.extend(items.done(item_id))
+                content_items.extend(
+                    items.delta(
+                        item_id,
+                        {
+                            "type": "inline_data.delta",
+                            "data": base64.b64decode(delta.data or ""),
+                            "mime_type": delta.mime_type or "image/jpeg",
+                        },
+                    )
                 )
             elif delta.type == "audio":
                 # TTS streams raw PCM in 40 ms chunks; the MIME type carries the format a player needs
-                content_items.append(
-                    {
-                        "type": "inline_data.delta",
-                        "data": base64.b64decode(delta.data or ""),
-                        "mime_type": f"{delta.mime_type}; rate={delta.sample_rate}; channels={delta.channels}",
-                        "fidelity": {"item_id": item_id},
-                    }
+                mime_type = f"{delta.mime_type}; rate={delta.sample_rate}; channels={delta.channels}"
+                content_items.extend(
+                    items.delta(
+                        item_id,
+                        {
+                            "type": "inline_data.delta",
+                            "data": base64.b64decode(delta.data or ""),
+                            "mime_type": mime_type,
+                        },
+                    )
                 )
             elif is_debug_enabled():
                 raise ValueError(f"Unknown output: {model_output}")
 
         elif model_output.event_type == "step.stop":
-            content_items.append(done_marker(str(model_output.index)))
+            content_items.extend(items.done(str(model_output.index)))
 
         elif model_output.event_type == "interaction.completed":
             event_type = "stop"
@@ -590,13 +609,19 @@ class Gemini3_8Client(LLMClient):
             config=gemini_config,
         )
 
+        # a vector is an item of its own, complete in its one fragment
+        items = StreamItems(self.__class__.__name__)
+        content_items: list[EventContentItem] = []
+        for embedding in result.embeddings or []:
+            content_items.extend(
+                items.delta(None, {"type": "embedding.delta", "embedding": list(embedding.values or [])})
+            )
+            content_items.extend(items.done())
+
         yield {
             "role": "assistant",
             "event_type": "stop",
-            "content_items": [
-                {"type": "embedding.delta", "embedding": list(embedding.values or [])}
-                for embedding in (result.embeddings or [])
-            ],
+            "content_items": content_items,
             "usage_metadata": {
                 "cached_tokens": None,
                 "prompt_tokens": result.metadata.billable_character_count if result.metadata else None,
@@ -636,52 +661,18 @@ class Gemini3_8Client(LLMClient):
 
         stream = await self._client.aio.interactions.create(**gemini_config, input=steps)
 
-        # A step streams one item per run of a content kind: an image model's thought summary can go
-        # text, image, text, which is three items, so an item's id is its step index and the number
-        # of the run within the step. Every image delta is a whole image and a run of its own, while audio
-        # streams in chunks of one run.
-        step_id = ""
-        run = 0
-        run_item: EventContentItem | None = None
+        items = StreamItems(self.__class__.__name__, sequential=True)
         async for event in stream:
-            uni_event = self.transform_model_output_to_uni_event(event)
-            content_items: list[EventContentItem] = []
-            for item in uni_event["content_items"]:
-                if item["fidelity"]["item_id"] != step_id:
-                    step_id = item["fidelity"]["item_id"]
-                    run = 0
-                    run_item = None
+            yield self.transform_model_output_to_uni_event(event, items)
 
-                if item["type"].endswith(".done"):
-                    content_items.append(done_marker(f"{step_id}.{run}"))
-                    continue
-
-                if (
-                    item["type"] == "thinking.delta"
-                    and "signature" in item["fidelity"]
-                    and run_item is not None
-                    and run_item["type"] == "inline_thinking.delta"
-                ):
-                    # the signature closes the run its thought step ends with, an image one included
-                    item = {
-                        "type": "inline_thinking.delta",
-                        "data": b"",
-                        "mime_type": run_item["mime_type"],
-                        "fidelity": item["fidelity"],
-                    }
-                elif run_item is not None and (
-                    run_item["type"] != item["type"]
-                    or item["type"] == "inline_thinking.delta"
-                    or (item["type"] == "inline_data.delta" and item["mime_type"].startswith("image/"))
-                ):
-                    content_items.append(done_marker(f"{step_id}.{run}"))
-                    run += 1
-
-                run_item = item
-                item["fidelity"]["item_id"] = f"{step_id}.{run}"
-                content_items.append(item)
-
-            yield {**uni_event, "content_items": content_items}
+        # the provider's stream ended: whatever is still open is done
+        yield {
+            "role": "assistant",
+            "event_type": "delta",
+            "content_items": items.end(),
+            "usage_metadata": None,
+            "finish_reason": None,
+        }
 
     async def list_models(self) -> list[str]:
         """

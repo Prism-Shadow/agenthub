@@ -20,12 +20,12 @@ import {
   Part,
 } from "@google/genai";
 import * as path from "path";
-import { doneMarker, LLMClient } from "../baseClient";
+import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
+import { StreamItems } from "../streamItems";
 import {
   EventContentItem,
   EventType,
-  Fidelity,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
@@ -565,11 +565,14 @@ export class Gemini3_8Client extends LLMClient {
   }
 
   /**
-   * Transform one Interactions API stream event into a universal event, its items identified by
-   * step index.
+   * Transform one Interactions API stream event into a universal event. A step's items go under
+   * its index: step.stop completes the one streaming, and within a step an item runs until a
+   * fragment of another kind arrives, since a thought summary can go text, image, text. Every
+   * image is a whole item of its own, while audio streams in chunks of one item.
    */
   transformModelOutputToUniEvent(
     modelOutput: Interactions.InteractionSSEEvent,
+    items: StreamItems,
   ): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
@@ -584,13 +587,14 @@ export class Gemini3_8Client extends LLMClient {
           Object.keys(step.arguments ?? {}).length > 0
             ? JSON.stringify(step.arguments)
             : "";
-        contentItems.push({
-          type: "tool_call.delta",
-          name: step.name,
-          arguments: startArguments,
-          tool_call_id: step.id,
-          fidelity: { item_id: String(modelOutput.index) },
-        });
+        contentItems.push(
+          ...items.delta(String(modelOutput.index), {
+            type: "tool_call.delta",
+            name: step.name,
+            arguments: startArguments,
+            tool_call_id: step.id,
+          }),
+        );
       } else if (step.type === "thought" || step.type === "model_output") {
         // their content arrives in the step's deltas
       } else if (isDebugEnabled()) {
@@ -600,63 +604,72 @@ export class Gemini3_8Client extends LLMClient {
       const itemId = String(modelOutput.index);
       const delta = modelOutput.delta;
       if (delta.type === "thought_summary" && delta.content?.type === "text") {
-        contentItems.push({
-          type: "thinking.delta",
-          thinking: delta.content.text,
-          fidelity: { item_id: itemId },
-        });
+        contentItems.push(
+          ...items.delta(itemId, {
+            type: "thinking.delta",
+            thinking: delta.content.text,
+          }),
+        );
       } else if (
         delta.type === "thought_summary" &&
         delta.content?.type === "image"
       ) {
-        // image models summarize their thinking with interim images too
-        contentItems.push({
-          type: "inline_thinking.delta",
-          data: Buffer.from(delta.content.data || "", "base64"),
-          mime_type: delta.content.mime_type || "image/jpeg",
-          fidelity: { item_id: itemId },
-        });
+        // image models summarize their thinking with interim images too; the image before is
+        // done, and this one stays open for the signature its step may end with
+        contentItems.push(
+          ...items.done(itemId),
+          ...items.delta(itemId, {
+            type: "inline_thinking.delta",
+            data: Buffer.from(delta.content.data || "", "base64"),
+            mime_type: delta.content.mime_type || "image/jpeg",
+          }),
+        );
       } else if (delta.type === "thought_signature") {
-        // the signature is the last delta of its thought step
-        contentItems.push({
-          type: "thinking.delta",
-          thinking: "",
-          fidelity: { item_id: itemId, signature: delta.signature },
-        });
+        // the signature is the last delta of its thought step, and belongs to the item the
+        // step ends with, an image one included
+        contentItems.push(
+          ...items.delta(itemId, {
+            type: "thinking.delta",
+            thinking: "",
+            fidelity: { signature: delta.signature },
+          }),
+        );
       } else if (delta.type === "arguments_delta") {
-        contentItems.push({
-          type: "tool_call.delta",
-          name: "",
-          arguments: delta.arguments || "",
-          tool_call_id: "",
-          fidelity: { item_id: itemId },
-        });
+        contentItems.push(
+          ...items.delta(itemId, {
+            type: "tool_call.delta",
+            name: "",
+            arguments: delta.arguments || "",
+            tool_call_id: "",
+          }),
+        );
       } else if (delta.type === "text") {
-        contentItems.push({
-          type: "text.delta",
-          text: delta.text,
-          fidelity: { item_id: itemId },
-        });
+        contentItems.push(
+          ...items.delta(itemId, { type: "text.delta", text: delta.text }),
+        );
       } else if (delta.type === "image") {
-        contentItems.push({
-          type: "inline_data.delta",
-          data: Buffer.from(delta.data || "", "base64"),
-          mime_type: delta.mime_type || "image/jpeg",
-          fidelity: { item_id: itemId },
-        });
+        contentItems.push(
+          ...items.done(itemId),
+          ...items.delta(itemId, {
+            type: "inline_data.delta",
+            data: Buffer.from(delta.data || "", "base64"),
+            mime_type: delta.mime_type || "image/jpeg",
+          }),
+        );
       } else if (delta.type === "audio") {
         // TTS streams raw PCM in 40 ms chunks; the MIME type carries the format a player needs
-        contentItems.push({
-          type: "inline_data.delta",
-          data: Buffer.from(delta.data || "", "base64"),
-          mime_type: `${delta.mime_type}; rate=${delta.sample_rate}; channels=${delta.channels}`,
-          fidelity: { item_id: itemId },
-        });
+        contentItems.push(
+          ...items.delta(itemId, {
+            type: "inline_data.delta",
+            data: Buffer.from(delta.data || "", "base64"),
+            mime_type: `${delta.mime_type}; rate=${delta.sample_rate}; channels=${delta.channels}`,
+          }),
+        );
       } else if (isDebugEnabled()) {
         throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
       }
     } else if (modelOutput.event_type === "step.stop") {
-      contentItems.push(doneMarker(String(modelOutput.index)));
+      contentItems.push(...items.done(String(modelOutput.index)));
     } else if (modelOutput.event_type === "interaction.completed") {
       eventType = "stop";
       const statusMapping: { [key: string]: FinishReason } = {
@@ -755,14 +768,18 @@ export class Gemini3_8Client extends LLMClient {
       config: geminiConfig,
     });
 
+    // a vector is an item of its own, complete in its one fragment
+    const items = new StreamItems(this.constructor.name);
     yield {
       role: "assistant",
       event_type: "stop",
-      content_items:
-        result.embeddings?.map((embedding) => ({
-          type: "embedding.delta" as const,
+      content_items: (result.embeddings ?? []).flatMap((embedding) => [
+        ...items.delta(undefined, {
+          type: "embedding.delta",
           embedding: embedding.values ?? [],
-        })) ?? [],
+        }),
+        ...items.done(),
+      ]),
       usage_metadata: {
         cached_tokens: null,
         prompt_tokens: result.metadata?.billableCharacterCount ?? null,
@@ -814,56 +831,18 @@ export class Gemini3_8Client extends LLMClient {
       { signal: options.signal },
     );
 
-    // A step streams one item per run of a content kind: an image model's thought summary can
-    // go text, image, text, which is three items, so an item's id is its step index and the
-    // number of the run within the step. Every image delta is a whole image and a run of its
-    // own, while audio streams in chunks of one run.
-    let stepId = "";
-    let run = 0;
-    let runItem: EventContentItem | null = null;
+    const items = new StreamItems(this.constructor.name, { sequential: true });
     for await (const event of stream) {
-      const uniEvent = this.transformModelOutputToUniEvent(event);
-      const contentItems: EventContentItem[] = [];
-      for (let item of uniEvent.content_items) {
-        const fidelity = (item as { fidelity: Fidelity }).fidelity;
-        if (fidelity.item_id !== stepId) {
-          stepId = fidelity.item_id;
-          run = 0;
-          runItem = null;
-        }
-        if (item.type.endsWith(".done")) {
-          contentItems.push(doneMarker(`${stepId}.${run}`));
-          continue;
-        }
-
-        if (
-          item.type === "thinking.delta" &&
-          "signature" in fidelity &&
-          runItem?.type === "inline_thinking.delta"
-        ) {
-          // the signature closes the run its thought step ends with, an image one included
-          item = {
-            type: "inline_thinking.delta",
-            data: Buffer.alloc(0),
-            mime_type: runItem.mime_type,
-            fidelity,
-          };
-        } else if (
-          runItem !== null &&
-          (runItem.type !== item.type ||
-            item.type === "inline_thinking.delta" ||
-            (item.type === "inline_data.delta" &&
-              item.mime_type.startsWith("image/")))
-        ) {
-          contentItems.push(doneMarker(`${stepId}.${run}`));
-          run += 1;
-        }
-        runItem = item;
-        fidelity.item_id = `${stepId}.${run}`;
-        contentItems.push(item);
-      }
-      yield { ...uniEvent, content_items: contentItems };
+      yield this.transformModelOutputToUniEvent(event, items);
     }
+    // the provider's stream ended: whatever is still open is done
+    yield {
+      role: "assistant",
+      event_type: "delta",
+      content_items: items.end(),
+      usage_metadata: null,
+      finish_reason: null,
+    };
   }
 
   /**

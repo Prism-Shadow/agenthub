@@ -37,12 +37,13 @@ import {
   EmbedContentConfig,
 } from "@google/genai";
 import * as path from "path";
-import { doneMarker, LLMClient } from "../baseClient";
+import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
+import { StreamItems } from "../streamItems";
 import {
+  DeltaContentItem,
   EventContentItem,
   EventType,
-  Fidelity,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
@@ -629,11 +630,14 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
   /**
    * Transform one generateContent stream chunk into a universal event.
    *
-   * generateContent gives a part no identity, so each delta's item_id is the kind of wire part that
-   * carried it; _streamingResponseInternal turns those into one item id per item.
+   * generateContent gives a part no identity and never says where an item ends: an item goes
+   * under the kind of wire part that carries it and runs until a part of another kind arrives.
+   * Every function call and every image is an item of its own, while audio chunks and
+   * consecutive text parts share one.
    */
   transformModelOutputToUniEvent(
     modelOutput: GenerateContentResponse,
+    items: StreamItems,
   ): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
@@ -646,46 +650,71 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
         const fidelity = part.thoughtSignature
           ? { signature: part.thoughtSignature }
           : {};
+        // a part is a fragment of the item under itemId. It completes that item when it arrives
+        // whole, or carries the thoughtSignature: the last thing the API says about a part
+        const push = (
+          itemId: string,
+          fragment: DeltaContentItem,
+          whole: boolean = false,
+        ) => {
+          contentItems.push(...items.delta(itemId, fragment));
+          if (whole || part.thoughtSignature) {
+            contentItems.push(...items.done(itemId));
+          }
+        };
+
         if (part.functionCall) {
-          // generateContent sends a call whole, so it streams as one complete delta
-          contentItems.push({
-            type: "tool_call.delta",
-            name: part.functionCall.name ?? "",
-            arguments: JSON.stringify(part.functionCall.args ?? {}),
-            tool_call_id: part.functionCall.id || part.functionCall.name || "",
-            fidelity: { item_id: "function_call", ...fidelity },
-          });
+          // generateContent sends a call whole
+          push(
+            "function_call",
+            {
+              type: "tool_call.delta",
+              name: part.functionCall.name ?? "",
+              arguments: JSON.stringify(part.functionCall.args ?? {}),
+              tool_call_id:
+                part.functionCall.id || part.functionCall.name || "",
+              fidelity,
+            },
+            true,
+          );
         } else if (part.thought && part.text != null) {
           if (part.text || part.thoughtSignature) {
-            contentItems.push({
+            push("thought", {
               type: "thinking.delta",
               thinking: part.text,
-              fidelity: { item_id: "thought", ...fidelity },
+              fidelity,
             });
           }
         } else if (part.thought && part.inlineData) {
-          contentItems.push({
-            type: "inline_thinking.delta",
-            data: Buffer.from(part.inlineData.data || "", "base64"),
-            mime_type: part.inlineData.mimeType || "application/octet-stream",
-            fidelity: { item_id: "inline_thinking", ...fidelity },
-          });
+          push(
+            "inline_thinking",
+            {
+              type: "inline_thinking.delta",
+              data: Buffer.from(part.inlineData.data || "", "base64"),
+              mime_type: part.inlineData.mimeType || "application/octet-stream",
+              fidelity,
+            },
+            true,
+          );
         } else if (part.inlineData) {
-          contentItems.push({
-            type: "inline_data.delta",
-            data: Buffer.from(part.inlineData.data || "", "base64"),
-            mime_type: part.inlineData.mimeType || "application/octet-stream",
-            fidelity: { item_id: "inline_data", ...fidelity },
-          });
+          const mimeType =
+            part.inlineData.mimeType || "application/octet-stream";
+          const isImage = mimeType.startsWith("image/");
+          push(
+            isImage ? "image" : "inline_data",
+            {
+              type: "inline_data.delta",
+              data: Buffer.from(part.inlineData.data || "", "base64"),
+              mime_type: mimeType,
+              fidelity,
+            },
+            isImage,
+          );
         } else if (part.text != null) {
           // a response ends on an empty text part, which carries something only when it brings
           // the signature
           if (part.text || part.thoughtSignature) {
-            contentItems.push({
-              type: "text.delta",
-              text: part.text,
-              fidelity: { item_id: "text", ...fidelity },
-            });
+            push("text", { type: "text.delta", text: part.text, fidelity });
           }
         } else if (isDebugEnabled()) {
           throw new Error(`Unknown output: ${JSON.stringify(part)}`);
@@ -742,6 +771,7 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
     // Vertex AI embeds one content per call: a second content is a 400 there, and both SDKs refuse
     // to send one. It reports no billable characters either, only a token count per embedding.
     let promptTokens: number | null = null;
+    const items = new StreamItems(this.constructor.name);
     for (const msg of options.messages) {
       const parts: Part[] = [];
       for (const item of msg.content_items) {
@@ -777,12 +807,17 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
       });
 
       const embedding = result.embeddings?.[0];
-      // a vector streams once its call returns; the usage, summed over the calls, follows the last one
+      // a vector streams once its call returns, an item of its own complete in its one fragment;
+      // the usage, summed over the calls, follows the last one
       yield {
         role: "assistant",
         event_type: "delta",
         content_items: [
-          { type: "embedding.delta", embedding: embedding?.values ?? [] },
+          ...items.delta(undefined, {
+            type: "embedding.delta",
+            embedding: embedding?.values ?? [],
+          }),
+          ...items.done(),
         ],
         usage_metadata: null,
         finish_reason: null,
@@ -854,51 +889,28 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
       config: geminiConfig,
     });
 
-    // generateContent never signals that an item ended either: an item runs until a part of
-    // another kind arrives, except that every function call and every image is an item of its
-    // own, while audio chunks and consecutive text parts share one
-    let itemIndex = -1;
-    let openField: string | null = null;
+    const items = new StreamItems(this.constructor.name, { sequential: true });
     let sawFunctionCall = false;
     for await (const chunk of responseStream) {
-      const event = this.transformModelOutputToUniEvent(chunk);
-      const contentItems: EventContentItem[] = [];
-      for (const item of event.content_items) {
-        const fidelity = (item as { fidelity: Fidelity }).fidelity;
-        const ownItem =
-          item.type === "tool_call.delta" ||
-          item.type === "inline_thinking.delta" ||
-          (item.type === "inline_data.delta" &&
-            item.mime_type.startsWith("image/"));
-        if (fidelity.item_id !== openField || ownItem) {
-          if (openField !== null) {
-            contentItems.push(doneMarker(String(itemIndex)));
-          }
-          itemIndex += 1;
-          openField = fidelity.item_id;
-        }
-        if (item.type === "tool_call.delta") {
-          sawFunctionCall = true;
-        }
-        fidelity.item_id = String(itemIndex);
-        contentItems.push(item);
-        // a thoughtSignature is the last thing the API says about a part: it closes the item it rides on
-        if (ownItem || "signature" in fidelity) {
-          contentItems.push(doneMarker(String(itemIndex)));
-          openField = null;
-        }
+      const event = this.transformModelOutputToUniEvent(chunk, items);
+      if (event.content_items.some((item) => item.type === "tool_call.delta")) {
+        sawFunctionCall = true;
       }
       // generateContent reports STOP for a turn that stopped to call tools
       const finishReason =
         event.finish_reason === "stop" && sawFunctionCall
           ? "tool_call"
           : event.finish_reason;
-      yield {
-        ...event,
-        content_items: contentItems,
-        finish_reason: finishReason,
-      };
+      yield { ...event, finish_reason: finishReason };
     }
+    // the provider's stream ended: whatever is still open is done
+    yield {
+      role: "assistant",
+      event_type: "delta",
+      content_items: items.end(),
+      usage_metadata: null,
+      finish_reason: null,
+    };
   }
 
   /**

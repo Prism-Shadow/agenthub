@@ -17,12 +17,12 @@ import type {
   ResponseCreateParamsStreaming,
   ResponseStreamEvent,
 } from "openai/resources/responses/responses";
-import { doneMarker, LLMClient } from "../baseClient";
+import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
+import { StreamItems } from "../streamItems";
 import {
   EventContentItem,
   EventType,
-  Fidelity,
   FinishReason,
   PromptCaching,
   ThinkingLevel,
@@ -250,9 +250,15 @@ export class MiniMaxM3Client extends LLMClient {
   }
 
   /**
-   * Transform one MiniMax stream event into a universal event, identifying items by output item id.
+   * Transform one MiniMax stream event into a universal event. An output item is an item, under
+   * its id: output_item.added and the deltas are fragments, output_item.done completes it. A
+   * function call is the exception: its one fragment is its completed item, and
+   * _streamingResponseInternal completes it in the event after.
    */
-  transformModelOutputToUniEvent(modelOutput: ResponseStreamEvent): UniEvent {
+  transformModelOutputToUniEvent(
+    modelOutput: ResponseStreamEvent,
+    items: StreamItems,
+  ): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
@@ -260,55 +266,51 @@ export class MiniMaxM3Client extends LLMClient {
 
     const minimaxEventType = modelOutput.type;
     if (minimaxEventType === "response.output_text.delta") {
-      contentItems.push({
-        type: "text.delta",
-        text: modelOutput.delta,
-        fidelity: { item_id: modelOutput.item_id },
-      });
-    } else if (minimaxEventType === "response.reasoning_text.delta") {
-      contentItems.push({
-        type: "thinking.delta",
-        thinking: modelOutput.delta,
-        fidelity: { item_id: modelOutput.item_id },
-      });
-    } else if (minimaxEventType === "response.output_item.added") {
-      // a message or reasoning item is announced with an empty delta, so a fragment a server
-      // sends without its item id belongs to the item announced last
-      if (modelOutput.item.type === "message") {
-        contentItems.push({
+      contentItems.push(
+        ...items.delta(modelOutput.item_id, {
           type: "text.delta",
-          text: "",
-          fidelity: { item_id: modelOutput.item.id },
-        });
-      } else if (modelOutput.item.type === "reasoning") {
-        contentItems.push({
+          text: modelOutput.delta,
+        }),
+      );
+    } else if (minimaxEventType === "response.reasoning_text.delta") {
+      contentItems.push(
+        ...items.delta(modelOutput.item_id, {
           type: "thinking.delta",
-          thinking: "",
-          fidelity: { item_id: modelOutput.item.id },
-        });
+          thinking: modelOutput.delta,
+        }),
+      );
+    } else if (minimaxEventType === "response.output_item.added") {
+      // a message or reasoning item is announced with an empty fragment, so a fragment a server
+      // sends without its item id belongs to the item announced last
+      const item = modelOutput.item;
+      if (item.type === "message") {
+        contentItems.push(
+          ...items.delta(item.id, { type: "text.delta", text: "" }),
+        );
+      } else if (item.type === "reasoning") {
+        contentItems.push(
+          ...items.delta(item.id, { type: "thinking.delta", thinking: "" }),
+        );
       }
     } else if (minimaxEventType === "response.output_item.done") {
       // MiniMax's tool calls are read from the completed item alone: the argument deltas are
       // left unread rather than reconciled against this item, and the call is announced with
-      // one fragment carrying the whole arguments and completed at once, so what a consumer
-      // streams and the call it is handed are one and the same.
+      // one fragment carrying the whole arguments, so what a consumer streams and the call it
+      // is handed are one and the same.
       const item = modelOutput.item;
       if (item.type === "function_call") {
         // a server that sends no item id still sends the call id
-        const itemId = item.id || item.call_id;
         contentItems.push(
-          {
+          ...items.delta(item.id || item.call_id, {
             type: "tool_call.delta",
             name: item.name,
             // a server may complete a call without its arguments field
             arguments: item.arguments || "",
             tool_call_id: item.call_id,
-            fidelity: { item_id: itemId },
-          },
-          doneMarker(itemId),
+          }),
         );
       } else if (item.type === "message" || item.type === "reasoning") {
-        contentItems.push(doneMarker(item.id));
+        contentItems.push(...items.done(item.id));
       }
     } else if (
       minimaxEventType === "response.completed" ||
@@ -381,42 +383,35 @@ export class MiniMaxM3Client extends LLMClient {
       stream: true,
     } as ResponseCreateParamsStreaming;
 
-    // A server may leave the item ids out. An item without one belongs to the item announced or
-    // streamed last while that item is open and of the same kind, and starts an item of its own
-    // otherwise.
-    let lastId = "";
-    let lastType = "";
-    let unkeyedItems = 0;
-
     const stream = await this._client.responses.create(params, {
       signal: options.signal,
     });
+    const items = new StreamItems(this.constructor.name);
     for await (const event of stream) {
-      const uniEvent = this.transformModelOutputToUniEvent(event);
-      const contentItems: EventContentItem[] = [];
-      for (const item of uniEvent.content_items) {
-        const fidelity = (item as { fidelity: Fidelity }).fidelity;
-        if (item.type.endsWith(".done")) {
-          if (!fidelity.item_id && !lastId) {
-            continue;
-          }
-          fidelity.item_id = fidelity.item_id || lastId;
-          if (fidelity.item_id === lastId) {
-            lastId = "";
-            lastType = "";
-          }
-        } else {
-          if (!fidelity.item_id) {
-            fidelity.item_id =
-              lastType === item.type ? lastId : `unkeyed-${unkeyedItems++}`;
-          }
-          lastId = fidelity.item_id;
-          lastType = item.type;
-        }
-        contentItems.push(item);
+      yield this.transformModelOutputToUniEvent(event, items);
+      if (
+        event.type === "response.output_item.done" &&
+        event.item.type === "function_call"
+      ) {
+        // the call went out whole in the event above, and is completed in an event of its own:
+        // that fragment has reached the caller when its arguments turn out not to parse
+        yield {
+          role: "assistant",
+          event_type: "delta",
+          content_items: items.done(event.item.id || event.item.call_id),
+          usage_metadata: null,
+          finish_reason: null,
+        };
       }
-      yield { ...uniEvent, content_items: contentItems };
     }
+    // the provider's stream ended: whatever is still open is done
+    yield {
+      role: "assistant",
+      event_type: "delta",
+      content_items: items.end(),
+      usage_metadata: null,
+      finish_reason: null,
+    };
   }
 
   /**

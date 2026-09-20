@@ -18,8 +18,9 @@ import type {
   ResponseStreamEvent,
   ResponseCreateParamsStreaming,
 } from "openai/resources/responses/responses";
-import { doneMarker, LLMClient } from "../baseClient";
+import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
+import { StreamItems } from "../streamItems";
 import {
   EventContentItem,
   EventType,
@@ -340,10 +341,14 @@ export class GPT6Client extends LLMClient {
   }
 
   /**
-   * Transform one OpenAI Responses API stream event into a universal event, identifying items by
-   * output item id.
+   * Transform one OpenAI Responses API stream event into a universal event. An output item is an
+   * item, under its id: output_item.added and the deltas are fragments, output_item.done
+   * completes it.
    */
-  transformModelOutputToUniEvent(modelOutput: ResponseStreamEvent): UniEvent {
+  transformModelOutputToUniEvent(
+    modelOutput: ResponseStreamEvent,
+    items: StreamItems,
+  ): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
@@ -351,47 +356,50 @@ export class GPT6Client extends LLMClient {
 
     const openaiEventType = modelOutput.type;
     if (openaiEventType === "response.output_text.delta") {
-      contentItems.push({
-        type: "text.delta",
-        text: modelOutput.delta,
-        fidelity: { item_id: modelOutput.item_id },
-      });
+      contentItems.push(
+        ...items.delta(modelOutput.item_id, {
+          type: "text.delta",
+          text: modelOutput.delta,
+        }),
+      );
     } else if (
       openaiEventType === "response.reasoning_summary_text.delta" ||
       openaiEventType === "response.reasoning_text.delta"
     ) {
-      contentItems.push({
-        type: "thinking.delta",
-        thinking: modelOutput.delta,
-        fidelity: { item_id: modelOutput.item_id },
-      });
+      contentItems.push(
+        ...items.delta(modelOutput.item_id, {
+          type: "thinking.delta",
+          thinking: modelOutput.delta,
+        }),
+      );
     } else if (openaiEventType === "response.output_item.added") {
-      // every item is announced with a delta, empty unless it carries the call or the phase,
+      // every item is announced with a fragment, empty unless it carries the call or the phase,
       // so a fragment a server sends without its item id belongs to the item announced last
       const item = modelOutput.item;
       if (item.type === "function_call") {
-        contentItems.push({
-          type: "tool_call.delta",
-          name: item.name,
-          arguments: "",
-          tool_call_id: item.call_id,
-          // a server that sends no item id still sends the call id
-          fidelity: { item_id: item.id || item.call_id },
-        });
+        // a server that sends no item id still sends the call id
+        contentItems.push(
+          ...items.delta(item.id || item.call_id, {
+            type: "tool_call.delta",
+            name: item.name,
+            arguments: "",
+            tool_call_id: item.call_id,
+          }),
+        );
       } else if (item.type === "message") {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const phase = (item as any).phase as string | undefined;
-        contentItems.push({
-          type: "text.delta",
-          text: "",
-          fidelity: { item_id: item.id, ...(phase != null ? { phase } : {}) },
-        });
+        contentItems.push(
+          ...items.delta(item.id, {
+            type: "text.delta",
+            text: "",
+            fidelity: phase != null ? { phase } : {},
+          }),
+        );
       } else if (item.type === "reasoning") {
-        contentItems.push({
-          type: "thinking.delta",
-          thinking: "",
-          fidelity: { item_id: item.id },
-        });
+        contentItems.push(
+          ...items.delta(item.id, { type: "thinking.delta", thinking: "" }),
+        );
       }
     } else if (openaiEventType === "response.output_item.done") {
       const item = modelOutput.item;
@@ -405,8 +413,7 @@ export class GPT6Client extends LLMClient {
         // incomplete while the item is in progress. Use the reasoning item from the
         // corresponding response.output_item.done event when passing it as input to a
         // subsequent request."
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const fidelity: any = { item_id: item.id };
+        const fidelity: Fidelity = {};
         if (item.summary && item.summary.length > 0) {
           fidelity.channel = "summary";
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -421,22 +428,27 @@ export class GPT6Client extends LLMClient {
           }
         }
         contentItems.push(
-          { type: "thinking.delta", thinking: "", fidelity },
-          doneMarker(item.id),
+          ...items.delta(item.id, {
+            type: "thinking.delta",
+            thinking: "",
+            fidelity,
+          }),
+          ...items.done(item.id),
         );
       } else if (item.type === "function_call") {
-        contentItems.push(doneMarker(item.id || item.call_id));
+        contentItems.push(...items.done(item.id || item.call_id));
       } else if (item.type === "message") {
-        contentItems.push(doneMarker(item.id));
+        contentItems.push(...items.done(item.id));
       }
     } else if (openaiEventType === "response.function_call_arguments.delta") {
-      contentItems.push({
-        type: "tool_call.delta",
-        name: "",
-        arguments: modelOutput.delta,
-        tool_call_id: "",
-        fidelity: { item_id: modelOutput.item_id },
-      });
+      contentItems.push(
+        ...items.delta(modelOutput.item_id, {
+          type: "tool_call.delta",
+          name: "",
+          arguments: modelOutput.delta,
+          tool_call_id: "",
+        }),
+      );
     } else if (openaiEventType === "response.function_call_arguments.done") {
       // the call's output_item.done completes it instead: its item still names the call where
       // a server leaves the item id off this event, and a call whose output_item.done never
@@ -515,14 +527,6 @@ export class GPT6Client extends LLMClient {
       options.signal,
     );
 
-    // A server may leave the item ids out. An item without one belongs to the item announced or
-    // streamed last while that item is open and of the same kind, and starts an item of its own
-    // otherwise; an argument fragment whose id names no announced call counts as one without.
-    const announcedCalls = new Set<string>();
-    let lastId = "";
-    let lastType = "";
-    let unkeyedItems = 0;
-
     const params: ResponseCreateParamsStreaming = {
       ...openaiConfig,
       input: inputList,
@@ -532,38 +536,18 @@ export class GPT6Client extends LLMClient {
     const stream = await this._client.responses.create(params, {
       signal: options.signal,
     });
+    const items = new StreamItems(this.constructor.name);
     for await (const event of stream) {
-      const uniEvent = this.transformModelOutputToUniEvent(event);
-      const contentItems: EventContentItem[] = [];
-      for (const item of uniEvent.content_items) {
-        const fidelity = (item as { fidelity: Fidelity }).fidelity;
-        if (item.type.endsWith(".done")) {
-          if (!fidelity.item_id && !lastId) {
-            continue;
-          }
-          fidelity.item_id = fidelity.item_id || lastId;
-          if (fidelity.item_id === lastId) {
-            lastId = "";
-            lastType = "";
-          }
-        } else {
-          if (item.type === "tool_call.delta" && item.tool_call_id) {
-            announcedCalls.add(fidelity.item_id);
-          } else if (
-            !fidelity.item_id ||
-            (item.type === "tool_call.delta" &&
-              !announcedCalls.has(fidelity.item_id))
-          ) {
-            fidelity.item_id =
-              lastType === item.type ? lastId : `unkeyed-${unkeyedItems++}`;
-          }
-          lastId = fidelity.item_id;
-          lastType = item.type;
-        }
-        contentItems.push(item);
-      }
-      yield { ...uniEvent, content_items: contentItems };
+      yield this.transformModelOutputToUniEvent(event, items);
     }
+    // the provider's stream ended: whatever is still open is done
+    yield {
+      role: "assistant",
+      event_type: "delta",
+      content_items: items.end(),
+      usage_metadata: null,
+      finish_reason: null,
+    };
   }
 
   /**

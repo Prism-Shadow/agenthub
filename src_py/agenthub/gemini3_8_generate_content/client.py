@@ -24,9 +24,11 @@ from google import genai
 from google.genai import types
 from google.oauth2 import service_account
 
-from ..base_client import LLMClient, done_marker
+from ..base_client import LLMClient
 from ..errors import UnsupportedParameterError
+from ..stream_items import StreamItems
 from ..types import (
+    DeltaContentItem,
     EventContentItem,
     EventType,
     FinishReason,
@@ -432,15 +434,20 @@ class Gemini3_8GenerateContentClient(LLMClient):
 
         return contents
 
-    def transform_model_output_to_uni_event(self, model_output: types.GenerateContentResponse) -> UniEvent:
+    def transform_model_output_to_uni_event(
+        self, model_output: types.GenerateContentResponse, items: StreamItems
+    ) -> UniEvent:
         """
         Transform one generateContent stream chunk into a universal event.
 
-        generateContent gives a part no identity, so each delta's item_id is the kind of wire part that
-        carried it; _streaming_response_internal turns those into one item id per item.
+        generateContent gives a part no identity and never says where an item ends: an item goes under
+        the kind of wire part that carries it and runs until a part of another kind arrives. Every
+        function call and every image is an item of its own, while audio chunks and consecutive text
+        parts share one.
 
         Args:
             model_output: Gemini response chunk
+            items: The items of the stream this event belongs to
 
         Returns:
             Universal event dictionary
@@ -457,51 +464,59 @@ class Gemini3_8GenerateContentClient(LLMClient):
                 # recorded as base64 text, the form the TypeScript SDK and the Interactions API use
                 signature = base64.b64encode(part.thought_signature).decode() if part.thought_signature else None
                 fidelity = {"signature": signature} if signature else {}
+
+                # a part is a fragment of the item under item_id. It completes that item when it arrives
+                # whole, or carries the thoughtSignature: the last thing the API says about a part
+                def push(item_id: str, fragment: DeltaContentItem, whole: bool = False) -> None:
+                    content_items.extend(items.delta(item_id, fragment))
+                    if whole or signature:
+                        content_items.extend(items.done(item_id))
+
                 if part.function_call is not None:
-                    # generateContent sends a call whole, so it streams as one complete delta
-                    content_items.append(
+                    # generateContent sends a call whole
+                    push(
+                        "function_call",
                         {
                             "type": "tool_call.delta",
                             "name": part.function_call.name or "",
                             "arguments": json.dumps(part.function_call.args or {}, ensure_ascii=False),
                             "tool_call_id": part.function_call.id or part.function_call.name or "",
-                            "fidelity": {"item_id": "function_call", **fidelity},
-                        }
+                            "fidelity": fidelity,
+                        },
+                        whole=True,
                     )
                 elif part.thought and part.text is not None:
                     if part.text or signature:
-                        content_items.append(
-                            {
-                                "type": "thinking.delta",
-                                "thinking": part.text,
-                                "fidelity": {"item_id": "thought", **fidelity},
-                            }
-                        )
+                        push("thought", {"type": "thinking.delta", "thinking": part.text, "fidelity": fidelity})
                 elif part.thought and part.inline_data is not None:
-                    content_items.append(
+                    push(
+                        "inline_thinking",
                         {
                             "type": "inline_thinking.delta",
                             "data": part.inline_data.data or b"",
                             "mime_type": part.inline_data.mime_type or "application/octet-stream",
-                            "fidelity": {"item_id": "inline_thinking", **fidelity},
-                        }
+                            "fidelity": fidelity,
+                        },
+                        whole=True,
                     )
                 elif part.inline_data is not None:
-                    content_items.append(
+                    mime_type = part.inline_data.mime_type or "application/octet-stream"
+                    is_image = mime_type.startswith("image/")
+                    push(
+                        "image" if is_image else "inline_data",
                         {
                             "type": "inline_data.delta",
                             "data": part.inline_data.data or b"",
-                            "mime_type": part.inline_data.mime_type or "application/octet-stream",
-                            "fidelity": {"item_id": "inline_data", **fidelity},
-                        }
+                            "mime_type": mime_type,
+                            "fidelity": fidelity,
+                        },
+                        whole=is_image,
                     )
                 elif part.text is not None:
                     # a response ends on an empty text part, which carries something only when it brings the
                     # signature
                     if part.text or signature:
-                        content_items.append(
-                            {"type": "text.delta", "text": part.text, "fidelity": {"item_id": "text", **fidelity}}
-                        )
+                        push("text", {"type": "text.delta", "text": part.text, "fidelity": fidelity})
                 elif is_debug_enabled():
                     raise ValueError(f"Unknown output: {part}")
 
@@ -547,6 +562,7 @@ class Gemini3_8GenerateContentClient(LLMClient):
         # Vertex AI embeds one content per call: a second content is a 400 there, and both SDKs refuse to send
         # one. It reports no billable characters either, only a token count per embedding.
         prompt_tokens = None
+        items = StreamItems(self.__class__.__name__)
         for msg in messages:
             parts = []
             for item in msg["content_items"]:
@@ -567,11 +583,15 @@ class Gemini3_8GenerateContentClient(LLMClient):
             )
 
             embedding = result.embeddings[0] if result.embeddings else types.ContentEmbedding()
-            # a vector streams once its call returns; the usage, summed over the calls, follows the last one
+            # a vector streams once its call returns, an item of its own complete in its one fragment;
+            # the usage, summed over the calls, follows the last one
             yield {
                 "role": "assistant",
                 "event_type": "delta",
-                "content_items": [{"type": "embedding.delta", "embedding": list(embedding.values or [])}],
+                "content_items": [
+                    *items.delta(None, {"type": "embedding.delta", "embedding": list(embedding.values or [])}),
+                    *items.done(),
+                ],
                 "usage_metadata": None,
                 "finish_reason": None,
             }
@@ -628,41 +648,27 @@ class Gemini3_8GenerateContentClient(LLMClient):
             model=self._model, contents=contents, config=gemini_config
         )
 
-        # generateContent never signals that an item ended either: an item runs until a part of another kind
-        # arrives, except that every function call and every image is an item of its own, while audio chunks
-        # and consecutive text parts share one
-        item_index = -1
-        open_field = None
+        items = StreamItems(self.__class__.__name__, sequential=True)
         saw_function_call = False
         async for chunk in response_stream:
-            event = self.transform_model_output_to_uni_event(chunk)
-            content_items: list[EventContentItem] = []
-            for item in event["content_items"]:
-                own_item = item["type"] in ("tool_call.delta", "inline_thinking.delta") or (
-                    item["type"] == "inline_data.delta" and item["mime_type"].startswith("image/")
-                )
-                if item["fidelity"]["item_id"] != open_field or own_item:
-                    if open_field is not None:
-                        content_items.append(done_marker(str(item_index)))
-
-                    item_index += 1
-                    open_field = item["fidelity"]["item_id"]
-
-                if item["type"] == "tool_call.delta":
-                    saw_function_call = True
-
-                item["fidelity"]["item_id"] = str(item_index)
-                content_items.append(item)
-                # a thoughtSignature is the last thing the API says about a part: it closes the item it rides on
-                if own_item or "signature" in item["fidelity"]:
-                    content_items.append(done_marker(str(item_index)))
-                    open_field = None
+            event = self.transform_model_output_to_uni_event(chunk, items)
+            if any(item["type"] == "tool_call.delta" for item in event["content_items"]):
+                saw_function_call = True
 
             # generateContent reports STOP for a turn that stopped to call tools
             finish_reason = (
                 "tool_call" if event["finish_reason"] == "stop" and saw_function_call else event["finish_reason"]
             )
-            yield {**event, "content_items": content_items, "finish_reason": finish_reason}
+            yield {**event, "finish_reason": finish_reason}
+
+        # the provider's stream ended: whatever is still open is done
+        yield {
+            "role": "assistant",
+            "event_type": "delta",
+            "content_items": items.end(),
+            "usage_metadata": None,
+            "finish_reason": None,
+        }
 
     async def list_models(self) -> list[str]:
         """
