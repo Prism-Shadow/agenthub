@@ -33,6 +33,8 @@ class _Kind:
     # the joined value becomes the done item's; tool call arguments stream as a JSON string and are
     # parsed into an object
     parse: Callable[[str, str, dict[str, Any]], Any] | None = None
+    # every delta is a whole value, which goes out even when it is empty
+    whole: bool = False
 
 
 _KINDS = {
@@ -48,8 +50,8 @@ _KINDS = {
     ),
     "inline_data": _Kind("data", (), b"".join),
     "inline_thinking": _Kind("data", (), b"".join),
-    # one whole vector per delta
-    "embedding": _Kind("embedding", (), lambda chunks: [value for chunk in chunks for value in chunk]),
+    # one whole vector per delta: an empty one still stands for the input it was made of
+    "embedding": _Kind("embedding", (), lambda chunks: [value for chunk in chunks for value in chunk], whole=True),
 }
 
 
@@ -70,7 +72,7 @@ class _Item:
 
 def _bare(kind: _Kind, fields: dict[str, Any]) -> bool:
     """Whether a fragment carries no content: its growing field and header fields are empty."""
-    return len(fields[kind.field]) == 0 and not any(fields[name] for name in kind.header)
+    return not kind.whole and len(fields[kind.field]) == 0 and not any(fields[name] for name in kind.header)
 
 
 class StreamItems:
@@ -197,8 +199,10 @@ class StreamItems:
         else:
             item = self._last if self._last is not None and self._last.open else None
 
-        if item_id and not self._sequential:
-            self._finished.add(item_id)
+        # the id of a done item is closed for good, whether or not the done named it
+        key = item_id or (item.key if item is not None else None)
+        if key and not self._sequential:
+            self._finished.add(key)
 
         return [] if item is None else self._close(item)
 

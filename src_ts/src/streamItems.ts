@@ -38,6 +38,8 @@ interface Kind {
     client: string,
     header: Record<string, string>,
   ) => unknown;
+  // every delta is a whole value, which goes out even when it is empty
+  whole?: boolean;
 }
 
 const KINDS: Record<string, Kind> = {
@@ -64,11 +66,12 @@ const KINDS: Record<string, Kind> = {
     header: [],
     join: (chunks) => Buffer.concat(chunks),
   },
-  // one whole vector per delta
+  // one whole vector per delta: an empty one still stands for the input it was made of
   embedding: {
     field: "embedding",
     header: [],
     join: (chunks) => chunks.flat(),
+    whole: true,
   },
 };
 
@@ -98,6 +101,7 @@ function hasFidelity(fidelity?: Fidelity): fidelity is Fidelity {
  */
 function bare(kind: Kind, fields: Fields): boolean {
   return (
+    !kind.whole &&
     fields[kind.field].length === 0 &&
     kind.header.every((name) => !fields[name])
   );
@@ -250,8 +254,10 @@ export class StreamItems {
       : this.last?.open
         ? this.last
         : undefined;
-    if (itemId && !this.sequential) {
-      this.finished.add(itemId);
+    // the id of a done item is closed for good, whether or not the done named it
+    const key = itemId || item?.key;
+    if (key && !this.sequential) {
+      this.finished.add(key);
     }
     return item === undefined ? [] : this.close(item);
   }

@@ -104,6 +104,14 @@ def test_bytes_join_into_one_buffer_and_an_embedding_is_one_whole_vector():
     assert items.done("v") == [{"type": "embedding.done", "embedding": [0.1, 0.2], "fidelity": {"item_id": "2"}}]
 
 
+def test_an_empty_vector_goes_out_all_the_same_it_stands_for_the_input_it_was_made_of():
+    items = StreamItems("Test")
+    assert [*items.delta(None, {"type": "embedding.delta", "embedding": []}), *items.done()] == [
+        {"type": "embedding.delta", "embedding": [], "fidelity": {"item_id": "1"}},
+        {"type": "embedding.done", "embedding": [], "fidelity": {"item_id": "1"}},
+    ]
+
+
 # ---------------------------------------------------------------- fidelity
 
 
@@ -290,6 +298,18 @@ def test_the_id_of_a_done_item_is_closed_for_good():
     items.done("5")
     with pytest.raises(StreamProtocolError):
         items.delta("5", text("late"))
+
+
+def test_a_done_without_an_id_closes_the_id_of_the_item_it_ended_too():
+    # a gateway that leaves the item id off output_item.done
+    items = StreamItems("Test")
+    items.delta("msg_1", text("a"))
+    items.done()
+    with pytest.raises(StreamProtocolError, match="text.delta arrived after item msg_1 was done"):
+        items.delta("msg_1", text("b"))
+
+    with pytest.raises(StreamProtocolError, match="item msg_1 was done twice"):
+        items.done("msg_1")
 
 
 def test_a_fragment_of_another_kind_under_an_open_items_id_is_a_protocol_error():

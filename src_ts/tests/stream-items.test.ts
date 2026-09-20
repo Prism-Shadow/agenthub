@@ -150,6 +150,17 @@ describe("one assembly rule for every kind", () => {
       },
     ]);
   });
+
+  test("an empty vector goes out all the same: it stands for the input it was made of", () => {
+    const items = new StreamItems("Test");
+    expect([
+      ...items.delta(undefined, { type: "embedding.delta", embedding: [] }),
+      ...items.done(),
+    ]).toEqual([
+      { type: "embedding.delta", embedding: [], fidelity: { item_id: "1" } },
+      { type: "embedding.done", embedding: [], fidelity: { item_id: "1" } },
+    ]);
+  });
 });
 
 describe("fidelity", () => {
@@ -371,6 +382,17 @@ describe("items that end on done", () => {
     // a done for an item that never streamed closes the id too
     items.done("5");
     expect(() => items.delta("5", text("late"))).toThrow(StreamProtocolError);
+  });
+
+  test("a done without an id closes the id of the item it ended too", () => {
+    // a gateway that leaves the item id off output_item.done
+    const items = new StreamItems("Test");
+    items.delta("msg_1", text("a"));
+    items.done();
+    expect(() => items.delta("msg_1", text("b"))).toThrow(
+      "text.delta arrived after item msg_1 was done",
+    );
+    expect(() => items.done("msg_1")).toThrow("item msg_1 was done twice");
   });
 
   test("a fragment of another kind under an open item's id is a protocol error", () => {
