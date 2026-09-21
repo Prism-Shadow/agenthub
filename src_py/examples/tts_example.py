@@ -51,11 +51,11 @@ async def main():
 
     audio_chunks: list[bytes] = []
     async for event in client.streaming_response(
-        messages=[{"role": "user", "content_items": [{"type": "text", "text": prompt}]}],
+        messages=[{"role": "user", "content_items": [{"type": "text.done", "text": prompt}]}],
         config={"tts_config": [{"voice": "Kore"}]},
     ):
         for item in event["content_items"]:
-            if item["type"] == "inline_data":
+            if item["type"] == "inline_data.done":
                 audio_chunks.append(item["data"])
 
     if not audio_chunks:

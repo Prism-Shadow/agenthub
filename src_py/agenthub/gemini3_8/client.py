@@ -21,17 +21,15 @@ from typing import Any, AsyncIterator
 
 import httpx
 from google import genai
-from google.genai import types
+from google.genai import interactions, types
 from google.oauth2 import service_account
 
 from ..base_client import LLMClient
 from ..errors import UnsupportedParameterError
 from ..types import (
-    ContentItem,
+    EventContentItem,
     EventType,
-    Fidelity,
     FinishReason,
-    PartialContentItem,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
@@ -43,32 +41,15 @@ from ..types import (
 from ..utils import is_debug_enabled
 
 
-def _split_function_response_runs(parts: list[types.Part]) -> list[list[types.Part]]:
-    """Split parts into consecutive runs of function_response and other parts.
-
-    Vertex AI requires function responses to sit in a content of their own (see the call
-    site); order is preserved, and a message without function responses — or with nothing
-    else — comes back as one run.
-    """
-    runs: list[list[types.Part]] = []
-    last_is_response: bool | None = None
-    for part in parts:
-        is_response = part.function_response is not None
-        if is_response != last_is_response:
-            runs.append([])
-            last_is_response = is_response
-        runs[-1].append(part)
-    return runs if runs else [parts]
-
-
 class Gemini3_8Client(LLMClient):
     """Unified client for the Gemini family, named for the newest generation it serves (3.8).
 
-    It serves every generateContent model generation (3.8 back through 3.x text, image, TTS,
-    and embedding models). The API deprecated the temperature/top_p/top_k sampling parameters
-    starting with the 3.6 generation (silently ignored today, HTTP 400 in future generations),
-    and this client applies that contract to the whole family: temperature is rejected
-    everywhere.
+    It speaks the Interactions API statelessly (store=false, the whole history in every request) for
+    3.8 back through the 3.x text, image, and TTS models with an API key; Vertex AI is served by
+    gemini3_8_generate_content. It embeds through embedContent, because the Interactions API does not
+    serve the embedding models. The API deprecated the temperature/top_p/top_k sampling parameters
+    starting with the 3.6 generation (silently ignored today, HTTP 400 in future generations), and this
+    client applies that contract to the whole family: temperature is rejected everywhere.
     """
 
     def __init__(
@@ -131,46 +112,41 @@ class Gemini3_8Client(LLMClient):
 
     # Gemini thinking levels from weakest to strongest, used to pick the
     # closest supported level when a model rejects the requested one.
-    _GEMINI_LEVEL_ORDER = (
-        types.ThinkingLevel.MINIMAL,
-        types.ThinkingLevel.LOW,
-        types.ThinkingLevel.MEDIUM,
-        types.ThinkingLevel.HIGH,
-    )
+    _GEMINI_LEVEL_ORDER = ("minimal", "low", "medium", "high")
 
-    def _supported_thinking_levels(self) -> tuple[types.ThinkingLevel, ...]:
-        """Thinking levels the target model accepts (llmsdk_docs/gemini3_8/docs/thinking.md).
+    def _supported_thinking_levels(self) -> tuple[str, ...]:
+        """Thinking levels the target model accepts (llmsdk_docs/gemini_interactions/docs/thinking.md).
 
         An empty tuple means the model rejects the thinking_level parameter
         entirely, so it must be omitted from the request.
         """
         if "-image" in self._model:
-            return (types.ThinkingLevel.MINIMAL, types.ThinkingLevel.HIGH)
+            return ("minimal", "high")
         if "gemini-3-pro" in self._model:
             # The only pro generation without "medium".
-            return (types.ThinkingLevel.LOW, types.ThinkingLevel.HIGH)
+            return ("low", "high")
         if "-pro" in self._model:
             # Every pro generation rejects "minimal"; matching broadly keeps
             # future pro models on the safe side (clamping a level the model
             # would have accepted costs a little accuracy, forwarding an
             # unsupported one is a 400).
-            return (types.ThinkingLevel.LOW, types.ThinkingLevel.MEDIUM, types.ThinkingLevel.HIGH)
+            return ("low", "medium", "high")
         if "gemini-3.7" in self._model or "gemini-3.8" in self._model:
-            # Both generations reject "minimal" with a 400 (3.7 verified live 2026-08-13;
-            # 3.8 documented at ai.google.dev/gemini-api/docs/latest-model).
-            return (types.ThinkingLevel.LOW, types.ThinkingLevel.MEDIUM, types.ThinkingLevel.HIGH)
+            # Both generations reject "minimal" with a 400 (3.7 verified live 2026-08-13,
+            # 3.7 and 3.8 again through the Interactions API 2026-09-16).
+            return ("low", "medium", "high")
         return self._GEMINI_LEVEL_ORDER
 
-    def _convert_thinking_level(self, thinking_level: ThinkingLevel | None) -> types.ThinkingLevel | None:
-        """Convert ThinkingLevel enum to the closest Gemini ThinkingLevel the model supports."""
+    def _convert_thinking_level(self, thinking_level: ThinkingLevel | None) -> str | None:
+        """Convert ThinkingLevel enum to the closest Gemini thinking level the model supports."""
         mapping = {
-            ThinkingLevel.NONE: types.ThinkingLevel.MINIMAL,
-            ThinkingLevel.LOW: types.ThinkingLevel.LOW,
-            ThinkingLevel.MEDIUM: types.ThinkingLevel.MEDIUM,
-            ThinkingLevel.HIGH: types.ThinkingLevel.HIGH,
-            ThinkingLevel.XHIGH: types.ThinkingLevel.HIGH,
+            ThinkingLevel.NONE: "minimal",
+            ThinkingLevel.LOW: "low",
+            ThinkingLevel.MEDIUM: "medium",
+            ThinkingLevel.HIGH: "high",
+            ThinkingLevel.XHIGH: "high",
             # Gemini stops at "high", so both top levels land there before per-model clamping
-            ThinkingLevel.MAX: types.ThinkingLevel.HIGH,
+            ThinkingLevel.MAX: "high",
         }
         level = mapping.get(thinking_level)
         if level is None:
@@ -179,7 +155,7 @@ class Gemini3_8Client(LLMClient):
         if not supported:
             # A model that takes no thinking_level at all has nothing to clamp onto, so the
             # parameter is omitted rather than turned into a failed request. thinking_summary
-            # is unaffected -- include_thoughts still rides along.
+            # is unaffected -- thinking_summaries still rides along.
             return None
         if level in supported:
             return level
@@ -195,28 +171,28 @@ class Gemini3_8Client(LLMClient):
             ),
         )
 
-    def _convert_tool_choice(self, tool_choice: ToolChoice) -> types.FunctionCallingConfig:
-        """Convert ToolChoice to Gemini's tool config."""
+    def _convert_tool_choice(self, tool_choice: ToolChoice) -> str | dict[str, Any] | None:
+        """Convert ToolChoice to the Interactions API tool_choice."""
         if isinstance(tool_choice, list):
-            return types.FunctionCallingConfig(mode="ANY", allowed_function_names=tool_choice)
+            # allowed_tools takes only the "any" and "validated" modes (verified live 2026-09-16)
+            return {"allowed_tools": {"mode": "any", "tools": tool_choice}}
         elif tool_choice == "none":
-            return types.FunctionCallingConfig(mode="NONE")
+            return "none"
         elif tool_choice == "auto":
-            return types.FunctionCallingConfig(mode="AUTO")
+            return "auto"
         elif tool_choice == "required":
-            return types.FunctionCallingConfig(mode="ANY")
+            return "any"
 
-    def transform_uni_config_to_model_config(self, config: UniConfig) -> types.GenerateContentConfig | None:
+    def transform_uni_config_to_model_config(self, config: UniConfig) -> dict[str, Any]:
         """
-        Transform universal configuration to Gemini 3.7-specific configuration.
+        Transform universal configuration to an Interactions API request without its input.
 
         Args:
             config: Universal configuration dict
 
         Returns:
-            Gemini GenerateContentConfig object or None if no config needed
+            The keyword arguments of interactions.create, except input
         """
-        config_params = {}
         if config.get("temperature") is not None:
             raise UnsupportedParameterError(
                 self.__class__.__name__,
@@ -225,265 +201,355 @@ class Gemini3_8Client(LLMClient):
                 "sampling parameters starting with the 3.6 generation.",
             )
 
-        if config.get("fast_mode"):
-            raise UnsupportedParameterError(self.__class__.__name__, "fast_mode", "Gemini does not support fast mode.")
-
         if config.get("prompt_caching") is not None and config["prompt_caching"] != PromptCaching.ENABLE:
             raise UnsupportedParameterError(
                 self.__class__.__name__, "prompt_caching", "prompt_caching must be ENABLE for Gemini."
             )
 
+        # the history travels in every request, so nothing needs to be stored server-side
+        gemini_config: dict[str, Any] = {"model": self._model, "stream": True, "store": False}
+        generation_config: dict[str, Any] = {}
+
         if config.get("max_tokens") is not None:
-            config_params["max_output_tokens"] = config["max_tokens"]
+            generation_config["max_output_tokens"] = config["max_tokens"]
+
+        if config.get("fast_mode"):
+            gemini_config["service_tier"] = "priority"
 
         # A TTS model takes the speech settings and nothing else: a system instruction, a
         # thinking config, or a tool declaration each comes back as a 400 (verified live
-        # 2026-08-20), so the rest of the universal config never reaches the request.
+        # 2026-08-20, again through the Interactions API 2026-09-16), so the rest of the
+        # universal config never reaches the request.
         if "tts" in self._model.lower():
-            config_params["response_modalities"] = ["AUDIO"]
             tts_config = config.get("tts_config") or [{"voice": "Kore"}]
             if len(tts_config) not in (1, 2):
                 raise ValueError("tts_config must contain 1 or 2 entries.")
 
+            gemini_config["response_format"] = {"type": "audio"}
             if len(tts_config) == 1:
-                config_params["speech_config"] = types.SpeechConfig(
-                    voice_config=types.VoiceConfig(
-                        prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=tts_config[0]["voice"])
-                    )
-                )
+                generation_config["speech_config"] = [{"voice": tts_config[0]["voice"]}]
             else:
-                speaker_voice_configs = []
+                speech_config = []
                 for speaker_config in tts_config:
                     speaker = speaker_config.get("speaker")
                     if not speaker:
                         raise ValueError("speaker is required when tts_config has 2 entries.")
 
-                    speaker_voice_configs.append(
-                        types.SpeakerVoiceConfig(
-                            speaker=speaker,
-                            voice_config=types.VoiceConfig(
-                                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=speaker_config["voice"])
-                            ),
-                        )
-                    )
+                    speech_config.append({"speaker": speaker, "voice": speaker_config["voice"]})
 
-                config_params["speech_config"] = types.SpeechConfig(
-                    multi_speaker_voice_config=types.MultiSpeakerVoiceConfig(
-                        speaker_voice_configs=speaker_voice_configs
-                    )
-                )
+                generation_config["speech_config"] = speech_config
 
-            return types.GenerateContentConfig(**config_params)
+            gemini_config["generation_config"] = generation_config
+            return gemini_config
 
         if config.get("system_prompt") is not None:
-            config_params["system_instruction"] = config["system_prompt"]
+            gemini_config["system_instruction"] = config["system_prompt"]
 
-        # include_thoughts asks for thought summaries, but whether generateContent returns any
-        # is model-dependent (llmsdk_docs/gemini3_8/docs/thinking.md)
-        thinking_summary = config.get("thinking_summary")
-        thinking_level = config.get("thinking_level")
-        if thinking_summary is not None or thinking_level is not None:
-            config_params["thinking_config"] = types.ThinkingConfig(
-                include_thoughts=thinking_summary, thinking_level=self._convert_thinking_level(thinking_level)
-            )
+        thinking_level = self._convert_thinking_level(config.get("thinking_level"))
+        if thinking_level is not None:
+            generation_config["thinking_level"] = thinking_level
+
+        if config.get("thinking_summary") is not None:
+            generation_config["thinking_summaries"] = "auto" if config["thinking_summary"] else "none"
 
         if config.get("tools") is not None:
-            config_params["tools"] = [types.Tool(function_declarations=config["tools"])]
-            tool_choice = config.get("tool_choice")
-            if tool_choice is not None:
-                tool_config = self._convert_tool_choice(tool_choice)
-                config_params["tool_config"] = types.ToolConfig(function_calling_config=tool_config)
+            gemini_config["tools"] = [{"type": "function", **tool} for tool in config["tools"]]
+            if config.get("tool_choice") is not None:
+                generation_config["tool_choice"] = self._convert_tool_choice(config["tool_choice"])
 
         if config.get("image_config") is not None:
-            config_params["image_config"] = types.ImageConfig(**config["image_config"])
+            # an image entry alone suppresses the text the model writes beside its images
+            gemini_config["response_format"] = [{"type": "text"}, {"type": "image", **config["image_config"]}]
 
-        return types.GenerateContentConfig(**config_params) if config_params else None
+        if generation_config:
+            gemini_config["generation_config"] = generation_config
 
-    @staticmethod
-    def _part_fidelity(part: types.Part) -> dict[str, Fidelity]:
-        """Wrap a part's thought signature as a fidelity payload, or nothing when absent."""
-        if part.thought_signature is None:
-            return {}
+        return gemini_config
 
-        return {"fidelity": {"signature": part.thought_signature}}
-
-    @staticmethod
-    def _item_thought_signature(item: ContentItem) -> str | bytes | None:
-        """Read the thought signature recorded in an item's fidelity payload."""
-        return (item.get("fidelity") or {}).get("signature")
-
-    async def transform_uni_message_to_model_input(self, messages: list[UniMessage]) -> list[types.Content]:
+    async def transform_uni_message_to_model_input(self, messages: list[UniMessage]) -> list[interactions.StepParam]:
         """
-        Transform universal message format to Gemini's Content format.
+        Transform universal message format to Interactions API input steps.
 
         Args:
             messages: List of universal message dictionaries
 
         Returns:
-            List of Gemini Content objects
+            List of Interactions API steps
         """
-        mapping = {"user": "user", "assistant": "model"}
-        # The generateContent API wants both the call id and the function name on a function
-        # response, but a universal tool_result carries only the id, so remember each call's name.
+        steps: list[interactions.StepParam] = []
+        # A function_result must name its function (HTTP 400 without it), but a universal
+        # tool_result carries only the call id, so remember each call's name.
         call_names: dict[str, str] = {}
-        contents = []
         for msg in messages:
-            parts = []
+            message_start = len(steps)
+            # consecutive text and media of a message share one user_input or model_output step
+            content: list[interactions.ContentParam] | None = None
+            # consecutive thinking items share one thought step, which ends at the item carrying
+            # the signature: a stream closes every thought step with its signature
+            thought: interactions.ThoughtStepParam | None = None
+
             for item in msg["content_items"]:
-                if item["type"] == "text":
-                    parts.append(types.Part(text=item["text"], thought_signature=self._item_thought_signature(item)))
-                elif item["type"] == "image_url":
-                    image_url = item["image_url"]
-                    image_data = await self._get_image_bytes_and_mime_type(image_url)
-                    parts.append(types.Part.from_bytes(**image_data))
-                elif item["type"] == "inline_data":
-                    inline_data = types.Blob(data=item["data"], mime_type=item["mime_type"])
-                    parts.append(
-                        types.Part(inline_data=inline_data, thought_signature=self._item_thought_signature(item))
-                    )
-                elif item["type"] == "thinking":
-                    parts.append(
-                        types.Part(
-                            text=item["thinking"], thought=True, thought_signature=self._item_thought_signature(item)
+                signature = (item.get("fidelity") or {}).get("signature")
+                # the generateContent SDK recorded signatures as bytes, on thinking items as on the rest
+                if isinstance(signature, bytes):
+                    signature = base64.b64encode(signature).decode()
+
+                if item["type"] in ("thinking.done", "inline_thinking.done"):
+                    content = None
+                    summary = []
+                    if item["type"] == "inline_thinking.done":
+                        summary.append(
+                            {
+                                "type": "image",
+                                "data": base64.b64encode(item["data"]).decode(),
+                                "mime_type": item["mime_type"],
+                            }
                         )
-                    )
-                elif item["type"] == "inline_thinking":
-                    inline_data = types.Blob(data=item["data"], mime_type=item["mime_type"])
-                    parts.append(
-                        types.Part(
-                            inline_data=inline_data, thought=True, thought_signature=self._item_thought_signature(item)
+                    elif item["thinking"]:
+                        summary.append({"type": "text", "text": item["thinking"]})
+
+                    if not summary and not signature:
+                        continue
+
+                    if thought is None:
+                        thought = {"type": "thought", "summary": []}
+                        steps.append(thought)
+
+                    thought["summary"].extend(summary)
+                    if signature:
+                        thought["signature"] = signature
+                        thought = None
+
+                    continue
+
+                thought = None
+                if signature:
+                    # Histories recorded through generateContent carry the signature on the text,
+                    # image or call it came with and hold no thinking item; the Interactions API takes
+                    # it back as a thought step in front of that item (verified live 2026-09-16).
+                    steps.append({"type": "thought", "signature": signature})
+                    content = None
+                    # A thought summary such a history holds is unsigned, and a turn opening with an unsigned thought
+                    # is rejected ("Request contains an invalid argument") while the same signature on two thoughts
+                    # is accepted (verified live 2026-09-17), so the opening thought takes it too.
+                    if steps[message_start]["type"] == "thought" and not steps[message_start].get("signature"):
+                        steps[message_start]["signature"] = signature
+
+                if item["type"] in ("text.done", "image_url.done", "inline_data.done"):
+                    if item["type"] == "text.done":
+                        # an empty text block is rejected: "Missing text in content of type text"
+                        if not item["text"]:
+                            continue
+
+                        block = {"type": "text", "text": item["text"]}
+                    else:
+                        if item["type"] == "image_url.done":
+                            media = await self._get_image_bytes_and_mime_type(item["image_url"])
+                        else:
+                            media = {"data": item["data"], "mime_type": item["mime_type"]}
+
+                        # the block type follows the MIME type: image/jpeg is an image, application/pdf a document
+                        kind = media["mime_type"].split("/")[0]
+                        block = {
+                            "type": kind if kind in ("image", "audio", "video") else "document",
+                            "data": base64.b64encode(media["data"]).decode(),
+                            "mime_type": media["mime_type"],
+                        }
+
+                    if content is None:
+                        content = []
+                        steps.append(
+                            {"type": "user_input" if msg["role"] == "user" else "model_output", "content": content}
                         )
-                    )
-                elif item["type"] == "tool_call":
+
+                    content.append(block)
+                elif item["type"] == "tool_call.done":
+                    content = None
                     call_names[item["tool_call_id"]] = item["name"]
-                    # Histories from before ids were stored carry the name as the tool_call_id;
-                    # replay those without an id, exactly as they arrived.
-                    function_call = types.FunctionCall(
-                        id=item["tool_call_id"] if item["tool_call_id"] != item["name"] else None,
-                        name=item["name"],
-                        args=item["arguments"],
-                    )
-                    parts.append(
-                        types.Part(function_call=function_call, thought_signature=self._item_thought_signature(item))
-                    )
-                elif item["type"] == "tool_result":
+                    # Histories from before ids were stored carry the name as the tool_call_id; replay
+                    # those without an id, because parallel calls sharing one id are rejected with a
+                    # 400 (verified live 2026-09-16).
+                    function_call = {"type": "function_call", "name": item["name"], "arguments": item["arguments"]}
+                    if item["tool_call_id"] != item["name"]:
+                        function_call["id"] = item["tool_call_id"]
+
+                    steps.append(function_call)
+                elif item["type"] == "tool_result.done":
+                    content = None
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
-                    tool_result = {"result": item["text"]}
-                    multimodal_parts = []
+                    result: str | list[dict[str, str]] = item["text"]
                     if "images" in item:
+                        # an empty text block is rejected, while a result of images alone is accepted
+                        result = [{"type": "text", "text": item["text"]}] if item["text"] else []
                         for image_url in item["images"]:
                             image_data = await self._get_image_bytes_and_mime_type(image_url)
-                            multimodal_parts.append(
-                                types.FunctionResponsePart(inline_data=types.FunctionResponseBlob(**image_data))
+                            result.append(
+                                {
+                                    "type": "image",
+                                    "data": base64.b64encode(image_data["data"]).decode(),
+                                    "mime_type": image_data["mime_type"],
+                                }
                             )
 
                     function_name = call_names.get(item["tool_call_id"], item["tool_call_id"])
-                    parts.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                id=item["tool_call_id"] if item["tool_call_id"] != function_name else None,
-                                name=function_name,
-                                response=tool_result,
-                                parts=multimodal_parts if multimodal_parts else None,
-                            )
-                        )
-                    )
+                    function_result = {"type": "function_result", "name": function_name, "result": result}
+                    if item["tool_call_id"] != function_name:
+                        function_result["call_id"] = item["tool_call_id"]
+
+                    steps.append(function_result)
                 else:
                     raise ValueError(f"Unknown item: {item}")
 
-            # Vertex AI rejects a content that mixes function_response parts with any other
-            # part kind — the request fails with a misleading 400, "Requests ending with a
-            # model turn are not supported" (the Gemini API endpoint accepts the mix). Split
-            # such a message into consecutive same-role contents: each run of function
-            # responses becomes its own content, the surrounding parts keep theirs, and the
-            # part order is preserved. Homogeneous messages stay a single content.
-            for run_parts in _split_function_response_runs(parts):
-                contents.append(types.Content(role=mapping[msg["role"]], parts=run_parts))
+            # An image model sometimes streams its text before its first thought step, but the API
+            # takes a turn holding a thought back only when the turn opens with one: "Model turns with
+            # images must start with a thought block" (verified live 2026-09-16). A turn another
+            # provider produced holds no signed thought at all, which the API rejects once the turn
+            # continues with its tool results (verified live 2026-09-16). Both open with the
+            # placeholder signature Google documents for thoughts it did not produce.
+            turn = steps[message_start:]
+            if (any(step["type"] == "thought" for step in turn) and turn[0]["type"] != "thought") or (
+                any(step["type"] in ("model_output", "function_call") for step in turn)
+                and not any(step["type"] == "thought" and step.get("signature") for step in turn)
+            ):
+                steps.insert(message_start, {"type": "thought", "signature": "skip_thought_signature_validator"})
 
-        return contents
+        return steps
 
-    def transform_model_output_to_uni_event(self, model_output: types.GenerateContentResponse) -> UniEvent:
+    def transform_model_output_to_uni_event(self, model_output: interactions.InteractionSSEEvent) -> UniEvent:
         """
-        Transform Gemini 3.7 model output to universal event format.
+        Transform one Interactions API stream event into a universal event, its items identified by step index.
+
+        A step streams one item per run of a content kind: an image model's thought summary can go text,
+        image, text, which is three items. Every image delta is a whole image and an item of its own,
+        while audio streams in chunks of one item.
 
         Args:
-            model_output: Gemini response chunk
+            model_output: Interactions API stream event
 
         Returns:
             Universal event dictionary
         """
         event_type: EventType = "delta"
-        content_items: list[PartialContentItem] = []
+        content_items: list[EventContentItem] = []
         usage_metadata: UsageMetadata | None = None
         finish_reason: FinishReason | None = None
 
-        if model_output.candidates:
-            candidate = model_output.candidates[0]
-            content = getattr(candidate, "content", None)
-            for part in getattr(content, "parts", None) or []:
-                if part.function_call is not None:
-                    content_items.append(
-                        {
-                            "type": "tool_call",
-                            "name": part.function_call.name,
-                            "arguments": part.function_call.args or {},
-                            "tool_call_id": part.function_call.id or part.function_call.name,
-                            **self._part_fidelity(part),
-                        }
-                    )
-                elif part.thought:
-                    if part.text is not None:
-                        content_items.append({"type": "thinking", "thinking": part.text, **self._part_fidelity(part)})
-                    elif part.inline_data is not None:
-                        content_items.append(
-                            {
-                                "type": "inline_thinking",
-                                "data": part.inline_data.data,
-                                "mime_type": part.inline_data.mime_type,
-                                **self._part_fidelity(part),
-                            }
-                        )
-                elif part.inline_data is not None:
-                    content_items.append(
-                        {
-                            "type": "inline_data",
-                            "data": part.inline_data.data,
-                            "mime_type": part.inline_data.mime_type,
-                            **self._part_fidelity(part),
-                        }
-                    )
-                elif part.text is not None:
-                    content_items.append({"type": "text", "text": part.text, **self._part_fidelity(part)})
-                elif is_debug_enabled():
-                    raise ValueError(f"Unknown output: {part}")
+        if model_output.event_type == "step.start":
+            step = model_output.step
+            if step.type == "function_call":
+                # the start names the call; its arguments stream as deltas behind an empty object
+                start_arguments = json.dumps(step.arguments, ensure_ascii=False) if step.arguments else ""
+                content_items.append(
+                    {
+                        "type": "tool_call.delta",
+                        "name": step.name,
+                        "arguments": start_arguments,
+                        "tool_call_id": step.id,
+                        "fidelity": {"item_id": str(model_output.index)},
+                    }
+                )
+            elif step.type in ("thought", "model_output"):
+                # their content arrives in the step's deltas
+                pass
+            elif is_debug_enabled():
+                raise ValueError(f"Unknown output: {model_output}")
 
-            if candidate.finish_reason:
-                event_type = "stop"
-                stop_reason_mapping = {
-                    types.FinishReason.STOP: "stop",
-                    types.FinishReason.MAX_TOKENS: "length",
-                }
-                finish_reason = stop_reason_mapping.get(candidate.finish_reason, "unknown")
+        elif model_output.event_type == "step.delta":
+            item_id = str(model_output.index)
+            delta = model_output.delta
+            if delta.type == "thought_summary" and delta.content is not None and delta.content.type == "text":
+                content_items.append(
+                    {"type": "thinking.delta", "thinking": delta.content.text, "fidelity": {"item_id": item_id}}
+                )
+            elif delta.type == "thought_summary" and delta.content is not None and delta.content.type == "image":
+                # image models summarize their thinking with interim images too
+                content_items.append(
+                    {
+                        "type": "inline_thinking.delta",
+                        "data": base64.b64decode(delta.content.data or ""),
+                        "mime_type": delta.content.mime_type or "image/jpeg",
+                        "fidelity": {"item_id": item_id},
+                    }
+                )
+            elif delta.type == "thought_signature":
+                # the signature is the last delta of its thought step, and belongs to the item the
+                # step ends with, an image one included
+                content_items.append(
+                    {
+                        "type": "thinking.delta",
+                        "thinking": "",
+                        "fidelity": {"item_id": item_id, "signature": delta.signature},
+                    }
+                )
+            elif delta.type == "arguments_delta":
+                content_items.append(
+                    {
+                        "type": "tool_call.delta",
+                        "name": "",
+                        "arguments": delta.arguments or "",
+                        "tool_call_id": "",
+                        "fidelity": {"item_id": item_id},
+                    }
+                )
+            elif delta.type == "text":
+                content_items.append({"type": "text.delta", "text": delta.text, "fidelity": {"item_id": item_id}})
+            elif delta.type == "image":
+                content_items.append(
+                    {
+                        "type": "inline_data.delta",
+                        "data": base64.b64decode(delta.data or ""),
+                        "mime_type": delta.mime_type or "image/jpeg",
+                        "fidelity": {"item_id": item_id},
+                    }
+                )
+            elif delta.type == "audio":
+                # TTS streams raw PCM in 40 ms chunks; the MIME type carries the format a player needs
+                content_items.append(
+                    {
+                        "type": "inline_data.delta",
+                        "data": base64.b64decode(delta.data or ""),
+                        "mime_type": f"{delta.mime_type}; rate={delta.sample_rate}; channels={delta.channels}",
+                        "fidelity": {"item_id": item_id},
+                    }
+                )
+            elif is_debug_enabled():
+                raise ValueError(f"Unknown output: {model_output}")
 
-        if model_output.usage_metadata:
-            event_type = event_type or "delta"  # deal with separate usage data
-
-            prompt_tokens = model_output.usage_metadata.prompt_token_count or 0
-            cached_tokens = model_output.usage_metadata.cached_content_token_count or 0
+        elif model_output.event_type == "interaction.completed":
+            event_type = "stop"
+            status_mapping: dict[str, FinishReason] = {
+                "completed": "stop",
+                "requires_action": "tool_call",
+                "incomplete": "length",
+            }
+            finish_reason = status_mapping.get(model_output.interaction.status, "unknown")
+            usage = model_output.interaction.usage or interactions.Usage()
+            # total_input_tokens includes the cached tokens; total_output_tokens excludes the thoughts
             usage_metadata = {
-                "cached_tokens": model_output.usage_metadata.cached_content_token_count,
-                "prompt_tokens": prompt_tokens - cached_tokens,
-                "thoughts_tokens": model_output.usage_metadata.thoughts_token_count,
-                "response_tokens": model_output.usage_metadata.candidates_token_count,
+                "cached_tokens": usage.total_cached_tokens or None,
+                "prompt_tokens": (usage.total_input_tokens or 0) - (usage.total_cached_tokens or 0),
+                "thoughts_tokens": usage.total_thought_tokens or None,
+                "response_tokens": usage.total_output_tokens or None,
             }
 
-        if not content_items and usage_metadata is None and finish_reason is None:
-            # nothing was read out of the chunk, so there is nothing to emit: a gateway
-            # heartbeat looks like this, and so does any other chunk we take no value from
-            event_type = "unused"
+        elif model_output.event_type == "error" and model_output.error is not None:
+            # Neither Interactions SDK raises on an error event inside an open stream, so the provider's
+            # failure is raised here rather than lost; an error event without an error, which the Python
+            # SDK makes of a gateway heartbeat, stays with the unknown-event guard.
+            raise RuntimeError(f"Gemini stream error {model_output.error.code}: {model_output.error.message}")
 
+        elif model_output.event_type in ("interaction.created", "interaction.status_update", "step.stop"):
+            # the interaction's lifecycle carries nothing universal, and a step needs no stop: its
+            # last item is done when the next step begins or the stream ends
+            pass
+
+        elif is_debug_enabled():
+            raise ValueError(f"Unknown output: {model_output}")
+
+        # the API adds event, step and delta types over time (the SDK surfaces them as its Unknown*
+        # types), and killing a long generation over one costs more than dropping it
         return {
             "role": "assistant",
             "event_type": event_type,
@@ -497,8 +563,24 @@ class Gemini3_8Client(LLMClient):
         messages: list[UniMessage],
         config: UniConfig,
     ) -> AsyncIterator[UniEvent]:
-        """Embed transformed messages and return them as a streaming event."""
-        contents = await self.transform_uni_message_to_model_input(messages)
+        """Embed messages through embedContent and yield their embedding items, one per message, as one event."""
+        # the Interactions API does not serve embedding models (HTTP 404, verified live
+        # 2026-09-16), so they stay on embedContent
+        contents = []
+        for msg in messages:
+            parts = []
+            for item in msg["content_items"]:
+                if item["type"] == "text.done":
+                    parts.append(types.Part(text=item["text"]))
+                elif item["type"] == "image_url.done":
+                    image_data = await self._get_image_bytes_and_mime_type(item["image_url"])
+                    parts.append(types.Part.from_bytes(**image_data))
+                elif item["type"] == "inline_data.done":
+                    parts.append(types.Part.from_bytes(data=item["data"], mime_type=item["mime_type"]))
+                else:
+                    raise ValueError(f"Unknown item: {item}")
+
+            contents.append(types.Content(role="user" if msg["role"] == "user" else "model", parts=parts))
 
         embedding_config = config.get("embedding_config") or {}
         gemini_config = None
@@ -515,7 +597,7 @@ class Gemini3_8Client(LLMClient):
             "role": "assistant",
             "event_type": "stop",
             "content_items": [
-                {"type": "embedding", "embedding": list(embedding.values or [])}
+                {"type": "embedding.delta", "embedding": list(embedding.values or [])}
                 for embedding in (result.embeddings or [])
             ],
             "usage_metadata": {
@@ -532,13 +614,12 @@ class Gemini3_8Client(LLMClient):
         messages: list[UniMessage],
         config: UniConfig,
     ) -> AsyncIterator[UniEvent]:
-        """Stream generate using Gemini SDK with unified conversion methods."""
+        """Stream generate through the Interactions API with unified conversion methods."""
         if "embedding" in self._model.lower():
             async for event in self._embed_messages_internal(messages, config):
                 yield event
             return
 
-        # Use unified config conversion
         gemini_config = self.transform_uni_config_to_model_config(config)
 
         # A TTS model synthesizes a single text turn: a conversation comes back as "Multiturn chat
@@ -548,44 +629,18 @@ class Gemini3_8Client(LLMClient):
         if "tts" in self._model.lower():
             messages = messages[-1:]
             invalid_item = next(
-                (item for message in messages for item in message["content_items"] if item["type"] != "text"),
+                (item for message in messages for item in message["content_items"] if item["type"] != "text.done"),
                 None,
             )
             if invalid_item is not None:
                 raise ValueError(f"Gemini TTS only supports text input, got content item type={invalid_item['type']}.")
 
-        # Use unified message conversion
-        contents = await self.transform_uni_message_to_model_input(messages)
+        steps = await self.transform_uni_message_to_model_input(messages)
 
-        # Stream generate
-        response_stream = await self._client.aio.models.generate_content_stream(
-            model=self._model, contents=contents, config=gemini_config
-        )
-        async for chunk in response_stream:
-            event = self.transform_model_output_to_uni_event(chunk)
-            if event["event_type"] == "unused":
-                continue
+        stream = await self._client.aio.interactions.create(**gemini_config, input=steps)
 
-            for item in event["content_items"]:
-                if item["type"] == "tool_call":
-                    # the Gemini API does not stream partial tool calls, mock a partial tool call event
-                    yield {
-                        "role": "assistant",
-                        "event_type": "delta",
-                        "content_items": [
-                            {
-                                "type": "partial_tool_call",
-                                "name": item["name"],
-                                "arguments": json.dumps(item["arguments"], ensure_ascii=False),
-                                "tool_call_id": item["tool_call_id"],
-                                "fidelity": item.get("fidelity"),
-                            }
-                        ],
-                        "usage_metadata": None,
-                        "finish_reason": None,
-                    }
-
-            yield event
+        async for event in stream:
+            yield self.transform_model_output_to_uni_event(event)
 
     async def list_models(self) -> list[str]:
         """

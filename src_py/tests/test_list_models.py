@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
+from google.auth.credentials import AnonymousCredentials
+from google.oauth2 import service_account
 
 from agenthub import AutoLLMClient, UnsupportedOperationError
 
@@ -126,6 +128,39 @@ async def test_gemini_client_strips_the_path_from_model_names():
     client._client._client = SimpleNamespace(aio=SimpleNamespace(models=fake))  # noqa: SLF001
 
     assert await client.list_models() == ["gemini-3.7-flash", "gemini-3.7-pro"]
+
+
+# A Vertex AI service-account key, which the Gemini clients recognize by its leading brace.
+SERVICE_ACCOUNT_KEY = '{"project_id": "test-project"}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("api_key", "client_type", "expected_client"),
+    [
+        (SERVICE_ACCOUNT_KEY, None, "Gemini3_8GenerateContentClient"),
+        ("test-key", "gemini-generate-content", "Gemini3_8GenerateContentClient"),
+        (SERVICE_ACCOUNT_KEY, "gemini-interactions", "Gemini3_8Client"),
+    ],
+)
+async def test_gemini_routes_by_credential_and_pin_and_keeps_the_gemini_ids_of_a_vertex_listing(
+    api_key: str, client_type: str | None, expected_client: str, monkeypatch
+):
+    # google-auth parses a real key's private key while the client is constructed
+    monkeypatch.setattr(
+        service_account.Credentials, "from_service_account_info", lambda _info, scopes=None: AnonymousCredentials()
+    )
+    client = AutoLLMClient(model="gemini-3.8-flash", api_key=api_key, client_type=client_type)
+    assert type(client._client).__name__ == expected_client  # noqa: SLF001
+    fake = _FakeGeminiModelsEndpoint(
+        [
+            f"publishers/google/models/{model_id}"
+            for model_id in ("gemini-3.8-flash", "gemini-embedding-2", "gemini-2.5-flash", "spicy-mayo")
+        ]
+    )
+    client._client._client = SimpleNamespace(aio=SimpleNamespace(models=fake))  # noqa: SLF001
+
+    assert await client.list_models() == ["gemini-3.8-flash", "gemini-embedding-2"]
 
 
 @pytest.mark.asyncio

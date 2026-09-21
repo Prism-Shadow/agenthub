@@ -81,7 +81,7 @@ export class OpenaiEmbeddingClient extends LLMClient {
     for (const msg of messages) {
       let msgText = "";
       for (const item of msg.content_items) {
-        if (item.type !== "text") {
+        if (item.type !== "text.done") {
           throw new Error("OpenAI embeddings only support text content items.");
         }
         msgText += item.text;
@@ -92,7 +92,7 @@ export class OpenaiEmbeddingClient extends LLMClient {
   }
 
   /**
-   * Transform OpenAI Embeddings response to universal event format.
+   * Transform an OpenAI Embeddings response into a universal event, one complete item per vector.
    */
   transformModelOutputToUniEvent(
     modelOutput: CreateEmbeddingResponse,
@@ -101,7 +101,7 @@ export class OpenaiEmbeddingClient extends LLMClient {
       role: "assistant",
       event_type: "stop",
       content_items: modelOutput.data.map((item) => ({
-        type: "embedding" as const,
+        type: "embedding.delta" as const,
         embedding: item.embedding,
       })),
       usage_metadata: {

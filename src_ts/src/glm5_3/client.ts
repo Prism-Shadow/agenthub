@@ -19,14 +19,11 @@ import type {
   ChatCompletionCreateParamsStreaming,
 } from "openai/resources/chat/completions";
 import { LLMClient } from "../baseClient";
+import { UnsupportedParameterError } from "../errors";
 import {
-  parseToolCallArguments,
-  UnsupportedParameterError,
-} from "../errors";
-import {
+  EventContentItem,
   EventType,
   FinishReason,
-  PartialContentItem,
   PromptCaching,
   ThinkingLevel,
   ToolChoice,
@@ -241,9 +238,9 @@ export class GLM5_3Client extends LLMClient {
       const thinkingFields = new Set<string | undefined>();
 
       for (const item of msg.content_items) {
-        if (item.type === "text") {
+        if (item.type === "text.done") {
           contentParts.push({ type: "text", text: item.text });
-        } else if (item.type === "image_url") {
+        } else if (item.type === "image_url.done") {
           if (!supportsImage) {
             throw new Error(
               `GLM ${this._model} does not support image inputs.`,
@@ -254,10 +251,10 @@ export class GLM5_3Client extends LLMClient {
             type: "image_url",
             image_url: { url: item.image_url },
           });
-        } else if (item.type === "thinking") {
+        } else if (item.type === "thinking.done") {
           thinking += item.thinking;
           thinkingFields.add(item.fidelity?.reasoning_field);
-        } else if (item.type === "tool_call") {
+        } else if (item.type === "tool_call.done") {
           toolCalls.push({
             id: item.tool_call_id,
             type: "function",
@@ -266,7 +263,7 @@ export class GLM5_3Client extends LLMClient {
               arguments: JSON.stringify(item.arguments, null, 0),
             },
           });
-        } else if (item.type === "tool_result") {
+        } else if (item.type === "tool_result.done") {
           if (!item.tool_call_id) {
             throw new Error("tool_call_id is required for tool result.");
           }
@@ -342,11 +339,15 @@ export class GLM5_3Client extends LLMClient {
   }
 
   /**
-   * Transform GLM model output to universal event format.
+   * Transform one GLM streaming chunk into a universal event.
+   *
+   * Chat Completions gives an item no identity, so each delta's item_id is the wire field
+   * that carried it: an item runs until a delta arrives from another field, or names the next
+   * tool call.
    */
   transformModelOutputToUniEvent(modelOutput: ChatCompletionChunk): UniEvent {
-    let eventType: EventType | null = null;
-    const contentItems: PartialContentItem[] = [];
+    let eventType: EventType = "delta";
+    const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
     let finishReason: FinishReason | null = null;
 
@@ -356,53 +357,61 @@ export class GLM5_3Client extends LLMClient {
       const choice = modelOutput.choices[0];
       const delta = choice?.delta;
 
-      if (delta?.content) {
-        eventType = "delta";
-        contentItems.push({ type: "text", text: delta.content });
-      }
-
       // the thinking field name differs by server: vLLM & siliconflow use
       // reasoning_content while openrouter uses reasoning; record the wire
       // field that carried each delta so a replay can reproduce exactly the
-      // field the upstream produced
+      // field the upstream produced. The reasoning goes before the content
+      // because a chunk may end the reasoning and begin the answer.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const reasoningContent = (delta as any)?.reasoning_content;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const reasoning = (delta as any)?.reasoning;
       if (reasoningContent && reasoning) {
-        eventType = "delta";
-        // ambiguous origin: record no fidelity so a replay sends both fields back
-        contentItems.push({ type: "thinking", thinking: reasoningContent });
-      } else if (reasoningContent) {
-        eventType = "delta";
+        // ambiguous origin: record no reasoning_field so a replay sends both fields back
         contentItems.push({
-          type: "thinking",
+          type: "thinking.delta",
           thinking: reasoningContent,
-          fidelity: { reasoning_field: "reasoning_content" },
+          fidelity: { item_id: "reasoning_content" },
+        });
+      } else if (reasoningContent) {
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: reasoningContent,
+          fidelity: {
+            item_id: "reasoning_content",
+            reasoning_field: "reasoning_content",
+          },
         });
       } else if (reasoning) {
-        eventType = "delta";
         contentItems.push({
-          type: "thinking",
+          type: "thinking.delta",
           thinking: reasoning,
-          fidelity: { reasoning_field: "reasoning" },
+          fidelity: { item_id: "reasoning", reasoning_field: "reasoning" },
+        });
+      }
+
+      if (delta?.content) {
+        contentItems.push({
+          type: "text.delta",
+          text: delta.content,
+          fidelity: { item_id: "content" },
         });
       }
 
       if (delta?.tool_calls) {
-        eventType = "delta";
         for (const toolCall of delta.tool_calls) {
           contentItems.push({
-            type: "partial_tool_call",
+            type: "tool_call.delta",
             name: toolCall.function?.name || "",
             arguments: toolCall.function?.arguments || "",
             tool_call_id: toolCall.id || "",
+            fidelity: { item_id: "tool_calls" },
           });
         }
       }
 
       if (choice?.finish_reason) {
-        eventType = eventType || "stop";
+        eventType = "stop";
         const finishReasonMapping: { [key: string]: FinishReason } = {
           stop: "stop",
           length: "length",
@@ -414,7 +423,7 @@ export class GLM5_3Client extends LLMClient {
     }
 
     if (modelOutput.usage) {
-      eventType = eventType || "stop";
+      eventType = "stop";
 
       const cachedTokens =
         modelOutput.usage.prompt_tokens_details?.cached_tokens || null;
@@ -444,7 +453,7 @@ export class GLM5_3Client extends LLMClient {
 
     return {
       role: "assistant",
-      event_type: eventType as EventType,
+      event_type: eventType,
       content_items: contentItems,
       usage_metadata: usageMetadata,
       finish_reason: finishReason,
@@ -482,103 +491,8 @@ export class GLM5_3Client extends LLMClient {
       signal: options.signal,
     });
 
-    const partialToolCall: {
-      name?: string;
-      arguments?: string;
-      tool_call_id?: string;
-    } = {};
-    let partialUsage: {
-      finish_reason?: FinishReason | null;
-      usage_metadata?: UsageMetadata | null;
-    } = {};
-
     for await (const chunk of stream) {
-      const event = this.transformModelOutputToUniEvent(chunk);
-      // the finish reason and usage metadata should be accumulated
-      partialUsage.finish_reason =
-        event.finish_reason || partialUsage.finish_reason;
-      partialUsage.usage_metadata =
-        event.usage_metadata || partialUsage.usage_metadata;
-      if (event.event_type === "delta") {
-        for (const item of event.content_items) {
-          if (item.type === "partial_tool_call") {
-            if (!partialToolCall.name) {
-              // start a new partial tool call
-              partialToolCall.name = item.name;
-              partialToolCall.arguments = item.arguments;
-              partialToolCall.tool_call_id = item.tool_call_id;
-            } else if (item.name) {
-              // finish the previous partial tool call
-              yield {
-                role: "assistant",
-                event_type: "delta",
-                content_items: [
-                  {
-                    type: "tool_call",
-                    name: partialToolCall.name,
-                    arguments: parseToolCallArguments(
-                      partialToolCall.arguments,
-                      this.constructor.name,
-                      partialToolCall.name || "",
-                      partialToolCall.tool_call_id || "",
-                    ),
-                    tool_call_id: partialToolCall.tool_call_id || "",
-                  },
-                ],
-                usage_metadata: null,
-                finish_reason: null,
-              };
-              // start a new partial tool call
-              partialToolCall.name = item.name;
-              partialToolCall.arguments = item.arguments;
-              partialToolCall.tool_call_id = item.tool_call_id;
-            } else {
-              // update partial tool call
-              partialToolCall.arguments =
-                (partialToolCall.arguments || "") + item.arguments;
-            }
-          }
-        }
-        yield event;
-      } else if (event.event_type === "stop") {
-        if (partialToolCall.name) {
-          // finish the partial tool call
-          yield {
-            role: "assistant",
-            event_type: "delta",
-            content_items: [
-              {
-                type: "tool_call",
-                name: partialToolCall.name,
-                arguments: parseToolCallArguments(
-                  partialToolCall.arguments,
-                  this.constructor.name,
-                  partialToolCall.name || "",
-                  partialToolCall.tool_call_id || "",
-                ),
-                tool_call_id: partialToolCall.tool_call_id || "",
-              },
-            ],
-            usage_metadata: null,
-            finish_reason: null,
-          };
-          partialToolCall.name = undefined;
-          partialToolCall.arguments = undefined;
-          partialToolCall.tool_call_id = undefined;
-        }
-
-        if (partialUsage.finish_reason && partialUsage.usage_metadata) {
-          yield {
-            role: "assistant",
-            event_type: "stop",
-            content_items: [],
-            usage_metadata: partialUsage.usage_metadata,
-            finish_reason: partialUsage.finish_reason,
-          };
-          partialUsage.finish_reason = null;
-          partialUsage.usage_metadata = null;
-        }
-      }
+      yield this.transformModelOutputToUniEvent(chunk);
     }
   }
 

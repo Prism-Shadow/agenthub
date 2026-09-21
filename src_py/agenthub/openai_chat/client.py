@@ -23,11 +23,11 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
 
 from ..base_client import LLMClient
-from ..errors import UnsupportedParameterError, parse_tool_call_arguments
+from ..errors import UnsupportedParameterError
 from ..types import (
+    EventContentItem,
     EventType,
     FinishReason,
-    PartialContentItem,
     PromptCaching,
     ToolChoice,
     UniConfig,
@@ -158,17 +158,17 @@ class OpenaiChatClient(LLMClient):
             thinking = ""
             thinking_fields: set[str | None] = set()
             for item in msg["content_items"]:
-                if item["type"] == "text":
+                if item["type"] == "text.done":
                     content_parts.append({"type": "text", "text": item["text"]})
-                elif item["type"] == "image_url":
+                elif item["type"] == "image_url.done":
                     base64_image = await self._convert_image_url_to_base64(item["image_url"])
                     content_parts.append(self._convert_image_url(base64_image))
-                elif item["type"] == "thinking":
+                elif item["type"] == "thinking.done":
                     thinking += item["thinking"]
                     thinking_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
                     if item["thinking"]:
                         replay_fields.add((item.get("fidelity") or {}).get("reasoning_field"))
-                elif item["type"] == "tool_call":
+                elif item["type"] == "tool_call.done":
                     tool_calls.append(
                         {
                             "id": item["tool_call_id"],
@@ -179,7 +179,7 @@ class OpenaiChatClient(LLMClient):
                             },
                         }
                     )
-                elif item["type"] == "tool_result":
+                elif item["type"] == "tool_result.done":
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
@@ -233,7 +233,10 @@ class OpenaiChatClient(LLMClient):
 
     def transform_model_output_to_uni_event(self, model_output: ChatCompletionChunk) -> UniEvent:
         """
-        Transform OpenAI Chat Completions streaming chunk to universal event format.
+        Transform one OpenAI Chat Completions streaming chunk into a universal event.
+
+        Chat Completions gives an item no identity, so each delta's item_id is the wire field that
+        carried it: an item runs until a delta arrives from another field, or names the next tool call.
 
         Args:
             model_output: OpenAI streaming chunk
@@ -241,8 +244,8 @@ class OpenaiChatClient(LLMClient):
         Returns:
             Universal event dictionary
         """
-        event_type: EventType | None = None
-        content_items: list[PartialContentItem] = []
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
         usage_metadata: UsageMetadata | None = None
         finish_reason: FinishReason | None = None
 
@@ -252,48 +255,55 @@ class OpenaiChatClient(LLMClient):
             choice = model_output.choices[0]
             delta = choice.delta
 
-            if delta.content:
-                event_type = "delta"
-                content_items.append({"type": "text", "text": delta.content})
-
             # the thinking field name differs by server: vLLM & siliconflow use reasoning_content
             # while openrouter uses reasoning; record the wire field that carried each delta
-            # so a replay can reproduce exactly the field the upstream produced
+            # so a replay can reproduce exactly the field the upstream produced. The reasoning
+            # goes before the content because a chunk may end the reasoning and begin the answer.
             reasoning_content = getattr(delta, "reasoning_content", None)
             reasoning = getattr(delta, "reasoning", None)
             if reasoning_content and reasoning:
-                event_type = "delta"
-                # ambiguous origin: record no fidelity so a replay sends both fields back
-                content_items.append({"type": "thinking", "thinking": reasoning_content})
-            elif reasoning_content:
-                event_type = "delta"
+                # ambiguous origin: record no reasoning_field so a replay sends both fields back
                 content_items.append(
                     {
-                        "type": "thinking",
+                        "type": "thinking.delta",
                         "thinking": reasoning_content,
-                        "fidelity": {"reasoning_field": "reasoning_content"},
+                        "fidelity": {"item_id": "reasoning_content"},
+                    }
+                )
+            elif reasoning_content:
+                content_items.append(
+                    {
+                        "type": "thinking.delta",
+                        "thinking": reasoning_content,
+                        "fidelity": {"item_id": "reasoning_content", "reasoning_field": "reasoning_content"},
                     }
                 )
             elif reasoning:
-                event_type = "delta"
                 content_items.append(
-                    {"type": "thinking", "thinking": reasoning, "fidelity": {"reasoning_field": "reasoning"}}
+                    {
+                        "type": "thinking.delta",
+                        "thinking": reasoning,
+                        "fidelity": {"item_id": "reasoning", "reasoning_field": "reasoning"},
+                    }
                 )
+
+            if delta.content:
+                content_items.append({"type": "text.delta", "text": delta.content, "fidelity": {"item_id": "content"}})
 
             if delta.tool_calls:
                 for tool_call in delta.tool_calls:
-                    event_type = "delta"
                     content_items.append(
                         {
-                            "type": "partial_tool_call",
+                            "type": "tool_call.delta",
                             "name": tool_call.function.name or "",
                             "arguments": tool_call.function.arguments or "",
                             "tool_call_id": tool_call.id or tool_call.function.name or "",
+                            "fidelity": {"item_id": "tool_calls"},
                         }
                     )
 
             if choice.finish_reason:
-                event_type = event_type or "stop"
+                event_type = "stop"
                 finish_reason_mapping = {
                     "stop": "stop",
                     "length": "length",
@@ -303,7 +313,7 @@ class OpenaiChatClient(LLMClient):
                 finish_reason = finish_reason_mapping.get(choice.finish_reason, "unknown")
 
         if model_output.usage:
-            event_type = event_type or "stop"  # deal with separate usage data
+            event_type = "stop"
 
             if model_output.usage.prompt_tokens_details:
                 cached_tokens = model_output.usage.prompt_tokens_details.cached_tokens
@@ -356,88 +366,8 @@ class OpenaiChatClient(LLMClient):
 
         stream = await self._client.chat.completions.create(**openai_config, messages=openai_messages)
 
-        partial_tool_call = {}
-        partial_usage = {}
         async for chunk in stream:
-            event = self.transform_model_output_to_uni_event(chunk)
-            # the finish reason and usage metadata should be accumulated
-            partial_usage["finish_reason"] = event["finish_reason"] or partial_usage.get("finish_reason")
-            partial_usage["usage_metadata"] = event["usage_metadata"] or partial_usage.get("usage_metadata")
-            if event["event_type"] == "delta":
-                for item in event["content_items"]:
-                    if item["type"] == "partial_tool_call":
-                        if not partial_tool_call:
-                            # start new partial tool call for tool call object
-                            partial_tool_call = {
-                                "name": item["name"],
-                                "arguments": item["arguments"],
-                                "tool_call_id": item["tool_call_id"],
-                            }
-                        elif item["name"]:
-                            # finish previous partial tool call for tool call object
-                            yield {
-                                "role": "assistant",
-                                "event_type": "delta",
-                                "content_items": [
-                                    {
-                                        "type": "tool_call",
-                                        "name": partial_tool_call["name"],
-                                        "arguments": parse_tool_call_arguments(
-                                            partial_tool_call["arguments"],
-                                            self.__class__.__name__,
-                                            partial_tool_call["name"],
-                                            partial_tool_call["tool_call_id"],
-                                        ),
-                                        "tool_call_id": partial_tool_call["tool_call_id"],
-                                    }
-                                ],
-                                "usage_metadata": None,
-                                "finish_reason": None,
-                            }
-                            # start new partial tool call for tool call object
-                            partial_tool_call = {
-                                "name": item["name"],
-                                "arguments": item["arguments"],
-                                "tool_call_id": item["tool_call_id"],
-                            }
-                        else:
-                            # update partial tool call for tool call object
-                            partial_tool_call["arguments"] += item["arguments"]
-
-                yield event
-            elif event["event_type"] == "stop":
-                if partial_tool_call:
-                    # finish partial tool call for tool call object
-                    yield {
-                        "role": "assistant",
-                        "event_type": "delta",
-                        "content_items": [
-                            {
-                                "type": "tool_call",
-                                "name": partial_tool_call["name"],
-                                "arguments": parse_tool_call_arguments(
-                                    partial_tool_call["arguments"],
-                                    self.__class__.__name__,
-                                    partial_tool_call["name"],
-                                    partial_tool_call["tool_call_id"],
-                                ),
-                                "tool_call_id": partial_tool_call["tool_call_id"],
-                            }
-                        ],
-                        "usage_metadata": None,
-                        "finish_reason": None,
-                    }
-                    partial_tool_call = {}
-
-                if partial_usage.get("finish_reason") and partial_usage.get("usage_metadata"):
-                    yield {
-                        "role": "assistant",
-                        "event_type": "stop",
-                        "content_items": [],
-                        "usage_metadata": partial_usage["usage_metadata"],
-                        "finish_reason": partial_usage["finish_reason"],
-                    }
-                    partial_usage = {}
+            yield self.transform_model_output_to_uni_event(chunk)
 
     async def list_models(self) -> list[str]:
         """

@@ -41,7 +41,7 @@ async def main():
     print("User:", query)
     print("Assistant:")
     async for event in client.streaming_response(
-        messages=[{"role": "user", "content_items": [{"type": "text", "text": query}]}], config=config
+        messages=[{"role": "user", "content_items": [{"type": "text.done", "text": query}]}], config=config
     ):
         print(event)
 

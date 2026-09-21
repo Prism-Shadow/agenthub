@@ -16,11 +16,13 @@ import { expect, describe, test } from "@jest/globals";
 import {
   AutoLLMClient,
   ToolCallArgumentParseError,
-  ToolCallContentItem,
+  ToolCallDeltaItem,
+  ToolCallDoneItem,
   UniConfig,
   UniEvent,
   UniMessage,
 } from "../src";
+import { assertStreamGrammar } from "./streamGrammar";
 
 type FakeCreateEndpoint = {
   create: () => Promise<AsyncIterable<unknown>>;
@@ -31,11 +33,6 @@ type FakeStreamClient = {
   chat?: { completions: FakeCreateEndpoint };
   responses?: FakeCreateEndpoint;
 };
-
-type PartialToolCallItem = Extract<
-  UniEvent["content_items"][number],
-  { type: "partial_tool_call" }
->;
 
 type OpenAICompatibleToolStreamClient = {
   streamingResponse(options: {
@@ -91,7 +88,7 @@ const OPENAI_COMPATIBLE_TOOL_STREAM_CASES: OpenAICompatibleToolStreamCase[] = [
 const messages: UniMessage[] = [
   {
     role: "user",
-    content_items: [{ type: "text", text: "Create a memo." }],
+    content_items: [{ type: "text.done", text: "Create a memo." }],
   },
 ];
 
@@ -248,16 +245,42 @@ async function collectEvents(
   return events;
 }
 
+/** Consume a stream expected to fail, keeping the events that arrived before the error. */
 async function captureStreamError(
   stream: AsyncIterable<UniEvent>,
-): Promise<unknown> {
-  let capturedError: unknown;
+): Promise<{ events: UniEvent[]; error: unknown }> {
+  const events: UniEvent[] = [];
   try {
-    await collectEvents(stream);
+    for await (const event of stream) {
+      events.push(event);
+    }
   } catch (error) {
-    capturedError = error;
+    return { events, error };
   }
-  return capturedError;
+  return { events, error: undefined };
+}
+
+/** Every item the events carried, in stream order. */
+function streamedItems(events: UniEvent[]) {
+  return events.flatMap((event) => event.content_items);
+}
+
+/**
+ * Arguments are parsed when the call's item is done: the call's deltas have already reached the
+ * caller, and neither its done item nor the stop event ever does.
+ */
+function expectRaisedWhenTheCallIsDone(
+  events: UniEvent[],
+  toolCallId: string,
+): void {
+  const items = streamedItems(events);
+  expect(items[0]).toMatchObject({
+    type: "tool_call.delta",
+    name: "exec_command",
+    tool_call_id: toolCallId,
+  });
+  expect(items.map((item) => item.type)).not.toContain("tool_call.done");
+  expect(events.map((event) => event.event_type)).not.toContain("stop");
 }
 
 describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
@@ -280,27 +303,23 @@ describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
-      const toolCalls = events.flatMap((event) =>
-        event.content_items.filter(
-          (item): item is ToolCallContentItem => item.type === "tool_call",
-        ),
+      assertStreamGrammar(events);
+      const toolCalls = streamedItems(events).filter(
+        (item): item is ToolCallDoneItem => item.type === "tool_call.done",
       );
 
       expect(toolCalls).toHaveLength(1);
       expect(toolCalls[0]).toEqual({
-        type: "tool_call",
+        type: "tool_call.done",
         name: "exec_command",
         arguments: { cmd: "echo ok" },
         tool_call_id: "call_ok",
       });
 
-      // the fragments announce the call before the complete item and concatenate to the
-      // arguments it carries, whether the client streamed them or delivered the item alone
-      const fragments = events.flatMap((event) =>
-        event.content_items.filter(
-          (item): item is PartialToolCallItem =>
-            item.type === "partial_tool_call",
-        ),
+      // the deltas announce the call before its done item and concatenate to the arguments
+      // it carries, whether the client streamed them or delivered the item alone
+      const fragments = streamedItems(events).filter(
+        (item): item is ToolCallDeltaItem => item.type === "tool_call.delta",
       );
       expect(fragments[0]).toMatchObject({
         name: "exec_command",
@@ -309,16 +328,14 @@ describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
       expect(
         JSON.parse(fragments.map((fragment) => fragment.arguments).join("")),
       ).toEqual(toolCalls[0].arguments);
-      const kinds = events.flatMap((event) =>
-        event.content_items
-          .filter(
-            (item) =>
-              item.type === "partial_tool_call" || item.type === "tool_call",
-          )
-          .map((item) => item.type),
-      );
-      expect(kinds.indexOf("partial_tool_call")).toBeLessThan(
-        kinds.indexOf("tool_call"),
+      const kinds = streamedItems(events)
+        .filter(
+          (item) =>
+            item.type === "tool_call.delta" || item.type === "tool_call.done",
+        )
+        .map((item) => item.type);
+      expect(kinds.indexOf("tool_call.delta")).toBeLessThan(
+        kinds.indexOf("tool_call.done"),
       );
     });
 
@@ -335,12 +352,13 @@ describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
         ),
       );
 
-      const capturedError = await captureStreamError(
+      const { events, error } = await captureStreamError(
         client.streamingResponse({ messages, config: {} }),
       );
 
-      expect(capturedError).toBeInstanceOf(ToolCallArgumentParseError);
-      const parseError = capturedError as ToolCallArgumentParseError;
+      expect(error).toBeInstanceOf(ToolCallArgumentParseError);
+      expectRaisedWhenTheCallIsDone(events, "call_bad");
+      const parseError = error as ToolCallArgumentParseError;
       expect(parseError.client).toBe(testCase.expectedClient);
       expect(parseError.toolName).toBe("exec_command");
       expect(parseError.toolCallId).toBe("call_bad");
@@ -357,12 +375,13 @@ describe.each(OPENAI_COMPATIBLE_TOOL_STREAM_CASES)(
         toolStream(testCase, "call_array", "exec_command", "[]"),
       );
 
-      const capturedError = await captureStreamError(
+      const { events, error } = await captureStreamError(
         client.streamingResponse({ messages, config: {} }),
       );
 
-      expect(capturedError).toBeInstanceOf(ToolCallArgumentParseError);
-      const parseError = capturedError as ToolCallArgumentParseError;
+      expect(error).toBeInstanceOf(ToolCallArgumentParseError);
+      expectRaisedWhenTheCallIsDone(events, "call_array");
+      const parseError = error as ToolCallArgumentParseError;
       expect(parseError.client).toBe(testCase.expectedClient);
       expect(parseError.toolName).toBe("exec_command");
       expect(parseError.toolCallId).toBe("call_array");
@@ -456,10 +475,10 @@ describe.each(RESPONSES_CASES)(
       const events = await collectEvents(
         client.streamingResponse({ messages, config: {} }),
       );
-      const toolCalls = events.flatMap((event) =>
-        event.content_items.filter(
-          (item): item is ToolCallContentItem => item.type === "tool_call",
-        ),
+      // the grammar also proves the two calls reach the caller one after the other
+      assertStreamGrammar(events);
+      const toolCalls = streamedItems(events).filter(
+        (item): item is ToolCallDoneItem => item.type === "tool_call.done",
       );
 
       expect(
@@ -467,6 +486,55 @@ describe.each(RESPONSES_CASES)(
       ).toEqual([
         ["call_first", "tool_first", { city: "Paris" }],
         ["call_second", "tool_second", { city: "Paris" }],
+      ]);
+    });
+  },
+);
+
+describe.each(RESPONSES_CASES)(
+  "OpenAI Responses call without arguments for $clientType",
+  (testCase) => {
+    test("reads a call completed without its arguments field as no arguments", async () => {
+      const client = createAutoClient(testCase);
+      installFakeStream(client, testCase, [
+        {
+          type: "response.output_item.added",
+          item: {
+            type: "function_call",
+            id: "fc_list",
+            call_id: "call_list",
+            name: "list_files",
+          },
+        },
+        { type: "response.function_call_arguments.done", item_id: "fc_list" },
+        {
+          type: "response.output_item.done",
+          item: {
+            type: "function_call",
+            id: "fc_list",
+            call_id: "call_list",
+            name: "list_files",
+            status: "completed",
+          },
+        },
+        COMPLETED_EVENT,
+      ]);
+
+      const events = await collectEvents(
+        client.streamingResponse({ messages, config: {} }),
+      );
+      assertStreamGrammar(events);
+      const toolCalls = streamedItems(events).filter(
+        (item): item is ToolCallDoneItem => item.type === "tool_call.done",
+      );
+
+      expect(toolCalls).toEqual([
+        {
+          type: "tool_call.done",
+          name: "list_files",
+          arguments: {},
+          tool_call_id: "call_list",
+        },
       ]);
     });
   },

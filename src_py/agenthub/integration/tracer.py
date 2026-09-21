@@ -31,6 +31,7 @@ from typing import Any
 
 from flask import Flask, Response, render_template_string, request
 
+from ..legacy import normalize_legacy_messages
 from ..types import UniMessage
 
 
@@ -249,26 +250,23 @@ class Tracer:
             lines.append("-" * 80)
 
             for item in message["content_items"]:
-                if item["type"] == "text":
+                if item["type"] == "text.done":
                     lines.append(f"Text: {item['text']}")
-                elif item["type"] == "thinking":
+                elif item["type"] == "thinking.done":
                     lines.append(f"Thinking: {item['thinking']}")
-                elif item["type"] == "inline_thinking":
+                elif item["type"] == "inline_thinking.done":
                     lines.append(self._format_inline_data_summary(item, is_thinking=True))
-                elif item["type"] == "image_url":
+                elif item["type"] == "image_url.done":
                     lines.append(f"Image URL: {item['image_url']}")
-                elif item["type"] == "inline_data":
+                elif item["type"] == "inline_data.done":
                     lines.append(self._format_inline_data_summary(item))
-                elif item["type"] == "embedding":
+                elif item["type"] == "embedding.done":
                     lines.append(self._format_embedding_preview(item))
-                elif item["type"] == "tool_call":
+                elif item["type"] == "tool_call.done":
                     lines.append(f"Tool Call: {item['name']}")
                     lines.append(f"  Arguments: {json.dumps(item['arguments'], indent=2, ensure_ascii=False)}")
                     lines.append(f"  Tool Call ID: {item['tool_call_id']}")
-                elif item["type"] == "partial_tool_call":
-                    # Skip partial_tool_call - tracer only shows complete tool calls
-                    pass
-                elif item["type"] == "tool_result":
+                elif item["type"] == "tool_result.done":
                     lines.append(f"Tool Result (ID: {item['tool_call_id']}): {item['text']}")
                     if "images" in item and item["images"]:
                         for i, image_url in enumerate(item["images"], 1):
@@ -465,11 +463,11 @@ class Tracer:
                             {% for item in message.content_items %}
                                 <div class="mb-4 pb-4 border-b border-gray-100 last:border-b-0 last:mb-0 last:pb-0">
                                     <div class="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">{{ item.type|e }}</div>
-                                    {% if item.type == 'text' %}
+                                    {% if item.type == 'text.done' %}
                                         <div class="bg-gray-50 p-4 rounded-md font-mono text-sm whitespace-pre-wrap text-gray-800">{{ item.text|e }}</div>
-                                    {% elif item.type == 'thinking' %}
+                                    {% elif item.type == 'thinking.done' %}
                                         <div class="bg-blue-50 p-4 rounded-md border-l-4 border-blue-500 font-mono text-sm whitespace-pre-wrap text-gray-800">{{ item.thinking|e }}</div>
-                                    {% elif item.type == 'inline_thinking' %}
+                                    {% elif item.type == 'inline_thinking.done' %}
                                         <div class="bg-blue-50 border-blue-500 p-4 rounded-md border-l-4">
                                             <div class="text-xs text-blue-700 mb-2">{{ item|inline_thinking_summary }}</div>
                                             {% if item.mime_type and item.mime_type.startswith('image/') %}
@@ -480,11 +478,11 @@ class Tracer:
                                                 </div>
                                             {% endif %}
                                         </div>
-                                    {% elif item.type == 'tool_call' %}
+                                    {% elif item.type == 'tool_call.done' %}
                                         <div class="bg-yellow-50 p-4 rounded-md border-l-4 border-yellow-500">
                                             <div class="font-mono text-sm whitespace-pre-wrap text-gray-800">{{ item.name|e }}({% for key, value in item.arguments.items() %}{{ key|e }}="{{ value|e }}"{% if not loop.last %}, {% endif %}{% endfor %})</div>
                                         </div>
-                                    {% elif item.type == 'tool_result' %}
+                                    {% elif item.type == 'tool_result.done' %}
                                         <div class="bg-green-50 p-4 rounded-md border-l-4 border-green-500">
                                             <strong class="text-sm text-gray-900">Result:</strong> <span class="text-sm text-gray-700">{{ item.text|e }}</span><br>
                                             <strong class="text-sm text-gray-900">Call ID:</strong> <span class="text-sm text-gray-700">{{ item.tool_call_id|e }}</span>
@@ -496,11 +494,11 @@ class Tracer:
                                                 </div>
                                             {% endif %}
                                         </div>
-                                    {% elif item.type == 'image_url' %}
+                                    {% elif item.type == 'image_url.done' %}
                                         <div class="bg-gray-50 p-4 rounded-md">
                                             <img src="{{ item.image_url|e }}" class="max-w-xs max-h-48 rounded-md" alt="Preview">
                                         </div>
-                                    {% elif item.type == 'inline_data' %}
+                                    {% elif item.type == 'inline_data.done' %}
                                         <div class="bg-purple-50 border-purple-500 p-4 rounded-md border-l-4">
                                             <div class="text-xs text-purple-700 mb-2">{{ item|inline_data_summary }}</div>
                                             {% if item.mime_type and item.mime_type.startswith('image/') %}
@@ -515,7 +513,7 @@ class Tracer:
                                                 </div>
                                             {% endif %}
                                         </div>
-                                    {% elif item.type == 'embedding' %}
+                                    {% elif item.type == 'embedding.done' %}
                                         <div class="bg-indigo-50 p-4 rounded-md border-l-4 border-indigo-500">
                                             <div class="font-mono text-sm whitespace-pre-wrap text-gray-800">{{ item|embedding_preview|e }}</div>
                                         </div>
@@ -659,13 +657,15 @@ class Tracer:
                     if full_path.suffix == ".json":
                         with open(full_path, "r", encoding="utf-8") as f:
                             data = json.load(f)
+                        # trace files written before 0.5.0 carry the legacy content item types
+                        history = normalize_legacy_messages(data.get("history", []))
 
                         return render_template_string(
                             JSON_VIEWER_TEMPLATE,
                             filename=full_path.name,
                             breadcrumb=breadcrumb,
                             back_url=back_url,
-                            history=data.get("history", []),
+                            history=history,
                             config=data.get("config", {}),
                             enumerate=enumerate,
                         )

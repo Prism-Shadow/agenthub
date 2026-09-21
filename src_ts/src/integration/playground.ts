@@ -568,6 +568,13 @@ export function createChatApp(): Express {
               return \`<div class="embedding-content mb-2 rounded-md border-l-4 border-indigo-500 bg-indigo-50 p-3 whitespace-normal"><div class="flex items-start gap-2 text-sm"><strong class="shrink-0 text-gray-900">Embedding:</strong><code class="font-mono text-xs text-gray-800 break-all">\${preview}</code></div></div>\`;
           }
 
+          function openStreamItem(contentDiv, className) {
+              const container = document.createElement('div');
+              container.className = className;
+              contentDiv.appendChild(container);
+              return { container, text: '', name: '' };
+          }
+
           function handleImageSelect(event) {
               const files = event.target.files;
               if (!files || files.length === 0) return;
@@ -1138,19 +1145,21 @@ export function createChatApp(): Express {
 
               const assistantCard = addMessageCard('assistant', '');
               const contentDiv = assistantCard.querySelector('.message-content');
+              // items never interleave in a stream, so every delta belongs to the one item still open
+              let openItem = null;
               // a spoken response streams as many small chunks that only play as one clip
-              const audioStream = { mimeType: '', chunks: [], bytes: 0, container: null, finalized: false };
+              let audioStream = null;
 
               try {
                   const config = getConfig();
                   const content_items = [];
 
                   if (message) {
-                      content_items.push({ type: 'text', text: message });
+                      content_items.push({ type: 'text.done', text: message });
                   }
 
                   currentImages.forEach(img => {
-                      content_items.push({ type: 'image_url', image_url: img });
+                      content_items.push({ type: 'image_url.done', image_url: img });
                   });
 
                   const response = await fetch('/api/chat', {
@@ -1187,10 +1196,6 @@ export function createChatApp(): Express {
 
                   const reader = response.body.getReader();
                   const decoder = new TextDecoder();
-                  let fullResponse = '';
-                  let fullThinking = '';
-                  let fullToolName = '';
-                  let fullToolArgs = '';
                   let metadata = null;
                   let lastCreatedAt = null;
                   let buffer = '';
@@ -1213,66 +1218,15 @@ export function createChatApp(): Express {
                               try {
                                   const event = JSON.parse(data);
 
-                                  for (const item of event.content_items || []) {
-                                      if (item.type === 'text') {
-                                          fullResponse += item.text;
-                                          let textContainer = contentDiv.querySelector('.text-content');
-                                          if (!textContainer) {
-                                              textContainer = document.createElement('div');
-                                              textContainer.className = 'text-content';
-                                              contentDiv.appendChild(textContainer);
-                                          }
-                                          textContainer.textContent = fullResponse;
-                                      } else if (item.type === 'thinking') {
-                                          fullThinking += item.thinking;
-                                          let thinkingContainer = contentDiv.querySelector('.thinking-content');
-                                          if (!thinkingContainer) {
-                                            thinkingContainer = document.createElement('div');
-                                            thinkingContainer.className = 'thinking-content bg-blue-50 p-3 rounded-md border-l-4 border-blue-500 mb-2 italic';
-                                            // Always insert thinking before any text content so it appears on top
-                                            const textContainer = contentDiv.querySelector('.text-content');
-                                            contentDiv.insertBefore(thinkingContainer, textContainer || contentDiv.firstChild);
-                                          }
-                                          thinkingContainer.textContent = \`💭 \${fullThinking}\`;
-                                      } else if (item.type === 'inline_thinking') {
-                                          // Ignore thinking inline data
-                                          continue;
-                                      } else if (item.type === 'partial_tool_call') {
-                                          fullToolName += item.name || '';
-                                          fullToolArgs += item.arguments || '';
-                                          let toolcallContainer = contentDiv.querySelector('.toolcall-content');
-                                          if (!toolcallContainer) {
-                                              toolcallContainer = document.createElement('div');
-                                              toolcallContainer.className = 'toolcall-content bg-yellow-50 p-3 rounded-md border-l-4 border-yellow-500 mb-2';
-                                              contentDiv.appendChild(toolcallContainer);
-                                          }
-                                          toolcallContainer.innerHTML = \`<strong class="text-sm">🛠️ Tool Call:</strong> \${escapeHtml(fullToolName || '...')}<br><div class="mt-1 text-xs whitespace-pre-wrap">\${escapeHtml(fullToolArgs || '')}</div>\`;
-                                      } else if (item.type === 'tool_result') {
-                                          const toolResultDiv = document.createElement('div');
-                                          toolResultDiv.className = 'bg-green-50 p-3 rounded-md border-l-4 border-green-500 mb-2';
-                                          toolResultDiv.innerHTML = \`<strong class="text-sm">✅ Tool Result:</strong><br><div class="mt-1 text-xs whitespace-pre-wrap">\${escapeHtml(item.text)}</div>\`;
-                                          contentDiv.appendChild(toolResultDiv);
-                                      } else if (item.type === 'inline_data') {
-                                          if (isAudioMimeType(item.mime_type)) {
-                                              appendAudioChunk(contentDiv, item, audioStream);
-                                          } else {
-                                              const inlineDataDiv = document.createElement('div');
-                                              inlineDataDiv.innerHTML = renderInlineData(item);
-                                              if (inlineDataDiv.firstChild) {
-                                                  contentDiv.appendChild(inlineDataDiv.firstChild);
-                                              }
-                                          }
-                                      } else if (item.type === 'embedding') {
-                                          const embeddingDiv = document.createElement('div');
-                                          embeddingDiv.innerHTML = renderEmbedding(item);
-                                          if (embeddingDiv.firstChild) {
-                                              contentDiv.appendChild(embeddingDiv.firstChild);
-                                          }
-                                      }
+                                  if (event.error) {
+                                      const errorDiv = document.createElement('div');
+                                      errorDiv.className = 'mt-2 text-sm text-red-600';
+                                      errorDiv.textContent = \`Error: \${event.error}\`;
+                                      contentDiv.appendChild(errorDiv);
+                                      continue;
                                   }
 
-                                  container.scrollTop = container.scrollHeight;
-                                  if (event.usage_metadata) {
+                                  if (event.event_type === 'stop') {
                                       const usage = event.usage_metadata;
                                       const inputTokens = (usage.cached_tokens || 0) + (usage.prompt_tokens || 0);
                                       const outputTokens = (usage.thoughts_tokens || 0) + (usage.response_tokens || 0);
@@ -1282,24 +1236,64 @@ export function createChatApp(): Express {
                                           prompt_tokens: usage.prompt_tokens || 0,
                                           thoughts_tokens: usage.thoughts_tokens || 0,
                                           response_tokens: usage.response_tokens || 0,
-                                          total_tokens: totalTokens
+                                          total_tokens: totalTokens,
+                                          finish_reason: event.finish_reason
                                       };
-                                  }
-                                  if (event.finish_reason) {
-                                      metadata = metadata || {};
-                                      metadata.finish_reason = event.finish_reason;
-                                  }
-                                  if (event.created_at) {
                                       lastCreatedAt = event.created_at;
+                                      continue;
                                   }
+
+                                  // a delta event carries a fragment of the open item or its done item, whose complete
+                                  // content replaces the fragments shown so far; an image or an embedding shows once
+                                  // done, and thinking inline data not at all
+                                  for (const item of event.content_items) {
+                                      if (item.type === 'text.delta' || item.type === 'text.done') {
+                                          openItem = openItem || openStreamItem(contentDiv, 'text-content');
+                                          openItem.text = item.type === 'text.done' ? item.text : openItem.text + item.text;
+                                          openItem.container.textContent = openItem.text;
+                                      } else if (item.type === 'thinking.delta' || item.type === 'thinking.done') {
+                                          openItem = openItem || openStreamItem(contentDiv, 'thinking-content bg-blue-50 p-3 rounded-md border-l-4 border-blue-500 mb-2 italic');
+                                          openItem.text = item.type === 'thinking.done' ? item.thinking : openItem.text + item.thinking;
+                                          openItem.container.textContent = \`💭 \${openItem.text}\`;
+                                      } else if (item.type === 'tool_call.delta' || item.type === 'tool_call.done') {
+                                          openItem = openItem || openStreamItem(contentDiv, 'toolcall-content bg-yellow-50 p-3 rounded-md border-l-4 border-yellow-500 mb-2');
+                                          // only the first delta names the call, and only the done item has parsed arguments
+                                          openItem.name = item.name || openItem.name;
+                                          openItem.text = item.type === 'tool_call.done' ? JSON.stringify(item.arguments) : openItem.text + item.arguments;
+                                          openItem.container.innerHTML = \`<strong class="text-sm">🛠️ Tool Call:</strong> \${escapeHtml(openItem.name)}<br><div class="mt-1 text-xs whitespace-pre-wrap">\${escapeHtml(openItem.text)}</div>\`;
+                                      } else if (item.type === 'inline_data.delta' && isAudioMimeType(item.mime_type)) {
+                                          audioStream = audioStream || { mimeType: '', chunks: [], bytes: 0, container: null, finalized: false };
+                                          appendAudioChunk(contentDiv, item, audioStream);
+                                      } else if (item.type === 'inline_data.done' && isAudioMimeType(item.mime_type)) {
+                                          audioStream.chunks = [item.data];
+                                          finalizeAudioStream(audioStream, true);
+                                          audioStream = null;
+                                      } else if (item.type === 'inline_data.done') {
+                                          const inlineDataDiv = document.createElement('div');
+                                          inlineDataDiv.innerHTML = renderInlineData(item);
+                                          if (inlineDataDiv.firstChild) {
+                                              contentDiv.appendChild(inlineDataDiv.firstChild);
+                                          }
+                                      } else if (item.type === 'embedding.done') {
+                                          const embeddingDiv = document.createElement('div');
+                                          embeddingDiv.innerHTML = renderEmbedding(item);
+                                          if (embeddingDiv.firstChild) {
+                                              contentDiv.appendChild(embeddingDiv.firstChild);
+                                          }
+                                      }
+
+                                      if (item.type.endsWith('.done')) {
+                                          openItem = null;
+                                      }
+                                  }
+
+                                  container.scrollTop = container.scrollHeight;
                               } catch (e) {
                                   console.error('Error parsing event:', e);
                               }
                           }
                       }
                   }
-
-                  finalizeAudioStream(audioStream, true);
 
                   if (lastCreatedAt) {
                       const timestampEl = assistantCard.querySelector('.msg-timestamp');
@@ -1335,7 +1329,9 @@ export function createChatApp(): Express {
 
               } catch (error) {
                   if (error.name === 'AbortError') {
-                      finalizeAudioStream(audioStream);
+                      if (audioStream) {
+                          finalizeAudioStream(audioStream);
+                      }
                       markInterrupted(contentDiv);
                   } else {
                       contentDiv.textContent = \`Error: \${error.message}\`;
@@ -1466,10 +1462,13 @@ export function createChatApp(): Express {
         return;
       }
 
+      // a failed response has no stop event, so the page gets the error as an event of its own,
+      // named by its class when it carries no message, since the page shows no empty error
       const errorEvent = {
-        role: "assistant",
-        content_items: [{ type: "text", text: `Error: ${error}` }],
-        finish_reason: "error",
+        error:
+          error instanceof Error
+            ? error.message || error.constructor.name
+            : String(error),
       };
       completed = true;
       res.write(`data: ${JSON.stringify(errorEvent)}\n\n`);

@@ -12,32 +12,135 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { EmptyResponseError } from "./errors";
-import { isDebugEnabled } from "./utils";
+import { EmptyResponseError, StreamProtocolError } from "./errors";
+import { normalizeLegacyMessages } from "./legacy";
+import { StreamItems } from "./streamItems";
 import {
-  Fidelity,
-  FinishReason,
   ContentItem,
+  DeltaContentItem,
+  EventContentItem,
+  FinishReason,
   UniConfig,
   UniEvent,
   UniMessage,
   UsageMetadata,
 } from "./types";
 
-/**
- * Whether a content item carries a non-empty fidelity payload.
- */
-function hasFidelity(fidelity?: Fidelity): boolean {
-  return fidelity != null && Object.keys(fidelity).length > 0;
+function deltaEvent(item: EventContentItem): UniEvent {
+  return {
+    role: "assistant",
+    event_type: "delta",
+    content_items: [item],
+    usage_metadata: null,
+    finish_reason: null,
+    created_at: Date.now(),
+  };
 }
 
 /**
- * Compare two fidelity payloads by value. Fidelity dicts are built with a
- * stable key order by each client, so JSON serialization is a faithful
- * equality check.
+ * Turns the events a client yields into the public stream. A client yields deltas only; every
+ * one goes out as it arrives, in an event of its own, and `StreamItems` closes each item with its
+ * done item when the next item begins or the stream ends. The usage and finish reason of the
+ * client's stop events are merged into the one final stop.
  */
-function fidelityEquals(a?: Fidelity, b?: Fidelity): boolean {
-  return JSON.stringify(a ?? {}) === JSON.stringify(b ?? {});
+class PublicStream {
+  private readonly items: StreamItems;
+  private usageMetadata: UsageMetadata | null = null;
+  private finishReason: FinishReason | null = null;
+  readonly doneItems: ContentItem[] = [];
+
+  constructor(private readonly client: string) {
+    this.items = new StreamItems(client);
+  }
+
+  // a generator, so the deltas of an event reach the caller even when a later one fails
+  *push(event: UniEvent): Generator<UniEvent> {
+    if (
+      event.event_type === "delta" &&
+      (event.usage_metadata != null || event.finish_reason != null)
+    ) {
+      throw new StreamProtocolError({
+        client: this.client,
+        message: "a delta event carries usage_metadata or finish_reason",
+      });
+    }
+
+    for (const delta of event.content_items) {
+      yield* this.emit(this.items.delta(delta as DeltaContentItem));
+    }
+
+    if (event.usage_metadata) {
+      const usage: UsageMetadata = this.usageMetadata ?? {
+        cached_tokens: null,
+        prompt_tokens: null,
+        thoughts_tokens: null,
+        response_tokens: null,
+      };
+      for (const field of [
+        "cached_tokens",
+        "prompt_tokens",
+        "thoughts_tokens",
+        "response_tokens",
+      ] as const) {
+        if (event.usage_metadata[field] != null) {
+          usage[field] = event.usage_metadata[field];
+        }
+      }
+      this.usageMetadata = usage;
+    }
+    if (event.finish_reason) {
+      this.finishReason = event.finish_reason;
+    }
+  }
+
+  /**
+   * The client's stream ended: the item still streaming is done.
+   */
+  *end(): Generator<UniEvent> {
+    yield* this.emit(this.items.end());
+  }
+
+  private *emit(items: EventContentItem[]): Generator<UniEvent> {
+    for (const item of items) {
+      if (item.type.endsWith(".done")) {
+        this.doneItems.push(item as ContentItem);
+      }
+      yield deltaEvent(item);
+    }
+  }
+
+  /**
+   * Build the stop event once the client's stream ended, rejecting a response that cannot be one.
+   */
+  stop(): UniEvent {
+    if (this.usageMetadata === null) {
+      throw new Error("Streaming response ended without usage_metadata");
+    }
+    if (this.finishReason === null) {
+      throw new Error("Streaming response ended without finish_reason");
+    }
+    // replaying a thinking-only assistant message on the next turn fails with a 400 error
+    const thinkingOnly = this.doneItems.every(
+      (item) =>
+        item.type === "thinking.done" || item.type === "inline_thinking.done",
+    );
+    if (thinkingOnly) {
+      throw new EmptyResponseError({
+        client: this.client,
+        finishReason: this.finishReason,
+        usageMetadata: this.usageMetadata,
+      });
+    }
+
+    return {
+      role: "assistant",
+      event_type: "stop",
+      content_items: [],
+      usage_metadata: this.usageMetadata,
+      finish_reason: this.finishReason,
+      created_at: Date.now(),
+    };
+  }
 }
 
 /**
@@ -76,10 +179,19 @@ export abstract class LLMClient {
   ): any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
   /**
-   * Transform model output to universal event format.
+   * Transform one event of the provider's stream into a universal event, which the base class
+   * turns into the public stream.
+   *
+   * content_items holds the deltas the wire event carries, in wire order, and never a done item:
+   * the base class closes an item when the next one begins or the stream ends. The deltas of one
+   * item are contiguous and carry the same `fidelity.item_id`, the provider's id for the item
+   * where it has one, which never reaches the public stream. Its event_type is "stop" on the wire
+   * events that report usage_metadata and/or finish_reason, in pieces the base class merges field
+   * by field, and "delta" otherwise; a "delta" event carries neither.
    *
    * @param modelOutput - Model-specific output object (streaming chunk)
-   * @returns Universal event object
+   * @returns Universal event object, an empty delta event when the wire event carries nothing
+   *   universal
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   abstract transformModelOutputToUniEvent(modelOutput: any): UniEvent;
@@ -87,105 +199,42 @@ export abstract class LLMClient {
   /**
    * Concatenate a stream of universal events into a single universal message.
    *
-   * This is a concrete method implemented in the base class that can be reused
-   * by all model clients. It accumulates events and builds a complete message.
-   *
    * @param events - List of universal events from streaming response
-   * @returns Complete universal message object
+   * @returns Complete universal message object: every done item in stream order, with the
+   *   usage, finish reason and timestamp of the stop event
    */
   concatUniEventsToUniMessage(events: UniEvent[]): UniMessage {
     const contentItems: ContentItem[] = [];
-    let usageMetadata: UsageMetadata | null = null;
-    let finishReason: FinishReason | null = null;
-    let createdAt: number | undefined = undefined;
-
+    let stopEvent: UniEvent | null = null;
     for (const event of events) {
+      if (event.event_type === "stop") {
+        stopEvent = event;
+        continue;
+      }
       for (const item of event.content_items) {
-        if (item.type === "text") {
-          const lastItem = contentItems[contentItems.length - 1];
-          const itemFidelity = item.fidelity ?? {};
-          // a delta announcing a different phase starts a new item; same-phase and
-          // phaseless deltas merge until a signature finishes the item
-          if (
-            lastItem &&
-            lastItem.type === "text" &&
-            lastItem.fidelity?.signature == null && // not finished by a signature yet
-            (itemFidelity.phase == null || // phaseless deltas continue the item
-              itemFidelity.phase === lastItem.fidelity?.phase) // same phase merges
-          ) {
-            lastItem.text += item.text;
-            if (hasFidelity(item.fidelity)) {
-              // a signature finishes the current item
-              lastItem.fidelity = { ...lastItem.fidelity, ...item.fidelity };
-            }
-          } else if (item.text || itemFidelity.phase != null) {
-            // text or new phase starts an item
-            contentItems.push({ ...item });
-          }
-        } else if (item.type === "thinking") {
-          const lastItem = contentItems[contentItems.length - 1];
-          // a new item starts only when the open item's fidelity is non-empty and
-          // differs from the incoming delta's; everything else merges into it
-          if (
-            lastItem &&
-            lastItem.type === "thinking" &&
-            (!hasFidelity(lastItem.fidelity) || // not finished by fidelity yet
-              // a run of equal fidelity is one item
-              fidelityEquals(lastItem.fidelity, item.fidelity))
-          ) {
-            lastItem.thinking += item.thinking;
-            if (hasFidelity(item.fidelity)) {
-              // fidelity finishes the current item
-              lastItem.fidelity = item.fidelity;
-            }
-          } else if (item.thinking || hasFidelity(item.fidelity)) {
-            contentItems.push({ ...item });
-          }
-        } else if (item.type === "partial_tool_call") {
-          // Skip partial_tool_call items - they should already be converted to tool_call
-        } else if (
-          item.type === "inline_data" &&
-          item.mime_type.startsWith("audio/")
-        ) {
-          const lastItem = contentItems[contentItems.length - 1];
-          // a spoken response streams as many small audio chunks; the message keeps the
-          // whole utterance as one playable item
-          if (
-            lastItem &&
-            lastItem.type === "inline_data" &&
-            lastItem.mime_type === item.mime_type
-          ) {
-            lastItem.data = Buffer.concat([lastItem.data, item.data]);
-          } else {
-            contentItems.push({ ...item });
-          }
-        } else {
-          contentItems.push({ ...item });
+        if (item.type.endsWith(".done")) {
+          contentItems.push(item as ContentItem);
         }
       }
-
-      usageMetadata = event.usage_metadata;
-      finishReason = event.finish_reason;
-      createdAt = event.created_at;
     }
 
     return {
       role: "assistant",
       content_items: contentItems,
-      usage_metadata: usageMetadata,
-      finish_reason: finishReason,
-      created_at: createdAt,
+      usage_metadata: stopEvent?.usage_metadata ?? null,
+      finish_reason: stopEvent?.finish_reason ?? null,
+      created_at: stopEvent?.created_at,
     };
   }
 
   /**
    * Internal method to handle streaming response.
    *
-   * This method should be implemented by each model client to handle
-   * the actual streaming request and yield model-specific events.
+   * Each model client implements it to send the request and yield one universal event per event
+   * of the provider's stream; streamingResponse turns them into the public stream.
    *
    * @param options - Object containing messages and config
-   * @yields Model-specific events from the streaming response
+   * @yields Universal events of the streaming response
    */
   abstract _streamingResponseInternal(options: {
     messages: UniMessage[];
@@ -203,12 +252,9 @@ export abstract class LLMClient {
   /**
    * Generate content in streaming mode (stateless).
    *
-   * This method should use transformUniConfigToModelConfig and
-   * transformUniMessageToModelInput to prepare the request, then
-   * transformModelOutputToUniEvent to convert each chunk.
-   *
    * @param options - Object containing messages and config
-   * @yields Universal events from the streaming response
+   * @yields Delta events, each carrying one delta or done item, then exactly one stop event
+   *   carrying the usage and the finish reason
    */
   async *streamingResponse(options: {
     messages: UniMessage[];
@@ -223,50 +269,43 @@ export abstract class LLMClient {
         msg.created_at = Date.now();
       }
     }
+    const requestMessages = normalizeLegacyMessages(messages);
 
-    let lastEvent: UniEvent | null = null;
-    const events: UniEvent[] = [];
-    for await (const event of this._streamingResponseInternal(options)) {
-      if (event.event_type === "unused") {
-        // a client marks a wire event it has nothing to emit for as "unused"; that is its own
-        // bookkeeping and must not reach a caller
-        if (isDebugEnabled()) {
-          throw new Error(
-            `${this.constructor.name} yielded an internal unused event: ${JSON.stringify(event)}`,
-          );
-        }
-
-        continue;
-      }
-
-      event.created_at = Date.now();
-      lastEvent = event;
-      events.push(event);
-      yield event;
+    const output = new PublicStream(this.constructor.name);
+    for await (const event of this._streamingResponseInternal({
+      messages: requestMessages,
+      config,
+      signal: options.signal,
+    })) {
+      yield* output.push(event);
     }
-    LLMClient._validateLastEvent(lastEvent);
-    this._validateNonThinkingOutput(events);
+    yield* output.end();
+    const stopEvent = output.stop();
 
-    // Save history to file if trace_id is specified
-    if (config.trace_id && events.length > 0) {
+    // saved before the stop is yielded: a caller may stop iterating as soon as it sees it
+    if (config.trace_id) {
       const { Tracer } = await import("./integration/tracer");
-      const assistantMessage = this.concatUniEventsToUniMessage(events);
+      const assistantMessage: UniMessage = {
+        role: "assistant",
+        content_items: output.doneItems,
+        usage_metadata: stopEvent.usage_metadata,
+        finish_reason: stopEvent.finish_reason,
+        created_at: stopEvent.created_at,
+      };
       const tracer = new Tracer();
       tracer.saveHistory(
         this._model,
-        [...messages, assistantMessage],
+        [...requestMessages, assistantMessage],
         config.trace_id,
         config,
       );
     }
+
+    yield stopEvent;
   }
 
   /**
    * Generate content in streaming mode (stateful).
-   *
-   * This method should use transformUniConfigToModelConfig,
-   * transformUniMessageToModelInput, transformModelOutputToUniEvent,
-   * and concatUniEventsToUniMessage to manage the conversation flow.
    *
    * @param message - Latest universal message object to add to conversation
    * @param config - Universal configuration object
@@ -277,75 +316,22 @@ export abstract class LLMClient {
     config: UniConfig;
     signal?: AbortSignal;
   }): AsyncGenerator<UniEvent> {
-    const { message, config } = options;
-
-    const tempMessages = [...this._history, message];
+    const { config } = options;
+    const [message] = normalizeLegacyMessages([options.message]);
 
     const events: UniEvent[] = [];
     for await (const event of this.streamingResponse({
-      messages: tempMessages,
+      messages: [...this._history, message],
       config,
       signal: options.signal,
     })) {
       events.push(event);
+      if (event.event_type === "stop") {
+        // recorded before the stop is yielded: a caller may stop iterating as soon as it sees it
+        this._history.push(message);
+        this._history.push(this.concatUniEventsToUniMessage(events));
+      }
       yield event;
-    }
-
-    // tempMessages[-1] is the user message, now stamped with created_at by streamingResponse
-    if (events.length > 0) {
-      const assistantMessage = this.concatUniEventsToUniMessage(events);
-      this._history.push(tempMessages[tempMessages.length - 1]);
-      this._history.push(assistantMessage);
-    }
-  }
-
-  /**
-   * Validate that the last event has usage_metadata and finish_reason.
-   *
-   * This validation guards against servers that silently terminate streaming
-   * output partway through without sending a proper final event.
-   *
-   * @param lastEvent - The last event yielded by streamingResponse
-   * @throws Error if lastEvent is null or missing usage_metadata/finish_reason
-   */
-  protected static _validateLastEvent(lastEvent: UniEvent | null): void {
-    if (lastEvent === null) {
-      throw new Error("Streaming response yielded no events");
-    }
-    if (lastEvent.usage_metadata === null) {
-      throw new Error(
-        `Last event must carry usage_metadata, got: ${JSON.stringify(lastEvent)}`,
-      );
-    }
-    if (lastEvent.finish_reason === null) {
-      throw new Error(
-        `Last event must carry finish_reason, got: ${JSON.stringify(lastEvent)}`,
-      );
-    }
-  }
-
-  /**
-   * Validate that the completed response carries content other than thinking.
-   *
-   * Replaying a thinking-only assistant message on the next turn fails with a 400
-   * error, so the response is rejected as soon as the stream completes.
-   *
-   * @param events - All events yielded by streamingResponse
-   * @throws EmptyResponseError if every content item in the response is thinking
-   */
-  protected _validateNonThinkingOutput(events: UniEvent[]): void {
-    const thinkingOnly = events.every((event) =>
-      event.content_items.every(
-        (item) => item.type === "thinking" || item.type === "inline_thinking",
-      ),
-    );
-    if (thinkingOnly) {
-      const finishReason =
-        events.length > 0 ? events[events.length - 1].finish_reason : null;
-      throw new EmptyResponseError({
-        client: this.constructor.name,
-        finishReason,
-      });
     }
   }
 
@@ -371,6 +357,6 @@ export abstract class LLMClient {
    * @param history - List of universal message objects to set as the new history
    */
   setHistory(history: UniMessage[]): void {
-    this._history = [...history];
+    this._history = normalizeLegacyMessages(history);
   }
 }

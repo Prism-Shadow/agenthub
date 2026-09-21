@@ -50,8 +50,8 @@ async def main():
             {
                 "role": "user",
                 "content_items": [
-                    {"type": "text", "text": query},
-                    {"type": "image_url", "image_url": image_url},
+                    {"type": "text.done", "text": query},
+                    {"type": "image_url.done", "image_url": image_url},
                 ],
             }
         ],

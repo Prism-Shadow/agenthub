@@ -21,6 +21,7 @@ from typing import Literal
 
 import httpx
 import pytest
+from stream_grammar import assert_stream_grammar
 
 from agenthub import AutoLLMClient, ThinkingLevel, list_supported_models
 
@@ -165,6 +166,15 @@ if os.getenv("VERTEX_API_KEY"):
             support_tts=True,
         )
     )
+    AVAILABLE_MODELS.append(
+        Model(
+            name="gemini-embedding-2",
+            provider="vertex",
+            support_text=False,
+            support_image_understanding=False,
+            support_embedding=True,
+        )
+    )
 
 RUN_SLOW_TEST = os.getenv("RUN_SLOW_TEST", "0") == "1"
 
@@ -275,31 +285,31 @@ async def _check_event_integrity(event: dict) -> None:
     assert "usage_metadata" in event
     assert "finish_reason" in event
     assert event["role"] in ["user", "assistant"]
-    assert event["event_type"] in ["start", "delta", "stop"]
+    assert event["event_type"] in ["delta", "stop"]
     assert event["finish_reason"] in ["stop", "length", "tool_call", "unknown", None]
     assert isinstance(event["created_at"], int) and event["created_at"] > 0
     for item in event["content_items"]:
-        if item["type"] == "text":
+        if item["type"] in ("text.delta", "text.done"):
             assert isinstance(item["text"], str)
-        elif item["type"] == "image_url":
+        elif item["type"] == "image_url.done":
             assert isinstance(item["image_url"], str)
-        elif item["type"] == "inline_data":
+        elif item["type"] in ("inline_data.delta", "inline_data.done"):
             assert isinstance(item["data"], bytes)
             assert isinstance(item["mime_type"], str)
-        elif item["type"] == "thinking":
+        elif item["type"] in ("thinking.delta", "thinking.done"):
             assert isinstance(item["thinking"], str)
-        elif item["type"] == "inline_thinking":
+        elif item["type"] in ("inline_thinking.delta", "inline_thinking.done"):
             assert isinstance(item["data"], bytes)
             assert isinstance(item["mime_type"], str)
-        elif item["type"] == "tool_call":
+        elif item["type"] == "tool_call.done":
             assert isinstance(item["name"], str)
             assert isinstance(item["arguments"], dict)
             assert isinstance(item["tool_call_id"], str)
-        elif item["type"] == "partial_tool_call":
+        elif item["type"] == "tool_call.delta":
             assert isinstance(item["name"], str)
             assert isinstance(item["arguments"], str)
             assert isinstance(item["tool_call_id"], str)
-        elif item["type"] == "tool_result":
+        elif item["type"] == "tool_result.done":
             assert isinstance(item["text"], str)
             assert isinstance(item["tool_call_id"], str)
 
@@ -327,16 +337,19 @@ async def test_streaming_response_basic(model: Model):
         pytest.skip(f"Text generation is not supported by {model.name}.")
 
     client = await _create_client(model)
-    messages = [{"role": "user", "content_items": [{"type": "text", "text": "What is 2+3?"}]}]
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "What is 2+3?"}]}]
     config = {}
 
+    events = []
     text = ""
     async for event in client.streaming_response(messages=messages, config=config):
         await _check_event_integrity(event)
+        events.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events)
     assert "5" in text  # 2 + 3 = 5
 
 
@@ -348,16 +361,19 @@ async def test_streaming_response_with_all_parameters(model: Model):
         pytest.skip(f"Text generation is not supported by {model.name}.")
 
     client = await _create_client(model)
-    messages = [{"role": "user", "content_items": [{"type": "text", "text": "What is 2+3?"}]}]
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "What is 2+3?"}]}]
     config = {"max_tokens": 8192, "thinking_summary": True, "thinking_level": ThinkingLevel.LOW}
 
+    events = []
     text = ""
     async for event in client.streaming_response(messages=messages, config=config):
         await _check_event_integrity(event)
+        events.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events)
     assert "5" in text  # 2 + 3 = 5
 
 
@@ -371,20 +387,26 @@ async def test_streaming_response_stateful(model: Model):
     client = await _create_client(model)
     config = {}
 
-    message1 = {"role": "user", "content_items": [{"type": "text", "text": "My name is Alice"}]}
+    message1 = {"role": "user", "content_items": [{"type": "text.done", "text": "My name is Alice"}]}
+    events1 = []
     async for event in client.streaming_response_stateful(message=message1, config=config):
         await _check_event_integrity(event)
+        events1.append(event)
 
+    assert_stream_grammar(events1)
     assert len(client.get_history()) == 2  # user message + assistant response
 
-    message2 = {"role": "user", "content_items": [{"type": "text", "text": "What is my name?"}]}
+    message2 = {"role": "user", "content_items": [{"type": "text.done", "text": "What is my name?"}]}
+    events2 = []
     text = ""
     async for event in client.streaming_response_stateful(message=message2, config=config):
         await _check_event_integrity(event)
+        events2.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events2)
     assert "alice" in text.lower()
     assert len(client.get_history()) == 4  # 2 previous + 2 new
 
@@ -395,8 +417,8 @@ async def test_set_history(model: Model):
     """Test setting conversation history."""
     client = await _create_client(model)
     new_history: list = [
-        {"role": "user", "content_items": [{"type": "text", "text": "Hi"}]},
-        {"role": "assistant", "content_items": [{"type": "text", "text": "Hello!"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "Hi"}]},
+        {"role": "assistant", "content_items": [{"type": "text.done", "text": "Hello!"}]},
     ]
 
     client.set_history(new_history)
@@ -413,8 +435,8 @@ async def test_clear_history(model: Model):
     """Test clearing conversation history."""
     client = await _create_client(model)
     new_history: list = [
-        {"role": "user", "content_items": [{"type": "text", "text": "Hello"}]},
-        {"role": "assistant", "content_items": [{"type": "text", "text": "Hello!"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "Hello"}]},
+        {"role": "assistant", "content_items": [{"type": "text.done", "text": "Hello!"}]},
     ]
     client.set_history(new_history)
     assert len(client.get_history()) > 0
@@ -433,7 +455,7 @@ async def test_concat_uni_events_to_uni_message(model: Model):
     messages = [
         {
             "role": "user",
-            "content_items": [{"type": "text", "text": "Say 'The quick brown fox jumps over the lazy dog.'"}],
+            "content_items": [{"type": "text.done", "text": "Say 'The quick brown fox jumps over the lazy dog.'"}],
         }
     ]
     config = {}
@@ -443,13 +465,14 @@ async def test_concat_uni_events_to_uni_message(model: Model):
     async for event in client.streaming_response(messages=messages, config=config):
         events.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events)
     # Concatenate events to get the full message
     message = client.concat_uni_events_to_uni_message(events)
     assert message["role"] == "assistant"
-    all_text = "".join(item["text"] for item in message["content_items"] if item["type"] == "text")
+    all_text = "".join(item["text"] for item in message["content_items"] if item["type"] == "text.done")
     assert all_text == text
 
 
@@ -526,28 +549,6 @@ async def test_openai_client_type_routes(client_type: str, client_name: str):
 
 
 @pytest.mark.asyncio
-async def test_validate_last_event_raises_on_missing_usage_metadata():
-    """Test that _validate_last_event raises ValueError when usage_metadata is None."""
-    valid_event = {
-        "role": "assistant",
-        "event_type": "stop",
-        "content_items": [],
-        "usage_metadata": {"cached_tokens": 0, "prompt_tokens": 10, "thoughts_tokens": None, "response_tokens": 5},
-        "finish_reason": "stop",
-    }
-    AutoLLMClient._validate_last_event(valid_event)  # should not raise
-
-    with pytest.raises(ValueError, match="no events"):
-        AutoLLMClient._validate_last_event(None)
-
-    with pytest.raises(ValueError, match="usage_metadata"):
-        AutoLLMClient._validate_last_event({**valid_event, "usage_metadata": None})
-
-    with pytest.raises(ValueError, match="finish_reason"):
-        AutoLLMClient._validate_last_event({**valid_event, "finish_reason": None})
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("model", AVAILABLE_MODELS, ids=[str(model) for model in AVAILABLE_MODELS])
 async def test_tool_use(model: Model):
     """Test tool use capability."""
@@ -576,11 +577,16 @@ async def test_tool_use(model: Model):
     tool_call_id = None
     partial_tool_call_data = {}
 
-    message1 = {"role": "user", "content_items": [{"type": "text", "text": "What is the weather in San Francisco?"}]}
+    message1 = {
+        "role": "user",
+        "content_items": [{"type": "text.done", "text": "What is the weather in San Francisco?"}],
+    }
+    events1 = []
     async for event in client.streaming_response_stateful(message=message1, config=config):
         await _check_event_integrity(event)
+        events1.append(event)
         for item in event["content_items"]:
-            if item["type"] == "partial_tool_call":
+            if item["type"] == "tool_call.delta":
                 if not partial_tool_call_data:
                     partial_tool_call_data = {
                         "name": item["name"],
@@ -589,11 +595,12 @@ async def test_tool_use(model: Model):
                     }
                 else:
                     partial_tool_call_data["arguments"] += item["arguments"]
-            elif item["type"] == "tool_call":
+            elif item["type"] == "tool_call.done":
                 tool_name = item["name"]
                 tool_arguments = item["arguments"]
                 tool_call_id = item["tool_call_id"]
 
+    assert_stream_grammar(events1)
     # Check if a function call was made
     assert tool_name == weather_tool["name"]
     assert "location" in tool_arguments
@@ -605,16 +612,19 @@ async def test_tool_use(model: Model):
     message2 = {
         "role": "user",
         "content_items": [
-            {"type": "tool_result", "text": "It's 20 degrees in San Francisco.", "tool_call_id": tool_call_id}
+            {"type": "tool_result.done", "text": "It's 20 degrees in San Francisco.", "tool_call_id": tool_call_id}
         ],
     }
+    events2 = []
     text = ""
     async for event in client.streaming_response_stateful(message=message2, config=config):
         await _check_event_integrity(event)
+        events2.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events2)
     assert "20" in text
 
 
@@ -624,10 +634,9 @@ async def test_tool_result_mixed_with_text(model: Model):
     """A user message mixing a tool result with follow-up text.
 
     An agent resends an interrupted turn's tool output together with the user's next
-    prompt. Vertex AI rejects a Gemini content that mixes function_response parts with
-    any other kind (HTTP 400 "Requests ending with a model turn are not supported"), so
-    the Gemini client splits them into separate contents; the model must still see both
-    halves.
+    prompt. Protocols that carry tool results and user text as separate entries (Gemini's
+    function_result and user_input steps, say) split the message; the model must still see
+    both halves.
     """
     if not model.support_text:
         pytest.skip(f"Text generation is not supported by {model.name}.")
@@ -652,28 +661,40 @@ async def test_tool_result_mixed_with_text(model: Model):
     config = {"tools": [weather_tool]}
     tool_call_id = None
 
-    message1 = {"role": "user", "content_items": [{"type": "text", "text": "What is the weather in San Francisco?"}]}
+    message1 = {
+        "role": "user",
+        "content_items": [{"type": "text.done", "text": "What is the weather in San Francisco?"}],
+    }
+    events1 = []
     async for event in client.streaming_response_stateful(message=message1, config=config):
         await _check_event_integrity(event)
+        events1.append(event)
         for item in event["content_items"]:
-            if item["type"] == "tool_call":
+            if item["type"] == "tool_call.done":
                 tool_call_id = item["tool_call_id"]
+    assert_stream_grammar(events1)
     assert tool_call_id is not None
 
     message2 = {
         "role": "user",
         "content_items": [
-            {"type": "tool_result", "text": "It's 20 degrees in San Francisco.", "tool_call_id": tool_call_id},
-            {"type": "text", "text": "Answer with the temperature, and end your reply with the exact word BANANA."},
+            {"type": "tool_result.done", "text": "It's 20 degrees in San Francisco.", "tool_call_id": tool_call_id},
+            {
+                "type": "text.done",
+                "text": "Answer with the temperature, and end your reply with the exact word BANANA.",
+            },
         ],
     }
+    events2 = []
     text = ""
     async for event in client.streaming_response_stateful(message=message2, config=config):
         await _check_event_integrity(event)
+        events2.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events2)
     # "20" proves the tool result reached the model; "BANANA" proves the text riding
     # in the same universal message reached it too.
     assert "20" in text
@@ -688,19 +709,22 @@ async def test_system_prompt(model: Model):
         pytest.skip(f"Text generation is not supported by {model.name}.")
 
     client = await _create_client(model)
-    messages = [{"role": "user", "content_items": [{"type": "text", "text": "Hello"}]}]
+    messages = [{"role": "user", "content_items": [{"type": "text.done", "text": "Hello"}]}]
     config = {
         "system_prompt": "You are a kitten. Every reply MUST contain the exact word 'meow' — "
         "never a variant like 'mreow' or a *purrs* action instead."
     }
 
+    events = []
     text = ""
     async for event in client.streaming_response(messages=messages, config=config):
         await _check_event_integrity(event)
+        events.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events)
     assert "meow" in text.lower()
 
 
@@ -717,18 +741,21 @@ async def test_image_understanding(model: Model):
         {
             "role": "user",
             "content_items": [
-                {"type": "text", "text": "What's in this image? Describe it briefly."},
-                {"type": "image_url", "image_url": IMAGE},
+                {"type": "text.done", "text": "What's in this image? Describe it briefly."},
+                {"type": "image_url.done", "image_url": IMAGE},
             ],
         }
     ]
+    events = []
     text = ""
     async for event in client.streaming_response(messages=messages, config=config):
         await _check_event_integrity(event)
+        events.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events)
     assert any(keyword in text.lower() for keyword in IMAGE_KEYWORDS)
 
 
@@ -754,18 +781,21 @@ async def test_image_understanding_base64(model: Model):
         {
             "role": "user",
             "content_items": [
-                {"type": "text", "text": "What's in this image? Describe it briefly."},
-                {"type": "image_url", "image_url": data_uri},
+                {"type": "text.done", "text": "What's in this image? Describe it briefly."},
+                {"type": "image_url.done", "image_url": data_uri},
             ],
         }
     ]
+    events = []
     text = ""
     async for event in client.streaming_response(messages=messages, config=config):
         await _check_event_integrity(event)
+        events.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events)
     assert any(keyword in text.lower() for keyword in IMAGE_KEYWORDS)
 
 
@@ -803,14 +833,17 @@ async def test_tool_result_with_image(model: Model):
         "Call get_image exactly once with seed 42. Make that function call your only action "
         "this turn, then describe the returned image briefly."
     )
-    message1 = {"role": "user", "content_items": [{"type": "text", "text": tool_prompt}]}
+    message1 = {"role": "user", "content_items": [{"type": "text.done", "text": tool_prompt}]}
+    events1 = []
     async for event in client.streaming_response_stateful(message=message1, config=config):
         await _check_event_integrity(event)
+        events1.append(event)
         for item in event["content_items"]:
-            if item["type"] == "tool_call":
+            if item["type"] == "tool_call.done":
                 tool_name = item["name"]
                 tool_call_id = item["tool_call_id"]
 
+    assert_stream_grammar(events1)
     assert tool_name == image_tool["name"]
     assert tool_call_id is not None
 
@@ -818,20 +851,23 @@ async def test_tool_result_with_image(model: Model):
         "role": "user",
         "content_items": [
             {
-                "type": "tool_result",
+                "type": "tool_result.done",
                 "text": "Here is the result image:",
                 "images": [IMAGE],
                 "tool_call_id": tool_call_id,
             }
         ],
     }
+    events2 = []
     text = ""
     async for event in client.streaming_response_stateful(message=message2, config=config):
         await _check_event_integrity(event)
+        events2.append(event)
         for item in event["content_items"]:
-            if item["type"] == "text":
+            if item["type"] == "text.delta":
                 text += item["text"]
 
+    assert_stream_grammar(events2)
     assert any(keyword in text.lower() for keyword in IMAGE_KEYWORDS)
 
 
@@ -850,7 +886,7 @@ async def test_image_generation(model: Model):
                 "role": "user",
                 "content_items": [
                     {
-                        "type": "text",
+                        "type": "text.done",
                         "text": "Generate a cozy watercolor illustration of two white flowers with raindrops.",
                     }
                 ],
@@ -861,7 +897,8 @@ async def test_image_generation(model: Model):
         await _check_event_integrity(event)
         events.append(event)
 
-    inline_items = [item for event in events for item in event["content_items"] if item["type"] == "inline_data"]
+    assert_stream_grammar(events)
+    inline_items = [item for event in events for item in event["content_items"] if item["type"] == "inline_data.done"]
     assert inline_items, f"No inline data returned for generated image by {model.name}"
     assert any("image/" in item["mime_type"] for item in inline_items)
     assert all(isinstance(item["data"], bytes) and item["data"] for item in inline_items)
@@ -882,7 +919,7 @@ async def test_tts_generation_single_speaker(model: Model):
                 "role": "user",
                 "content_items": [
                     {
-                        "type": "text",
+                        "type": "text.done",
                         "text": "Say cheerfully: Have a wonderful day!",
                     }
                 ],
@@ -893,7 +930,8 @@ async def test_tts_generation_single_speaker(model: Model):
         await _check_event_integrity(event)
         events.append(event)
 
-    inline_items = [item for event in events for item in event["content_items"] if item["type"] == "inline_data"]
+    assert_stream_grammar(events)
+    inline_items = [item for event in events for item in event["content_items"] if item["type"] == "inline_data.done"]
     assert inline_items, f"No inline data returned for TTS output by {model.name}"
     assert any("audio/" in item["mime_type"] for item in inline_items)
     assert all(isinstance(item["data"], bytes) and item["data"] for item in inline_items)
@@ -908,8 +946,11 @@ async def test_embedding(model: Model):
 
     client = await _create_client(model)
     messages = [
-        {"role": "user", "content_items": [{"type": "text", "text": "Hello world"}]},
-        {"role": "user", "content_items": [{"type": "text", "text": "Goodbye "}, {"type": "text", "text": "world"}]},
+        {"role": "user", "content_items": [{"type": "text.done", "text": "Hello world"}]},
+        {
+            "role": "user",
+            "content_items": [{"type": "text.done", "text": "Goodbye "}, {"type": "text.done", "text": "world"}],
+        },
     ]
 
     events = []
@@ -920,7 +961,8 @@ async def test_embedding(model: Model):
         await _check_event_integrity(event)
         events.append(event)
 
-    embedding_items = [item for event in events for item in event["content_items"] if item["type"] == "embedding"]
+    assert_stream_grammar(events)
+    embedding_items = [item for event in events for item in event["content_items"] if item["type"] == "embedding.done"]
     assert len(embedding_items) == 2
     for item in embedding_items:
         assert len(item["embedding"]) == 768

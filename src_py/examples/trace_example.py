@@ -53,13 +53,13 @@ async def run_traced_chat():
 
     query1 = "My name is Alice and I like cats."
     async for _ in client.streaming_response_stateful(
-        message={"role": "user", "content_items": [{"type": "text", "text": query1}]}, config=config
+        message={"role": "user", "content_items": [{"type": "text.done", "text": query1}]}, config=config
     ):
         pass
 
     query2 = "What's my name and what do I like?"
     async for _ in client.streaming_response_stateful(
-        message={"role": "user", "content_items": [{"type": "text", "text": query2}]}, config=config
+        message={"role": "user", "content_items": [{"type": "text.done", "text": query2}]}, config=config
     ):
         pass
 
@@ -89,7 +89,7 @@ async def run_traced_chat():
     # First turn - model will request tool call
     events = []
     async for event in client2.streaming_response_stateful(
-        message={"role": "user", "content_items": [{"type": "text", "text": query3}]}, config=config2
+        message={"role": "user", "content_items": [{"type": "text.done", "text": query3}]}, config=config2
     ):
         events.append(event)
 
@@ -97,7 +97,7 @@ async def run_traced_chat():
     tool_call = None
     for event in events:
         for item in event["content_items"]:
-            if item["type"] == "tool_call":
+            if item["type"] == "tool_call.done":
                 tool_call = item
                 break
 
@@ -112,7 +112,9 @@ async def run_traced_chat():
         async for _ in client2.streaming_response_stateful(
             message={
                 "role": "user",
-                "content_items": [{"type": "tool_result", "text": result, "tool_call_id": tool_call["tool_call_id"]}],
+                "content_items": [
+                    {"type": "tool_result.done", "text": result, "tool_call_id": tool_call["tool_call_id"]}
+                ],
             },
             config=config2,
         ):

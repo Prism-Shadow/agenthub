@@ -64,7 +64,6 @@ class SlowStreamingClient(LLMClient):
                 "response_tokens": None,
             },
             "finish_reason": "stop",
-            "created_at": 0,
         }
 
 
@@ -95,10 +94,9 @@ class MultiEventStreamingClient(LLMClient):
             yield {
                 "role": "assistant",
                 "event_type": "delta",
-                "content_items": [{"type": "text", "text": text}],
+                "content_items": [{"type": "text.delta", "text": text, "fidelity": {"item_id": "0"}}],
                 "usage_metadata": None,
                 "finish_reason": None,
-                "created_at": 0,
             }
 
         await asyncio.sleep(0)
@@ -113,7 +111,6 @@ class MultiEventStreamingClient(LLMClient):
                 "response_tokens": 2,
             },
             "finish_reason": "stop",
-            "created_at": 0,
         }
 
 
@@ -259,7 +256,7 @@ async def test_run_with_abort_cancels_existing_task_when_signal_is_already_abort
 async def test_streaming_response_cancels_current_iteration_when_signal_aborts() -> None:
     client = SlowStreamingClient()
     signal = AbortSignal()
-    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text", "text": "hello"}]}]
+    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text.done", "text": "hello"}]}]
     stream = client.streaming_response(messages=messages, config={}, signal=signal)
 
     task = asyncio.create_task(anext(stream))
@@ -277,11 +274,12 @@ async def test_streaming_response_cancels_current_iteration_when_signal_aborts()
 async def test_streaming_response_reuses_one_abort_waiter_for_whole_stream() -> None:
     client = MultiEventStreamingClient()
     signal = CountingAbortSignal()
-    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text", "text": "hello"}]}]
+    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text.done", "text": "hello"}]}]
 
     events = [event async for event in client.streaming_response(messages=messages, config={}, signal=signal)]
 
-    assert len(events) == 3
+    # two text deltas, the text done item, then the stop event
+    assert len(events) == 4
     assert signal.wait_count == 1
 
 
@@ -290,7 +288,7 @@ async def test_streaming_response_does_not_create_stream_when_signal_is_already_
     client = StreamCreationTrackingClient()
     signal = AbortSignal()
     signal.abort("stop")
-    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text", "text": "hello"}]}]
+    messages: list[UniMessage] = [{"role": "user", "content_items": [{"type": "text.done", "text": "hello"}]}]
 
     with pytest.raises(asyncio.CancelledError):
         async for _ in client.streaming_response(messages=messages, config={}, signal=signal):

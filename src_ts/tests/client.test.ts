@@ -14,9 +14,17 @@
 
 import { AutoLLMClient } from "../src/autoClient";
 import { listSupportedModels } from "../src/registry";
-import { ThinkingLevel, UniMessage, UniConfig, UniEvent } from "../src/types";
+import {
+  EmbeddingDoneItem,
+  EventContentItem,
+  ThinkingLevel,
+  UniMessage,
+  UniConfig,
+  UniEvent,
+} from "../src/types";
 import { beforeAll, expect, describe, test } from "@jest/globals";
 import { Gaxios } from "gaxios";
+import { assertStreamGrammar } from "./streamGrammar";
 
 const IMAGE =
   "https://sghimages.shobserver.com/img/catch/2022/01/22/c1ae0300-9402-4128-a7e6-1244d3874167.jpg";
@@ -252,6 +260,16 @@ if (process.env.VERTEX_API_KEY) {
     supportEmbedding: false,
     provider: "vertex",
   });
+
+  AVAILABLE_MODELS.push({
+    name: "gemini-embedding-2",
+    supportTextGeneration: false,
+    supportImageUnderstanding: false,
+    supportImageGeneration: false,
+    supportAudioGeneration: false,
+    supportEmbedding: true,
+    provider: "vertex",
+  });
 }
 
 const RUN_SLOW_TEST = process.env.RUN_SLOW_TEST === "1";
@@ -446,7 +464,7 @@ function checkEventIntegrity(event: UniEvent): void {
   expect(event).toHaveProperty("finish_reason");
 
   expect(["user", "assistant"]).toContain(event.role);
-  expect(["start", "delta", "stop"]).toContain(event.event_type);
+  expect(["delta", "stop"]).toContain(event.event_type);
   expect(["stop", "length", "tool_call", "unknown", null]).toContain(
     event.finish_reason,
   );
@@ -454,29 +472,38 @@ function checkEventIntegrity(event: UniEvent): void {
   expect(event.created_at).toBeGreaterThan(0);
 
   for (const item of event.content_items) {
-    if (item.type === "text") {
+    if (item.type === "text.delta" || item.type === "text.done") {
       expect(typeof item.text).toBe("string");
-    } else if (item.type === "image_url") {
+    } else if (item.type === "image_url.done") {
       expect(typeof item.image_url).toBe("string");
-    } else if (item.type === "inline_data") {
+    } else if (
+      item.type === "inline_data.delta" ||
+      item.type === "inline_data.done"
+    ) {
       expect(Buffer.isBuffer(item.data)).toBe(true);
       expect(item.data.length).toBeGreaterThan(0);
       expect(typeof item.mime_type).toBe("string");
-    } else if (item.type === "thinking") {
+    } else if (
+      item.type === "thinking.delta" ||
+      item.type === "thinking.done"
+    ) {
       expect(typeof item.thinking).toBe("string");
-    } else if (item.type === "inline_thinking") {
+    } else if (
+      item.type === "inline_thinking.delta" ||
+      item.type === "inline_thinking.done"
+    ) {
       expect(Buffer.isBuffer(item.data)).toBe(true);
       expect(item.data.length).toBeGreaterThan(0);
       expect(typeof item.mime_type).toBe("string");
-    } else if (item.type === "tool_call") {
+    } else if (item.type === "tool_call.done") {
       expect(typeof item.name).toBe("string");
       expect(typeof item.arguments).toBe("object");
       expect(typeof item.tool_call_id).toBe("string");
-    } else if (item.type === "partial_tool_call") {
+    } else if (item.type === "tool_call.delta") {
       expect(typeof item.name).toBe("string");
       expect(typeof item.arguments).toBe("string");
       expect(typeof item.tool_call_id).toBe("string");
-    } else if (item.type === "tool_result") {
+    } else if (item.type === "tool_result.done") {
       expect(typeof item.text).toBe("string");
       expect(typeof item.tool_call_id).toBe("string");
     }
@@ -589,24 +616,27 @@ if (AVAILABLE_MODELS.length > 0) {
       const messages: UniMessage[] = [
         {
           role: "user",
-          content_items: [{ type: "text", text: "What is 2+3?" }],
+          content_items: [{ type: "text.done", text: "What is 2+3?" }],
         },
       ];
       const config: UniConfig = {};
 
+      const events: UniEvent[] = [];
       let text = "";
       for await (const event of client.streamingResponse({
         messages,
         config,
       })) {
         checkEventIntegrity(event);
+        events.push(event);
         for (const item of event.content_items) {
-          if (item.type === "text") {
+          if (item.type === "text.delta") {
             text += item.text;
           }
         }
       }
 
+      assertStreamGrammar(events);
       expect(text).toContain("5");
     });
 
@@ -621,7 +651,7 @@ if (AVAILABLE_MODELS.length > 0) {
         const messages: UniMessage[] = [
           {
             role: "user",
-            content_items: [{ type: "text", text: "What is 2+3?" }],
+            content_items: [{ type: "text.done", text: "What is 2+3?" }],
           },
         ];
         const config: UniConfig = {
@@ -630,19 +660,22 @@ if (AVAILABLE_MODELS.length > 0) {
           thinking_level: ThinkingLevel.LOW,
         };
 
+        const events: UniEvent[] = [];
         let text = "";
         for await (const event of client.streamingResponse({
           messages,
           config,
         })) {
           checkEventIntegrity(event);
+          events.push(event);
           for (const item of event.content_items) {
-            if (item.type === "text") {
+            if (item.type === "text.delta") {
               text += item.text;
             }
           }
         }
 
+        assertStreamGrammar(events);
         expect(text).toContain("5");
       },
     );
@@ -656,34 +689,40 @@ if (AVAILABLE_MODELS.length > 0) {
 
       const message1: UniMessage = {
         role: "user",
-        content_items: [{ type: "text", text: "My name is Alice" }],
+        content_items: [{ type: "text.done", text: "My name is Alice" }],
       };
+      const events1: UniEvent[] = [];
       for await (const event of client.streamingResponseStateful({
         message: message1,
         config,
       })) {
         checkEventIntegrity(event);
+        events1.push(event);
       }
 
+      assertStreamGrammar(events1);
       expect(client.getHistory().length).toBe(2);
 
       const message2: UniMessage = {
         role: "user",
-        content_items: [{ type: "text", text: "What is my name?" }],
+        content_items: [{ type: "text.done", text: "What is my name?" }],
       };
+      const events2: UniEvent[] = [];
       let text = "";
       for await (const event of client.streamingResponseStateful({
         message: message2,
         config,
       })) {
         checkEventIntegrity(event);
+        events2.push(event);
         for (const item of event.content_items) {
-          if (item.type === "text") {
+          if (item.type === "text.delta") {
             text += item.text;
           }
         }
       }
 
+      assertStreamGrammar(events2);
       expect(text.toLowerCase()).toContain("alice");
       expect(client.getHistory().length).toBe(4);
     });
@@ -691,10 +730,10 @@ if (AVAILABLE_MODELS.length > 0) {
     modelTest("should set history", 5000, (model) => {
       const client = createClient(model);
       const newHistory: UniMessage[] = [
-        { role: "user", content_items: [{ type: "text", text: "Hi" }] },
+        { role: "user", content_items: [{ type: "text.done", text: "Hi" }] },
         {
           role: "assistant",
-          content_items: [{ type: "text", text: "Hello!" }],
+          content_items: [{ type: "text.done", text: "Hello!" }],
         },
       ];
 
@@ -709,10 +748,10 @@ if (AVAILABLE_MODELS.length > 0) {
     modelTest("should clear history", 5000, async (model) => {
       const client = createClient(model);
       const newHistory: UniMessage[] = [
-        { role: "user", content_items: [{ type: "text", text: "Hi" }] },
+        { role: "user", content_items: [{ type: "text.done", text: "Hi" }] },
         {
           role: "assistant",
-          content_items: [{ type: "text", text: "Hello!" }],
+          content_items: [{ type: "text.done", text: "Hello!" }],
         },
       ];
 
@@ -734,7 +773,7 @@ if (AVAILABLE_MODELS.length > 0) {
           role: "user",
           content_items: [
             {
-              type: "text",
+              type: "text.done",
               text: "Say 'The quick brown fox jumps over the lazy dog.'",
             },
           ],
@@ -750,17 +789,18 @@ if (AVAILABLE_MODELS.length > 0) {
       })) {
         events.push(event);
         for (const item of event.content_items) {
-          if (item.type === "text") {
+          if (item.type === "text.delta") {
             text += item.text;
           }
         }
       }
 
+      assertStreamGrammar(events);
       const message = client.concatUniEventsToUniMessage(events);
       expect(message.role).toBe("assistant");
       const allText = message.content_items
-        .filter((item) => item.type === "text")
-        .map((item) => (item as { type: "text"; text: string }).text)
+        .filter((item) => item.type === "text.done")
+        .map((item) => (item as { type: "text.done"; text: string }).text)
         .join("");
       expect(allText).toBe(text);
     });
@@ -799,16 +839,18 @@ if (AVAILABLE_MODELS.length > 0) {
       const message1: UniMessage = {
         role: "user",
         content_items: [
-          { type: "text", text: "What is the weather in San Francisco?" },
+          { type: "text.done", text: "What is the weather in San Francisco?" },
         ],
       };
+      const events1: UniEvent[] = [];
       for await (const event of client.streamingResponseStateful({
         message: message1,
         config,
       })) {
         checkEventIntegrity(event);
+        events1.push(event);
         for (const item of event.content_items) {
-          if (item.type === "partial_tool_call") {
+          if (item.type === "tool_call.delta") {
             if (!partialToolCallData.name) {
               partialToolCallData.name = item.name;
               partialToolCallData.arguments = item.arguments;
@@ -816,7 +858,7 @@ if (AVAILABLE_MODELS.length > 0) {
             } else {
               partialToolCallData.arguments += item.arguments;
             }
-          } else if (item.type === "tool_call") {
+          } else if (item.type === "tool_call.done") {
             toolName = item.name;
             toolArguments = item.arguments;
             toolCallId = item.tool_call_id;
@@ -824,6 +866,7 @@ if (AVAILABLE_MODELS.length > 0) {
         }
       }
 
+      assertStreamGrammar(events1);
       expect(toolName).toBe(weatherTool.name);
       expect(toolArguments).toHaveProperty("location");
       expect(toolCallId).toBeDefined();
@@ -839,33 +882,35 @@ if (AVAILABLE_MODELS.length > 0) {
         role: "user",
         content_items: [
           {
-            type: "tool_result",
+            type: "tool_result.done",
             text: "It's 20 degrees in San Francisco.",
             tool_call_id: toolCallId || "",
           },
         ],
       };
+      const events2: UniEvent[] = [];
       let text = "";
       for await (const event of client.streamingResponseStateful({
         message: message2,
         config,
       })) {
         checkEventIntegrity(event);
+        events2.push(event);
         for (const item of event.content_items) {
-          if (item.type === "text") {
+          if (item.type === "text.delta") {
             text += item.text;
           }
         }
       }
 
+      assertStreamGrammar(events2);
       expect(text).toContain("20");
     });
 
     // A user message mixing a tool result with follow-up text: an agent resending an
-    // interrupted turn's tool output together with the user's next prompt. Vertex AI
-    // rejects a Gemini content that mixes functionResponse parts with any other kind
-    // (HTTP 400 "Requests ending with a model turn are not supported"), so the Gemini
-    // client splits them into separate contents; the model must still see both halves.
+    // interrupted turn's tool output together with the user's next prompt. Protocols that
+    // carry tool results and user text as separate entries (Gemini's function_result and
+    // user_input steps, say) split the message; the model must still see both halves.
     modelTest(
       "should handle tool result mixed with text",
       60000,
@@ -896,49 +941,58 @@ if (AVAILABLE_MODELS.length > 0) {
         const message1: UniMessage = {
           role: "user",
           content_items: [
-            { type: "text", text: "What is the weather in San Francisco?" },
+            {
+              type: "text.done",
+              text: "What is the weather in San Francisco?",
+            },
           ],
         };
+        const events1: UniEvent[] = [];
         for await (const event of client.streamingResponseStateful({
           message: message1,
           config,
         })) {
           checkEventIntegrity(event);
+          events1.push(event);
           for (const item of event.content_items) {
-            if (item.type === "tool_call") {
+            if (item.type === "tool_call.done") {
               toolCallId = item.tool_call_id;
             }
           }
         }
+        assertStreamGrammar(events1);
         expect(toolCallId).toBeDefined();
 
         const message2: UniMessage = {
           role: "user",
           content_items: [
             {
-              type: "tool_result",
+              type: "tool_result.done",
               text: "It's 20 degrees in San Francisco.",
               tool_call_id: toolCallId || "",
             },
             {
-              type: "text",
+              type: "text.done",
               text: "Answer with the temperature, and end your reply with the exact word BANANA.",
             },
           ],
         };
+        const events2: UniEvent[] = [];
         let text = "";
         for await (const event of client.streamingResponseStateful({
           message: message2,
           config,
         })) {
           checkEventIntegrity(event);
+          events2.push(event);
           for (const item of event.content_items) {
-            if (item.type === "text") {
+            if (item.type === "text.delta") {
               text += item.text;
             }
           }
         }
 
+        assertStreamGrammar(events2);
         // "20" proves the tool result reached the model; "BANANA" proves the text
         // riding in the same universal message reached it too.
         expect(text).toContain("20");
@@ -954,7 +1008,7 @@ if (AVAILABLE_MODELS.length > 0) {
       const messages: UniMessage[] = [
         {
           role: "user",
-          content_items: [{ type: "text", text: "Hello" }],
+          content_items: [{ type: "text.done", text: "Hello" }],
         },
       ];
       const config: UniConfig = {
@@ -963,19 +1017,22 @@ if (AVAILABLE_MODELS.length > 0) {
           "never a variant like 'mreow' or a *purrs* action instead.",
       };
 
+      const events: UniEvent[] = [];
       let text = "";
       for await (const event of client.streamingResponse({
         messages,
         config,
       })) {
         checkEventIntegrity(event);
+        events.push(event);
         for (const item of event.content_items) {
-          if (item.type === "text") {
+          if (item.type === "text.delta") {
             text += item.text;
           }
         }
       }
 
+      assertStreamGrammar(events);
       expect(text.toLowerCase()).toContain("meow");
     });
 
@@ -991,27 +1048,30 @@ if (AVAILABLE_MODELS.length > 0) {
           role: "user",
           content_items: [
             {
-              type: "text",
+              type: "text.done",
               text: "What's in this image? Describe it briefly.",
             },
-            { type: "image_url", image_url: IMAGE },
+            { type: "image_url.done", image_url: IMAGE },
           ],
         },
       ];
 
+      const events: UniEvent[] = [];
       let text = "";
       for await (const event of client.streamingResponse({
         messages,
         config,
       })) {
         checkEventIntegrity(event);
+        events.push(event);
         for (const item of event.content_items) {
-          if (item.type === "text") {
+          if (item.type === "text.delta") {
             text += item.text;
           }
         }
       }
 
+      assertStreamGrammar(events);
       expect(
         IMAGE_KEYWORDS.some((keyword) => text.toLowerCase().includes(keyword)),
       ).toBe(true);
@@ -1040,27 +1100,30 @@ if (AVAILABLE_MODELS.length > 0) {
             role: "user",
             content_items: [
               {
-                type: "text",
+                type: "text.done",
                 text: "What's in this image? Describe it briefly.",
               },
-              { type: "image_url", image_url: dataUri },
+              { type: "image_url.done", image_url: dataUri },
             ],
           },
         ];
 
+        const events: UniEvent[] = [];
         let text = "";
         for await (const event of client.streamingResponse({
           messages,
           config,
         })) {
           checkEventIntegrity(event);
+          events.push(event);
           for (const item of event.content_items) {
-            if (item.type === "text") {
+            if (item.type === "text.delta") {
               text += item.text;
             }
           }
         }
 
+        assertStreamGrammar(events);
         expect(
           IMAGE_KEYWORDS.some((keyword) =>
             text.toLowerCase().includes(keyword),
@@ -1102,21 +1165,24 @@ if (AVAILABLE_MODELS.length > 0) {
         "this turn, then describe the returned image briefly.";
       const message1: UniMessage = {
         role: "user",
-        content_items: [{ type: "text", text: toolPrompt }],
+        content_items: [{ type: "text.done", text: toolPrompt }],
       };
+      const events1: UniEvent[] = [];
       for await (const event of client.streamingResponseStateful({
         message: message1,
         config,
       })) {
         checkEventIntegrity(event);
+        events1.push(event);
         for (const item of event.content_items) {
-          if (item.type === "tool_call") {
+          if (item.type === "tool_call.done") {
             toolName = item.name;
             toolCallId = item.tool_call_id;
           }
         }
       }
 
+      assertStreamGrammar(events1);
       expect(toolName).toBe(imageTool.name);
       expect(toolCallId).toBeDefined();
 
@@ -1124,26 +1190,29 @@ if (AVAILABLE_MODELS.length > 0) {
         role: "user",
         content_items: [
           {
-            type: "tool_result",
+            type: "tool_result.done",
             text: "Here is the result image:",
             images: [IMAGE],
             tool_call_id: toolCallId || "",
           },
         ],
       };
+      const events2: UniEvent[] = [];
       let text = "";
       for await (const event of client.streamingResponseStateful({
         message: message2,
         config,
       })) {
         checkEventIntegrity(event);
+        events2.push(event);
         for (const item of event.content_items) {
-          if (item.type === "text") {
+          if (item.type === "text.delta") {
             text += item.text;
           }
         }
       }
 
+      assertStreamGrammar(events2);
       expect(
         IMAGE_KEYWORDS.some((keyword) => text.toLowerCase().includes(keyword)),
       ).toBe(true);
@@ -1162,26 +1231,29 @@ if (AVAILABLE_MODELS.length > 0) {
           role: "user",
           content_items: [
             {
-              type: "text",
+              type: "text.done",
               text: "Generate a cozy watercolor illustration of two white flowers with raindrops.",
             },
           ],
         },
       ];
 
+      const events: UniEvent[] = [];
       const inlineItems: { data: Buffer; mime_type: string }[] = [];
       for await (const event of client.streamingResponse({
         messages,
         config,
       })) {
         checkEventIntegrity(event);
+        events.push(event);
         for (const item of event.content_items) {
-          if (item.type === "inline_data") {
+          if (item.type === "inline_data.done") {
             inlineItems.push(item);
           }
         }
       }
 
+      assertStreamGrammar(events);
       expect(inlineItems.length).toBeGreaterThan(0);
       expect(
         inlineItems.some((item) => item.mime_type.startsWith("image/")),
@@ -1203,26 +1275,29 @@ if (AVAILABLE_MODELS.length > 0) {
           role: "user",
           content_items: [
             {
-              type: "text",
+              type: "text.done",
               text: "Say cheerfully: Have a wonderful day!",
             },
           ],
         },
       ];
 
+      const events: UniEvent[] = [];
       const inlineItems: { data: Buffer; mime_type: string }[] = [];
       for await (const event of client.streamingResponse({
         messages,
         config,
       })) {
         checkEventIntegrity(event);
+        events.push(event);
         for (const item of event.content_items) {
-          if (item.type === "inline_data") {
+          if (item.type === "inline_data.done") {
             inlineItems.push(item);
           }
         }
       }
 
+      assertStreamGrammar(events);
       expect(inlineItems.length).toBeGreaterThan(0);
       expect(
         inlineItems.some(
@@ -1243,13 +1318,13 @@ if (AVAILABLE_MODELS.length > 0) {
       const messages = [
         {
           role: "user" as const,
-          content_items: [{ type: "text" as const, text: "Hello world" }],
+          content_items: [{ type: "text.done" as const, text: "Hello world" }],
         },
         {
           role: "user" as const,
           content_items: [
-            { type: "text" as const, text: "Goodbye " },
-            { type: "text" as const, text: "world" },
+            { type: "text.done" as const, text: "Goodbye " },
+            { type: "text.done" as const, text: "world" },
           ],
         },
       ];
@@ -1263,9 +1338,12 @@ if (AVAILABLE_MODELS.length > 0) {
         events.push(event);
       }
 
-      const embeddingItems = events.flatMap((event) =>
-        event.content_items.filter((item) => item.type === "embedding"),
-      );
+      assertStreamGrammar(events);
+      const embeddingItems = events
+        .flatMap((event): EventContentItem[] => event.content_items)
+        .filter(
+          (item): item is EmbeddingDoneItem => item.type === "embedding.done",
+        );
       expect(embeddingItems.length).toBe(2);
       for (const item of embeddingItems) {
         expect(item.embedding.length).toBe(768);
@@ -1367,44 +1445,11 @@ test("should reject non-text content items for OpenAI embeddings", () => {
   const messages: UniMessage[] = [
     {
       role: "user",
-      content_items: [{ type: "image_url", image_url: IMAGE }],
+      content_items: [{ type: "image_url.done", image_url: IMAGE }],
     },
   ];
 
   expect(() => client.transformUniMessageToModelInput(messages)).toThrow(
     "only support text",
   );
-});
-
-test("should validate last event has usage_metadata and finish_reason", () => {
-  const { LLMClient } = require("../src/baseClient");
-
-  const validEvent = {
-    role: "assistant",
-    event_type: "stop",
-    content_items: [],
-    usage_metadata: {
-      cached_tokens: 0,
-      prompt_tokens: 10,
-      thoughts_tokens: null,
-      response_tokens: 5,
-    },
-    finish_reason: "stop",
-  };
-
-  // should not throw
-  expect(() => LLMClient._validateLastEvent(validEvent)).not.toThrow();
-
-  // null event
-  expect(() => LLMClient._validateLastEvent(null)).toThrow("no events");
-
-  // missing usage_metadata
-  expect(() =>
-    LLMClient._validateLastEvent({ ...validEvent, usage_metadata: null }),
-  ).toThrow("usage_metadata");
-
-  // missing finish_reason
-  expect(() =>
-    LLMClient._validateLastEvent({ ...validEvent, finish_reason: null }),
-  ).toThrow("finish_reason");
 });

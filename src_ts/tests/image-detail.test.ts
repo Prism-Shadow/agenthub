@@ -354,16 +354,16 @@ const MESSAGES: UniMessage[] = [
   {
     role: "user",
     content_items: [
-      { type: "text", text: "What is in these?" },
-      { type: "image_url", image_url: OVERSIZED },
-      { type: "image_url", image_url: SMALL },
+      { type: "text.done", text: "What is in these?" },
+      { type: "image_url.done", image_url: OVERSIZED },
+      { type: "image_url.done", image_url: SMALL },
     ],
   },
   {
     role: "assistant",
     content_items: [
       {
-        type: "tool_call",
+        type: "tool_call.done",
         name: "read_image",
         arguments: { path: "shot.png" },
         tool_call_id: "call_1",
@@ -374,7 +374,7 @@ const MESSAGES: UniMessage[] = [
     role: "user",
     content_items: [
       {
-        type: "tool_result",
+        type: "tool_result.done",
         text: "image/png",
         images: [OVERSIZED, SMALL],
         tool_call_id: "call_1",
@@ -404,60 +404,57 @@ function details(testCase: ImageDetailCase, modelInput: any[]): string[] {
 describe.each(IMAGE_DETAIL_CASES)(
   "Image detail for $expectedClient on $model",
   (testCase) => {
-    test(
-      "image parts go out at the detail the client needs, or are refused where the model reads none",
-      async () => {
-        const client = new AutoLLMClient({
-          model: testCase.model,
-          apiKey: "test-key",
-          clientType: testCase.clientType,
-        });
-        const routedClient = (
-          client as unknown as {
-            _client: {
-              constructor: { name: string };
-              transformUniMessageToModelInput(
-                messages: UniMessage[],
-                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              ): Promise<any[]> | any[];
-            };
-          }
-        )._client;
-        expect(routedClient.constructor.name).toBe(testCase.expectedClient);
-
-        if (testCase.refusesImages) {
-          expect(() =>
-            routedClient.transformUniMessageToModelInput(MESSAGES),
-          ).toThrow(/does not support image/);
-          return;
+    test("image parts go out at the detail the client needs, or are refused where the model reads none", async () => {
+      const client = new AutoLLMClient({
+        model: testCase.model,
+        apiKey: "test-key",
+        clientType: testCase.clientType,
+      });
+      const routedClient = (
+        client as unknown as {
+          _client: {
+            constructor: { name: string };
+            transformUniMessageToModelInput(
+              messages: UniMessage[],
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            ): Promise<any[]> | any[];
+          };
         }
+      )._client;
+      expect(routedClient.constructor.name).toBe(testCase.expectedClient);
 
-        const modelInput =
-          await routedClient.transformUniMessageToModelInput(MESSAGES);
+      if (testCase.refusesImages) {
+        expect(() =>
+          routedClient.transformUniMessageToModelInput(MESSAGES),
+        ).toThrow(/does not support image/);
+        return;
+      }
 
-        const shrunk = testCase.shrinks ? "high" : "absent";
-        expect(details(testCase, modelInput)).toEqual([
-          shrunk,
-          "absent",
-          shrunk,
-          "absent",
-        ]);
-        if (testCase.protocol === "responses") {
-          // the list form is what images require
-          expect(Array.isArray(modelInput[2].output)).toBe(true);
-        } else {
-          // the tool message carries the text alone, and the images follow it in a user
-          // message
-          expect(modelInput).toHaveLength(4);
-          expect(modelInput[2].role).toBe("tool");
-          expect(typeof modelInput[2].content).toBe("string");
-          expect(modelInput[3].role).toBe("user");
-          expect(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            modelInput[3].content.map((part: any) => part.type),
-          ).toEqual(["image_url", "image_url"]);
-        }
-      },
-    );
+      const modelInput =
+        await routedClient.transformUniMessageToModelInput(MESSAGES);
+
+      const shrunk = testCase.shrinks ? "high" : "absent";
+      expect(details(testCase, modelInput)).toEqual([
+        shrunk,
+        "absent",
+        shrunk,
+        "absent",
+      ]);
+      if (testCase.protocol === "responses") {
+        // the list form is what images require
+        expect(Array.isArray(modelInput[2].output)).toBe(true);
+      } else {
+        // the tool message carries the text alone, and the images follow it in a user
+        // message
+        expect(modelInput).toHaveLength(4);
+        expect(modelInput[2].role).toBe("tool");
+        expect(typeof modelInput[2].content).toBe("string");
+        expect(modelInput[3].role).toBe("user");
+        expect(
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          modelInput[3].content.map((part: any) => part.type),
+        ).toEqual(["image_url", "image_url"]);
+      }
+    });
   },
 );

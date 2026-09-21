@@ -24,7 +24,7 @@ import { expect, test } from "@jest/globals";
 import {
   AutoLLMClient,
   ContentItem,
-  ThinkingContentItem,
+  ThinkingDoneItem,
   UniMessage,
 } from "../src";
 
@@ -57,12 +57,14 @@ async function transformHistory(
 function userText(): UniMessage {
   return {
     role: "user",
-    content_items: [{ type: "text", text: "What is the weather in Paris?" }],
+    content_items: [
+      { type: "text.done", text: "What is the weather in Paris?" },
+    ],
   };
 }
 
 function thinkingItem(text: string, reasoningField?: string): ContentItem {
-  const item: ThinkingContentItem = { type: "thinking", thinking: text };
+  const item: ThinkingDoneItem = { type: "thinking.done", thinking: text };
   if (reasoningField !== undefined) {
     item.fidelity = { reasoning_field: reasoningField };
   }
@@ -72,7 +74,7 @@ function thinkingItem(text: string, reasoningField?: string): ContentItem {
 
 function toolCallItem(toolCallId: string): ContentItem {
   return {
-    type: "tool_call",
+    type: "tool_call.done",
     name: "get_weather",
     arguments: { city: "Paris" },
     tool_call_id: toolCallId,
@@ -87,7 +89,7 @@ function toolResults(...toolCallIds: string[]): UniMessage {
   return {
     role: "user",
     content_items: toolCallIds.map((toolCallId): ContentItem => ({
-      type: "tool_result",
+      type: "tool_result.done",
       text: "20 degrees.",
       tool_call_id: toolCallId,
     })),
@@ -151,7 +153,7 @@ test("replay sends no reasoning field when no message ever thought", async () =>
   const history: UniMessage[] = [
     userText(),
     assistant(
-      { type: "text", text: "Let me check that for you." },
+      { type: "text.done", text: "Let me check that for you." },
       toolCallItem("call_1"),
     ),
     toolResults("call_1"),
@@ -175,7 +177,7 @@ test("replay sends no reasoning field for a message without tool calls", async (
       toolCallItem("call_1"),
     ),
     toolResults("call_1"),
-    assistant({ type: "text", text: "It is 20 degrees in Paris." }),
+    assistant({ type: "text.done", text: "It is 20 degrees in Paris." }),
   ];
 
   const messages = assistantMessages(await transformHistory(client, history));
@@ -217,4 +219,112 @@ test("replay keeps each message on its own reasoning field", async () => {
   // the request as a whole produced both spellings, so the turn without thinking sends both
   expect(third.reasoning_content).toBe("");
   expect(third.reasoning).toBe("");
+});
+
+// Gemini rejects such a turn outright once its tool results follow: the Interactions API takes
+// an unfinished model turn back only when it holds a signed thought (verified live 2026-09-16).
+// A turn another provider produced, its unsigned thinking included, opens with the placeholder
+// signature Google documents for thoughts it did not produce, while the signature a
+// generateContent history recorded on a call already makes the turn's thought.
+function geminiClient(): AutoLLMClient {
+  const client = new AutoLLMClient({
+    model: "gemini-3.8-flash",
+    apiKey: "test-key",
+  });
+  expect(
+    (client as unknown as { _client: object })._client.constructor.name,
+  ).toBe("Gemini3_8Client");
+  return client;
+}
+
+function geminiHistory(): UniMessage[] {
+  return [
+    userText(),
+    assistant(
+      { type: "text.done", text: "Let me check that for you." },
+      toolCallItem("call_1"),
+    ),
+    toolResults("call_1"),
+    assistant(
+      thinkingItem(THINKING, "reasoning_content"),
+      toolCallItem("call_2"),
+    ),
+    toolResults("call_2"),
+    assistant({
+      type: "tool_call.done",
+      name: "get_weather",
+      arguments: { city: "Paris" },
+      tool_call_id: "call_3",
+      fidelity: { signature: "sig-3" },
+    }),
+    toolResults("call_3"),
+  ];
+}
+
+test("gemini replay opens a turn without a signed thought with the placeholder signature", async () => {
+  const client = geminiClient();
+
+  const steps = await transformHistory(client, geminiHistory());
+  expect(steps.map((step) => step.type)).toEqual([
+    "user_input",
+    "thought",
+    "model_output",
+    "function_call",
+    "function_result",
+    "thought",
+    "thought",
+    "function_call",
+    "function_result",
+    "thought",
+    "function_call",
+    "function_result",
+  ]);
+  expect(steps.filter((step) => step.type === "thought")).toEqual([
+    { type: "thought", signature: "skip_thought_signature_validator" },
+    { type: "thought", signature: "skip_thought_signature_validator" },
+    { type: "thought", summary: [{ type: "text", text: THINKING }] },
+    { type: "thought", signature: "sig-3" },
+  ]);
+});
+
+// generateContent validates the signature on the first function call of a turn instead.
+test("generateContent replay signs the first call of an unsigned turn with the placeholder", async () => {
+  const client = new AutoLLMClient({
+    model: "gemini-3.8-flash",
+    apiKey: "test-key",
+    clientType: "gemini-generate-content",
+  });
+  expect(
+    (client as unknown as { _client: object })._client.constructor.name,
+  ).toBe("Gemini3_8GenerateContentClient");
+
+  const contents = await transformHistory(client, geminiHistory());
+  const call = (toolCallId: string) => ({
+    functionCall: {
+      id: toolCallId,
+      name: "get_weather",
+      args: { city: "Paris" },
+    },
+  });
+  expect(
+    contents
+      .filter((content) => content.role === "model")
+      .map((content) => content.parts),
+  ).toEqual([
+    [
+      { text: "Let me check that for you." },
+      {
+        ...call("call_1"),
+        thoughtSignature: "skip_thought_signature_validator",
+      },
+    ],
+    [
+      { text: THINKING, thought: true },
+      {
+        ...call("call_2"),
+        thoughtSignature: "skip_thought_signature_validator",
+      },
+    ],
+    [{ ...call("call_3"), thoughtSignature: "sig-3" }],
+  ]);
 });

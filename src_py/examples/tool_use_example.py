@@ -72,17 +72,20 @@ async def main():
 
     events = []
     async for event in client.streaming_response_stateful(
-        message={"role": "user", "content_items": [{"type": "text", "text": "What's the temperature in London?"}]},
+        message={
+            "role": "user",
+            "content_items": [{"type": "text.done", "text": "What's the temperature in London?"}],
+        },
         config=config,
     ):
         print(event)
         events.append(event)
 
-    # Check if there's a function call in the last event
+    # Read the complete call from its tool_call.done item
     tool_call1 = None
     for event in events:
         for item in event["content_items"]:
-            if item["type"] == "tool_call":
+            if item["type"] == "tool_call.done":
                 tool_call1 = item
                 break
 
@@ -104,7 +107,9 @@ async def main():
         async for event in client.streaming_response_stateful(
             message={
                 "role": "user",
-                "content_items": [{"type": "tool_result", "text": result, "tool_call_id": tool_call1["tool_call_id"]}],
+                "content_items": [
+                    {"type": "tool_result.done", "text": result, "tool_call_id": tool_call1["tool_call_id"]}
+                ],
             },
             config=config,
         ):
@@ -116,7 +121,7 @@ async def main():
 
         events2 = []
         async for event in client.streaming_response_stateful(
-            message={"role": "user", "content_items": [{"type": "text", "text": "How about in Paris?"}]},
+            message={"role": "user", "content_items": [{"type": "text.done", "text": "How about in Paris?"}]},
             config=config,
         ):
             print(event)
@@ -126,7 +131,7 @@ async def main():
         tool_call2 = None
         for event in events2:
             for item in event["content_items"]:
-                if item["type"] == "tool_call":
+                if item["type"] == "tool_call.done":
                     tool_call2 = item
                     break
 
@@ -149,7 +154,7 @@ async def main():
                 message={
                     "role": "user",
                     "content_items": [
-                        {"type": "tool_result", "text": result2, "tool_call_id": tool_call2["tool_call_id"]}
+                        {"type": "tool_result.done", "text": result2, "tool_call_id": tool_call2["tool_call_id"]}
                     ],
                 },
                 config=config,

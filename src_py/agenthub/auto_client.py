@@ -71,9 +71,11 @@ class AutoLLMClient(LLMClient):
             type[LLMClient] | None: The client class, or None when no client claims the type.
         """
         # every Gemini generation shares the unified client ("gemini-3" also matches the
-        # gemini-3.8/gemini-3.7/gemini-3.6/gemini-3.5-flash-lite client types)
+        # gemini-3.8/gemini-3.7/gemini-3.6/gemini-3.5-flash-lite client types), and the two
+        # wire-protocol pins name the family too: _create_client_for_model picks the protocol
         if any(
-            prefix in client_type for prefix in ("gemini-3", "gemini-embedding")
+            prefix in client_type
+            for prefix in ("gemini-3", "gemini-embedding", "gemini-interactions", "gemini-generate-content")
         ):  # e.g., gemini-3.8-flash, gemini-3-flash-preview, gemini-embedding-2
             from .gemini3_8 import Gemini3_8Client
 
@@ -146,10 +148,25 @@ class AutoLLMClient(LLMClient):
             raise ValueError(
                 f"{client_type} is not supported. "
                 "Supported client types: minimax-m3, gemini-3.8, gemini-3.7, gemini-3.6, gemini-3, "
-                "claude-5, claude-4-8, claude-4-7, claude-4-6, gpt-6, gpt-5.6, gpt-5.5, gpt-5.4, "
+                "gemini-interactions, gemini-generate-content, claude-5, claude-4-8, claude-4-7, claude-4-6, "
+                "gpt-6, gpt-5.6, gpt-5.5, gpt-5.4, "
                 "glm-5.3, glm-5.2, glm-5.1, kimi-k3, kimi-k2.6, kimi-k2.5, deepseek-v4, "
                 "openai-chat-vllm-adapter, openai-embedding, ant-messages, openai-responses, openai-chat."
             )
+
+        # Vertex AI's Interactions endpoint serves none of the Gemini models, so a Gemini client given a
+        # service-account JSON, told apart by the test both clients' constructors apply, speaks generateContent
+        # unless Interactions is pinned. The pin and the key are checked first, so that no other client pays
+        # for importing the Gemini SDK.
+        is_vertex_ai = (api_key or os.getenv("GEMINI_API_KEY") or "").startswith("{")
+        if "gemini-generate-content" in (client_type or "") or (
+            is_vertex_ai and "gemini-interactions" not in (client_type or "")
+        ):
+            from .gemini3_8 import Gemini3_8Client
+            from .gemini3_8_generate_content import Gemini3_8GenerateContentClient
+
+            if client_class is Gemini3_8Client:
+                client_class = Gemini3_8GenerateContentClient
 
         return client_class(model=model, api_key=api_key, base_url=base_url, default_headers=default_headers)
 
@@ -223,10 +240,16 @@ class AutoLLMClient(LLMClient):
         Returns:
             list[str]: The model ids, in the order the endpoint returned them.
         """
+        from .gemini3_8 import Gemini3_8Client
+        from .gemini3_8_generate_content import Gemini3_8GenerateContentClient
+
         model_ids = await self._client.list_models()
         protocol_classes = {self._client_class_for_model(name) for name in _PROTOCOL_CLIENT_TYPES}
-        if type(self._client) in protocol_classes:
+        # the generateContent client serves the Gemini family, whose model ids route to Gemini3_8Client
+        client_class = (
+            Gemini3_8Client if isinstance(self._client, Gemini3_8GenerateContentClient) else type(self._client)
+        )
+        if client_class in protocol_classes:
             return model_ids
 
-        client_class = type(self._client)
         return [model_id for model_id in model_ids if self._client_class_for_model(model_id.lower()) is client_class]

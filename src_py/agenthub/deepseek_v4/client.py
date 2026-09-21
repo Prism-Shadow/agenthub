@@ -21,11 +21,11 @@ from openai import AsyncOpenAI
 from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 
 from ..base_client import LLMClient
-from ..errors import UnsupportedParameterError, parse_tool_call_arguments
+from ..errors import UnsupportedParameterError
 from ..types import (
+    EventContentItem,
     EventType,
     FinishReason,
-    PartialContentItem,
     PromptCaching,
     ThinkingLevel,
     ToolChoice,
@@ -165,7 +165,7 @@ class DeepSeekV4Client(LLMClient):
                 # merges a function call into the adjacent assistant message and answers a call
                 # whose output does not follow it with "No tool output found for tool call"
                 # (verified live 2026-08-21)
-                if item["type"] not in ("text", "image_url") and content_items:
+                if item["type"] not in ("text.done", "image_url.done") and content_items:
                     # Every turn goes back as a typed message item — the Responses API's EasyInputMessage
                     # shape, where type "message" is valid for any role. A vLLM-style Responses server
                     # answers a bare {"role": "assistant", "content": [...]} item with a 400 on the turn that
@@ -175,17 +175,17 @@ class DeepSeekV4Client(LLMClient):
                     input_list.append({"type": "message", "role": msg["role"], "content": content_items})
                     content_items = []
 
-                if item["type"] == "text":
+                if item["type"] == "text.done":
                     if msg["role"] == "user":
                         content_items.append({"type": "input_text", "text": item["text"]})
                     else:
                         content_items.append({"type": "output_text", "text": item["text"]})
-                elif item["type"] == "image_url":
+                elif item["type"] == "image_url.done":
                     if not supports_image:
                         raise ValueError(f"DeepSeek {self._model} does not support image inputs.")
 
                     content_items.append({"type": "input_image", "image_url": item["image_url"]})
-                elif item["type"] == "thinking":
+                elif item["type"] == "thinking.done":
                     # DeepSeek carries the chain of thought as plain reasoning_text and ignores the
                     # summary and encrypted_content channels, so the item is rebuilt from the text
                     reasoning = {"type": "reasoning", "summary": []}
@@ -193,7 +193,7 @@ class DeepSeekV4Client(LLMClient):
                         reasoning["content"] = [{"type": "reasoning_text", "text": item["thinking"]}]
 
                     input_list.append(reasoning)
-                elif item["type"] == "tool_call":
+                elif item["type"] == "tool_call.done":
                     input_list.append(
                         {
                             "type": "function_call",
@@ -202,7 +202,7 @@ class DeepSeekV4Client(LLMClient):
                             "arguments": json.dumps(item["arguments"], ensure_ascii=False),
                         }
                     )
-                elif item["type"] == "tool_result":
+                elif item["type"] == "tool_result.done":
                     if "tool_call_id" not in item:
                         raise ValueError("tool_call_id is required for tool result.")
 
@@ -235,65 +235,71 @@ class DeepSeekV4Client(LLMClient):
 
     def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
         """
-        Transform DeepSeek streaming event to universal event format.
+        Transform one DeepSeek streaming event into a universal event, identifying items by output item id.
+        An item needs no done: it is done when the next one begins or the stream ends.
 
         Args:
             model_output: Responses API streaming event
 
         Returns:
-            Universal event dictionary
+            Universal event dictionary, an empty delta event when the wire event carries nothing universal
         """
-        event_type: EventType | None = None
-        content_items: list[PartialContentItem] = []
+        event_type: EventType = "delta"
+        content_items: list[EventContentItem] = []
         usage_metadata: UsageMetadata | None = None
         finish_reason: FinishReason | None = None
 
         deepseek_event_type = model_output.type
         if deepseek_event_type == "response.output_text.delta":
-            event_type = "delta"
-            content_items.append({"type": "text", "text": model_output.delta})
-
-        elif deepseek_event_type == "response.reasoning_text.delta":
-            event_type = "delta"
-            content_items.append({"type": "thinking", "thinking": model_output.delta})
-
-        elif deepseek_event_type == "response.output_item.added":
-            if model_output.item.type == "function_call":
-                event_type = "start"
-                content_items.append(
-                    {
-                        "type": "partial_tool_call",
-                        "name": model_output.item.name,
-                        "arguments": "",
-                        "tool_call_id": model_output.item.call_id,
-                        "item_id": model_output.item.id,
-                    }
-                )
-            else:
-                event_type = "unused"
-
-        elif deepseek_event_type == "response.function_call_arguments.delta":
-            event_type = "delta"
             content_items.append(
                 {
-                    "type": "partial_tool_call",
-                    "name": "",
-                    "arguments": model_output.delta,
-                    "tool_call_id": "",
-                    "item_id": model_output.item_id,
+                    "type": "text.delta",
+                    "text": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
             )
 
-        elif deepseek_event_type == "response.function_call_arguments.done":
-            # a stop naming the item closes that call
-            event_type = "stop"
+        elif deepseek_event_type == "response.reasoning_text.delta":
             content_items.append(
                 {
-                    "type": "partial_tool_call",
+                    "type": "thinking.delta",
+                    "thinking": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
+            )
+
+        elif deepseek_event_type == "response.output_item.added":
+            # every item is announced with a delta, empty unless it carries the call, so a fragment
+            # a server sends without its item id belongs to the item announced last
+            item = model_output.item
+            if item.type == "function_call":
+                content_items.append(
+                    {
+                        "type": "tool_call.delta",
+                        "name": item.name,
+                        "arguments": "",
+                        "tool_call_id": item.call_id,
+                        # a server that sends no item id still sends the call id
+                        "fidelity": {"item_id": item.id or item.call_id},
+                    }
+                )
+            elif item.type == "message":
+                content_items.append(
+                    {"type": "text.delta", "text": "", "fidelity": {"item_id": getattr(item, "id", None)}}
+                )
+            elif item.type == "reasoning":
+                content_items.append(
+                    {"type": "thinking.delta", "thinking": "", "fidelity": {"item_id": getattr(item, "id", None)}}
+                )
+
+        elif deepseek_event_type == "response.function_call_arguments.delta":
+            content_items.append(
+                {
+                    "type": "tool_call.delta",
                     "name": "",
-                    "arguments": "",
+                    "arguments": model_output.delta,
                     "tool_call_id": "",
-                    "item_id": model_output.item_id,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
                 }
             )
 
@@ -323,11 +329,13 @@ class DeepSeekV4Client(LLMClient):
             "response.output_item.done",
             "response.output_text.done",
             "response.reasoning_text.done",
+            "response.function_call_arguments.done",
             "response.content_part.added",
             "response.content_part.done",
             "keepalive",  # gateway heartbeat on long generations; carries no content
         ):
-            event_type = "unused"
+            # lifecycle events, and repeats of what the deltas carry
+            pass
 
         elif is_debug_enabled():
             raise ValueError(f"Unknown output: {model_output}")
@@ -335,7 +343,7 @@ class DeepSeekV4Client(LLMClient):
         else:
             # a gateway injects its own events (heartbeats, cost tickers) into the stream, and
             # killing a long generation over one costs more than dropping it
-            event_type = "unused"
+            pass
 
         return {
             "role": "assistant",
@@ -357,64 +365,10 @@ class DeepSeekV4Client(LLMClient):
         # Use unified message conversion
         input_list = self.transform_uni_message_to_model_input(messages)
 
-        # Calls still streaming, keyed by the item id their fragments carry (the call id when a
-        # server sends none): a gateway may open several before closing any of them.
-        open_tool_calls: dict[str, dict] = {}
-        last_opened = ""
-
-        def key_of(item_id: str | None) -> str:
-            return item_id if item_id in open_tool_calls else last_opened
-
         # Stream generate
         stream = await self._client.responses.create(**deepseek_config, input=input_list, stream=True)
         async for model_event in stream:
-            event = self.transform_model_output_to_uni_event(model_event)
-            fragments = [item for item in event["content_items"] if item["type"] == "partial_tool_call"]
-            if event["event_type"] == "start":
-                for item in fragments:
-                    last_opened = item.get("item_id") or item["tool_call_id"]
-                    open_tool_calls[last_opened] = {
-                        "name": item["name"],
-                        "tool_call_id": item["tool_call_id"],
-                        "arguments": "",
-                    }
-                yield event
-            elif event["event_type"] == "delta":
-                for item in fragments:
-                    tool_call = open_tool_calls.get(key_of(item.get("item_id")))
-                    if tool_call is not None:
-                        tool_call["arguments"] += item["arguments"]
-                yield event
-            elif event["event_type"] == "stop":
-                # a stop that names calls closes them; the end of the response closes whatever
-                # a gateway never closed on its own
-                closing = [key_of(item.get("item_id")) for item in fragments] or list(open_tool_calls)
-                for key in closing:
-                    tool_call = open_tool_calls.pop(key, None)
-                    if tool_call is None:
-                        continue
-                    yield {
-                        "role": "assistant",
-                        "event_type": "delta",
-                        "content_items": [
-                            {
-                                "type": "tool_call",
-                                "name": tool_call["name"],
-                                "arguments": parse_tool_call_arguments(
-                                    tool_call["arguments"],
-                                    self.__class__.__name__,
-                                    tool_call["name"],
-                                    tool_call["tool_call_id"],
-                                ),
-                                "tool_call_id": tool_call["tool_call_id"],
-                            }
-                        ],
-                        "usage_metadata": None,
-                        "finish_reason": None,
-                    }
-
-                if event["finish_reason"] or event["usage_metadata"]:
-                    yield event
+            yield self.transform_model_output_to_uni_event(model_event)
 
     async def list_models(self) -> list[str]:
         """
