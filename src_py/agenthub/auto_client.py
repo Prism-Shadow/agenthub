@@ -17,7 +17,6 @@ from typing import Any, AsyncIterator
 
 from .abort_signal import AbortSignal
 from .base_client import LLMClient
-from .stream_items import StreamItems
 from .types import UniConfig, UniEvent, UniMessage
 
 
@@ -179,9 +178,9 @@ class AutoLLMClient(LLMClient):
         """Delegate to underlying client's transform_uni_message_to_model_input."""
         return self._client.transform_uni_message_to_model_input(messages)
 
-    def transform_model_output_to_uni_event(self, model_output: Any, items: StreamItems) -> UniEvent:
+    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
         """Delegate to underlying client's transform_model_output_to_uni_event."""
-        return self._client.transform_model_output_to_uni_event(model_output, items)
+        return self._client.transform_model_output_to_uni_event(model_output)
 
     async def _streaming_response_internal(
         self,

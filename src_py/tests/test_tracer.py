@@ -306,7 +306,6 @@ def _fake_llm_client() -> ScriptedClient:
         [
             _delta({"type": "text.delta", "text": "Hello ", "fidelity": {"item_id": "0"}}),
             _delta({"type": "text.delta", "text": "there!", "fidelity": {"item_id": "0"}}),
-            _delta({"type": "text.done", "text": "Hello there!", "fidelity": {"item_id": "0"}}),
             _STOP,
         ]
     )
@@ -396,7 +395,6 @@ async def test_traced_response_saves_its_fidelity_without_the_item_id(temp_cache
     client = ScriptedClient(
         [
             _delta({"type": "text.delta", "text": "Hello", "fidelity": {"item_id": "0", "signature": "s"}}),
-            _delta({"type": "text.done", "text": "Hello", "fidelity": {"item_id": "0", "signature": "s"}}),
             _STOP,
         ]
     )

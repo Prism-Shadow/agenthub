@@ -440,11 +440,6 @@ describe("Tracer", () => {
     const client = new ScriptedClient([
       delta({ type: "text.delta", text: "Hello ", fidelity: { item_id: "0" } }),
       delta({ type: "text.delta", text: "there!", fidelity: { item_id: "0" } }),
-      delta({
-        type: "text.done",
-        text: "Hello there!",
-        fidelity: { item_id: "0" },
-      }),
       STOP,
     ]);
 
@@ -491,11 +486,6 @@ describe("Tracer", () => {
     const client = new ScriptedClient([
       delta({
         type: "text.delta",
-        text: "Hello",
-        fidelity: { item_id: "0", signature: "s" },
-      }),
-      delta({
-        type: "text.done",
         text: "Hello",
         fidelity: { item_id: "0", signature: "s" },
       }),

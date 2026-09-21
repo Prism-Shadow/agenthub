@@ -13,7 +13,6 @@
 // limitations under the License.
 
 import { LLMClient } from "./baseClient";
-import { StreamItems } from "./streamItems";
 import { Gemini3_8Client } from "./gemini3_8";
 import { Gemini3_8GenerateContentClient } from "./gemini3_8_generate_content";
 import { Claude5Client } from "./claude5";
@@ -223,12 +222,9 @@ export class AutoLLMClient extends LLMClient {
   /**
    * Delegate to underlying client's transformModelOutputToUniEvent.
    */
-  transformModelOutputToUniEvent(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    modelOutput: any,
-    items: StreamItems,
-  ): UniEvent {
-    return this._client.transformModelOutputToUniEvent(modelOutput, items);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  transformModelOutputToUniEvent(modelOutput: any): UniEvent {
+    return this._client.transformModelOutputToUniEvent(modelOutput);
   }
 
   /**

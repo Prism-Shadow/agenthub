@@ -21,7 +21,6 @@ from openai.types.responses import ResponseInputParam, ResponseStreamEvent
 
 from ..base_client import LLMClient
 from ..errors import UnsupportedParameterError
-from ..stream_items import StreamItems
 from ..types import (
     EventContentItem,
     EventType,
@@ -242,14 +241,13 @@ class OpenaiResponsesClient(LLMClient):
 
         return input_list
 
-    def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent, items: StreamItems) -> UniEvent:
+    def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
         """
-        Transform one OpenAI Responses-compatible streaming event into a universal event. An output item is an
-        item, under its id: output_item.added and the deltas are fragments, output_item.done completes it.
+        Transform one OpenAI Responses-compatible streaming event into a universal event, identifying items by
+        output item id. An item needs no done: it is done when the next one begins or the stream ends.
 
         Args:
             model_output: OpenAI Responses API streaming event
-            items: The items of the stream this event belongs to
 
         Returns:
             Universal event dictionary, an empty delta event when the wire event carries nothing universal
@@ -261,72 +259,77 @@ class OpenaiResponsesClient(LLMClient):
 
         openai_event_type = model_output.type
         if openai_event_type == "response.output_text.delta":
-            item_id = getattr(model_output, "item_id", None)
-            content_items.extend(items.delta(item_id, {"type": "text.delta", "text": model_output.delta}))
+            content_items.append(
+                {
+                    "type": "text.delta",
+                    "text": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
+            )
 
         elif openai_event_type in ("response.reasoning_text.delta", "response.reasoning_summary_text.delta"):
-            item_id = getattr(model_output, "item_id", None)
-            content_items.extend(items.delta(item_id, {"type": "thinking.delta", "thinking": model_output.delta}))
+            content_items.append(
+                {
+                    "type": "thinking.delta",
+                    "thinking": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
+            )
 
         elif openai_event_type == "response.output_item.added":
-            # every item is announced with a fragment, empty unless it carries the call or the phase,
+            # every item is announced with a delta, empty unless it carries the call or the phase,
             # so a fragment a server sends without its item id belongs to the item announced last
             item = model_output.item
             if item.type == "function_call":
-                # a server that sends no item id still sends the call id
-                content_items.extend(
-                    items.delta(
-                        item.id or item.call_id,
-                        {"type": "tool_call.delta", "name": item.name, "arguments": "", "tool_call_id": item.call_id},
-                    )
+                content_items.append(
+                    {
+                        "type": "tool_call.delta",
+                        "name": item.name,
+                        "arguments": "",
+                        "tool_call_id": item.call_id,
+                        # a server that sends no item id still sends the call id
+                        "fidelity": {"item_id": item.id or item.call_id},
+                    }
                 )
             elif item.type == "message":
                 phase = getattr(item, "phase", None)
-                content_items.extend(
-                    items.delta(
-                        getattr(item, "id", None),
-                        {"type": "text.delta", "text": "", "fidelity": {"phase": phase} if phase else {}},
-                    )
+                content_items.append(
+                    {
+                        "type": "text.delta",
+                        "text": "",
+                        "fidelity": {"item_id": getattr(item, "id", None), **({"phase": phase} if phase else {})},
+                    }
                 )
             elif item.type == "reasoning":
-                item_id = getattr(item, "id", None)
-                content_items.extend(items.delta(item_id, {"type": "thinking.delta", "thinking": ""}))
+                content_items.append(
+                    {"type": "thinking.delta", "thinking": "", "fidelity": {"item_id": getattr(item, "id", None)}}
+                )
 
         elif openai_event_type == "response.output_item.done":
             item = model_output.item
             if item.type == "reasoning":
-                # record the wire shape of the completed reasoning item so a replay reproduces
-                # the channel that carried the thinking plus the fields the server demands back
-                item_id = getattr(item, "id", None)
-                fidelity = {}
+                # the last delta of a reasoning item: the wire shape of the completed item, so a
+                # replay reproduces the channel that carried the thinking plus the fields the server
+                # demands back
+                fidelity = {"item_id": getattr(item, "id", None)}
                 if getattr(item, "summary", None):
                     fidelity["channel"] = "summary"
                 for key in ("encrypted_content", "signature", "format"):
                     if getattr(item, key, None) is not None:
                         fidelity[key] = getattr(item, key)
 
-                content_items.extend(
-                    items.delta(item_id, {"type": "thinking.delta", "thinking": "", "fidelity": fidelity})
-                )
-                content_items.extend(items.done(item_id))
-            elif item.type == "function_call":
-                content_items.extend(items.done(item.id or item.call_id))
-            elif item.type == "message":
-                content_items.extend(items.done(getattr(item, "id", None)))
+                content_items.append({"type": "thinking.delta", "thinking": "", "fidelity": fidelity})
 
         elif openai_event_type == "response.function_call_arguments.delta":
-            content_items.extend(
-                items.delta(
-                    getattr(model_output, "item_id", None),
-                    {"type": "tool_call.delta", "name": "", "arguments": model_output.delta, "tool_call_id": ""},
-                )
+            content_items.append(
+                {
+                    "type": "tool_call.delta",
+                    "name": "",
+                    "arguments": model_output.delta,
+                    "tool_call_id": "",
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
             )
-
-        elif openai_event_type == "response.function_call_arguments.done":
-            # the call's output_item.done completes it instead: its item still names the call where
-            # a server leaves the item id off this event, and a call whose output_item.done never
-            # arrives is completed when the stream ends
-            pass
 
         elif openai_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
@@ -353,6 +356,7 @@ class OpenaiResponsesClient(LLMClient):
             "response.created",
             "response.in_progress",
             "response.output_text.done",
+            "response.function_call_arguments.done",
             "response.reasoning_text.done",
             "response.reasoning_summary_part.added",
             "response.reasoning_summary_part.done",
@@ -394,18 +398,8 @@ class OpenaiResponsesClient(LLMClient):
 
         # Stream generate
         stream = await self._client.responses.create(**openai_config, input=input_list, stream=True)
-        items = StreamItems(self.__class__.__name__)
         async for model_event in stream:
-            yield self.transform_model_output_to_uni_event(model_event, items)
-
-        # the provider's stream ended: whatever is still open is done
-        yield {
-            "role": "assistant",
-            "event_type": "delta",
-            "content_items": items.end(),
-            "usage_metadata": None,
-            "finish_reason": None,
-        }
+            yield self.transform_model_output_to_uni_event(model_event)
 
     async def list_models(self) -> list[str]:
         """

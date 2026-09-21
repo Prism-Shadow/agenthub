@@ -24,7 +24,6 @@ import {
   UnsupportedOperationError,
   UnsupportedParameterError,
 } from "../errors";
-import { StreamItems } from "../streamItems";
 import {
   EventContentItem,
   EventType,
@@ -378,12 +377,11 @@ export class Claude5Client extends LLMClient {
   }
 
   /**
-   * Transform one Claude stream event into a universal event. A content block is an item, under
-   * its index: its start and deltas are fragments, its stop completes it.
+   * Transform one Claude stream event into a universal event, identifying items by content
+   * block index.
    */
   transformModelOutputToUniEvent(
     modelOutput: BetaRawMessageStreamEvent,
-    items: StreamItems,
   ): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
@@ -395,58 +393,51 @@ export class Claude5Client extends LLMClient {
       const itemId = String(modelOutput.index);
       const block = modelOutput.content_block;
       if (block.type === "tool_use") {
-        contentItems.push(
-          ...items.delta(itemId, {
-            type: "tool_call.delta",
-            name: block.name,
-            arguments: "",
-            tool_call_id: block.id,
-          }),
-        );
+        contentItems.push({
+          type: "tool_call.delta",
+          name: block.name,
+          arguments: "",
+          tool_call_id: block.id,
+          fidelity: { item_id: itemId },
+        });
       } else if (block.type === "redacted_thinking") {
-        contentItems.push(
-          ...items.delta(itemId, {
-            type: "thinking.delta",
-            thinking: REDACTED_THINKING,
-            fidelity: { signature: block.data },
-          }),
-        );
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: REDACTED_THINKING,
+          fidelity: { item_id: itemId, signature: block.data },
+        });
       }
     } else if (claudeEventType === "content_block_delta") {
       const itemId = String(modelOutput.index);
       const delta = modelOutput.delta;
       if (delta.type === "thinking_delta") {
-        contentItems.push(
-          ...items.delta(itemId, {
-            type: "thinking.delta",
-            thinking: delta.thinking,
-          }),
-        );
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: delta.thinking,
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "text_delta") {
-        contentItems.push(
-          ...items.delta(itemId, { type: "text.delta", text: delta.text }),
-        );
+        contentItems.push({
+          type: "text.delta",
+          text: delta.text,
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "input_json_delta") {
-        contentItems.push(
-          ...items.delta(itemId, {
-            type: "tool_call.delta",
-            name: "",
-            arguments: delta.partial_json,
-            tool_call_id: "",
-          }),
-        );
+        contentItems.push({
+          type: "tool_call.delta",
+          name: "",
+          arguments: delta.partial_json,
+          tool_call_id: "",
+          fidelity: { item_id: itemId },
+        });
       } else if (delta.type === "signature_delta") {
         // the last delta of a thinking block: its signature
-        contentItems.push(
-          ...items.delta(itemId, {
-            type: "thinking.delta",
-            thinking: "",
-            fidelity: { signature: delta.signature },
-          }),
-        );
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: itemId, signature: delta.signature },
+        });
       }
-    } else if (claudeEventType === "content_block_stop") {
-      contentItems.push(...items.done(String(modelOutput.index)));
     } else if (claudeEventType === "message_start") {
       eventType = "stop";
       const usage = modelOutput.message.usage;
@@ -483,6 +474,7 @@ export class Claude5Client extends LLMClient {
       }
     } else if (
       [
+        "content_block_stop",
         "message_stop",
         "text",
         "thinking",
@@ -491,8 +483,9 @@ export class Claude5Client extends LLMClient {
         "ping",
       ].includes(claudeEventType)
     ) {
-      // the SDK drops the "ping" heartbeat at the SSE layer; it reaches here only
-      // from gateways that relabel it onto another event
+      // a block needs no stop: it is done when the next one begins or the stream ends. The SDK
+      // drops the "ping" heartbeat at the SSE layer; it reaches here only from gateways that
+      // relabel it onto another event
     } else if (isDebugEnabled()) {
       throw new Error(`Unknown output: ${JSON.stringify(modelOutput)}`);
     } else {
@@ -562,18 +555,9 @@ export class Claude5Client extends LLMClient {
       },
     )) as unknown as Stream<BetaRawMessageStreamEvent>;
 
-    const items = new StreamItems(this.constructor.name);
     for await (const event of stream) {
-      yield this.transformModelOutputToUniEvent(event, items);
+      yield this.transformModelOutputToUniEvent(event);
     }
-    // the provider's stream ended: whatever is still open is done
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: items.end(),
-      usage_metadata: null,
-      finish_reason: null,
-    };
   }
 
   /**

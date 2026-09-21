@@ -21,7 +21,6 @@ import type {
 } from "openai/resources/chat/completions";
 import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
-import { StreamItems } from "../streamItems";
 import {
   EventContentItem,
   EventType,
@@ -307,14 +306,11 @@ export class OpenaiChatClient extends LLMClient {
   /**
    * Transform one OpenAI Chat Completions streaming chunk into a universal event.
    *
-   * Chat Completions gives an item no identity and never says where one ends: an item goes
-   * under the wire field that carries it and runs until a fragment arrives from another field,
-   * and a tool call fragment carrying a name is the next call.
+   * Chat Completions gives an item no identity, so each delta's item_id is the wire field
+   * that carried it: an item runs until a delta arrives from another field, or names the next
+   * tool call.
    */
-  transformModelOutputToUniEvent(
-    modelOutput: ChatCompletionChunk,
-    items: StreamItems,
-  ): UniEvent {
+  transformModelOutputToUniEvent(modelOutput: ChatCompletionChunk): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
@@ -337,54 +333,45 @@ export class OpenaiChatClient extends LLMClient {
       const reasoning = (delta as any)?.reasoning;
       if (reasoningContent && reasoning) {
         // ambiguous origin: record no reasoning_field so a replay sends both fields back
-        contentItems.push(
-          ...items.delta("reasoning_content", {
-            type: "thinking.delta",
-            thinking: reasoningContent,
-          }),
-        );
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: reasoningContent,
+          fidelity: { item_id: "reasoning_content" },
+        });
       } else if (reasoningContent) {
-        contentItems.push(
-          ...items.delta("reasoning_content", {
-            type: "thinking.delta",
-            thinking: reasoningContent,
-            fidelity: { reasoning_field: "reasoning_content" },
-          }),
-        );
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: reasoningContent,
+          fidelity: {
+            item_id: "reasoning_content",
+            reasoning_field: "reasoning_content",
+          },
+        });
       } else if (reasoning) {
-        contentItems.push(
-          ...items.delta("reasoning", {
-            type: "thinking.delta",
-            thinking: reasoning,
-            fidelity: { reasoning_field: "reasoning" },
-          }),
-        );
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: reasoning,
+          fidelity: { item_id: "reasoning", reasoning_field: "reasoning" },
+        });
       }
 
       if (delta?.content) {
-        contentItems.push(
-          ...items.delta("content", {
-            type: "text.delta",
-            text: delta.content,
-          }),
-        );
+        contentItems.push({
+          type: "text.delta",
+          text: delta.content,
+          fidelity: { item_id: "content" },
+        });
       }
 
       if (delta?.tool_calls) {
         for (const toolCall of delta.tool_calls) {
-          const name = toolCall.function?.name || "";
-          if (name) {
-            // a fragment carrying a name is the next call
-            contentItems.push(...items.done("tool_calls"));
-          }
-          contentItems.push(
-            ...items.delta("tool_calls", {
-              type: "tool_call.delta",
-              name,
-              arguments: toolCall.function?.arguments || "",
-              tool_call_id: toolCall.id || name,
-            }),
-          );
+          contentItems.push({
+            type: "tool_call.delta",
+            name: toolCall.function?.name || "",
+            arguments: toolCall.function?.arguments || "",
+            tool_call_id: toolCall.id || toolCall.function?.name || "",
+            fidelity: { item_id: "tool_calls" },
+          });
         }
       }
 
@@ -469,18 +456,9 @@ export class OpenaiChatClient extends LLMClient {
       signal: options.signal,
     });
 
-    const items = new StreamItems(this.constructor.name, { sequential: true });
     for await (const chunk of stream) {
-      yield this.transformModelOutputToUniEvent(chunk, items);
+      yield this.transformModelOutputToUniEvent(chunk);
     }
-    // the provider's stream ended: whatever is still open is done
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: items.end(),
-      usage_metadata: null,
-      finish_reason: null,
-    };
   }
 
   /**

@@ -16,7 +16,6 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from contextlib import suppress
-from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Iterator
 
 from .abort_signal import AbortSignal
@@ -26,7 +25,6 @@ from .stream_items import StreamItems
 from .types import (
     ContentItem,
     EventContentItem,
-    Fidelity,
     FinishReason,
     UniConfig,
     UniEvent,
@@ -46,105 +44,30 @@ def _delta_event(item: EventContentItem) -> UniEvent:
     }
 
 
-@dataclass
-class _OpenItem:
-    kind: str
-    # the fidelity one of its deltas carried
-    fidelity: Fidelity | None = None
-    # events held back while an earlier item is still streaming
-    pending: list[UniEvent] = field(default_factory=list)
-    # set once the item's done item arrived
-    done: ContentItem | None = None
-
-
 class _PublicStream:
-    """Narrows the events a client yields into the public stream.
+    """Turns the events a client yields into the public stream.
 
-    Items go out one at a time in the order they started, so a caller attributes each delta to the
-    item streaming at that moment: an item that starts while an earlier one is open is held back
-    until the earlier one is done. Every item is checked against the protocol, its
-    `fidelity.item_id` stripped, and the usage and finish reason of the client's stop events merged
-    into the one final stop.
+    A client yields deltas only; every one goes out as it arrives, in an event of its own, and
+    `StreamItems` closes each item with its done item when the next item begins or the stream ends.
+    The usage and finish reason of the client's stop events are merged into the one final stop.
     """
 
     def __init__(self, client: str) -> None:
         self._client = client
-        # open item ids, in the order they started
-        self._order: list[str] = []
-        self._items: dict[str, _OpenItem] = {}
+        self._items = StreamItems(client)
         self._usage_metadata: UsageMetadata | None = None
         self._finish_reason: FinishReason | None = None
         self.done_items: list[ContentItem] = []
 
-    def _protocol_error(self, message: str) -> StreamProtocolError:
-        return StreamProtocolError(self._client, message)
-
     def push(self, event: UniEvent) -> Iterator[UniEvent]:
-        # a generator, so the events of an item reach the caller even when a later item of the same
-        # client event fails
+        # a generator, so the deltas of an event reach the caller even when a later one fails
         if event["event_type"] == "delta" and (
             event["usage_metadata"] is not None or event["finish_reason"] is not None
         ):
-            raise self._protocol_error("a delta event carries usage_metadata or finish_reason")
+            raise StreamProtocolError(self._client, "a delta event carries usage_metadata or finish_reason")
 
-        for item in event["content_items"]:
-            # item_id is stripped before any other rule runs, so it never reaches the public stream
-            fidelity = dict(item.get("fidelity") or {})
-            item_id = fidelity.pop("item_id", None)
-            if not isinstance(item_id, str) or item_id == "":
-                raise self._protocol_error(f"{item['type']} carries no fidelity.item_id")
-
-            stripped = {name: value for name, value in item.items() if name != "fidelity"}
-            if fidelity:
-                stripped["fidelity"] = fidelity
-            kind, _, phase = item["type"].partition(".")
-            open_item = self._items.get(item_id)
-
-            if phase == "delta":
-                if open_item is not None and open_item.done is not None:
-                    raise self._protocol_error(f"{item['type']} arrived after item {item_id} was done")
-
-                if open_item is not None and open_item.kind != kind:
-                    raise self._protocol_error(
-                        f"{item['type']} arrived for item {item_id}, which streams {open_item.kind}"
-                    )
-
-                if (
-                    open_item is None
-                    and item["type"] == "tool_call.delta"
-                    and (not item["name"] or not item["tool_call_id"])
-                ):
-                    raise self._protocol_error(
-                        f"the first tool_call.delta of item {item_id} must carry the name and the tool_call_id"
-                    )
-
-                if open_item is None:
-                    open_item = _OpenItem(kind)
-                    self._items[item_id] = open_item
-                    self._order.append(item_id)
-
-                if fidelity:
-                    if open_item.fidelity is not None:
-                        raise self._protocol_error(f"item {item_id} carried fidelity twice")
-
-                    open_item.fidelity = fidelity
-
-                yield from self._emit(item_id, open_item, _delta_event(stripped))
-                continue
-
-            if open_item is None or open_item.done is not None:
-                raise self._protocol_error(f"{item['type']} arrived for item {item_id}, which is not streaming")
-
-            if open_item.kind != kind:
-                raise self._protocol_error(
-                    f"{item['type']} arrived for item {item_id}, which streams {open_item.kind}"
-                )
-
-            if (open_item.fidelity or {}) != fidelity:
-                raise self._protocol_error(f"the fidelity of {item['type']} differs from what item {item_id} streamed")
-
-            open_item.done = stripped
-            yield from self._flush()
+        for delta in event["content_items"]:
+            yield from self._emit(self._items.delta(delta))
 
         if event["usage_metadata"] is not None:
             if self._usage_metadata is None:
@@ -161,36 +84,19 @@ class _PublicStream:
         if event["finish_reason"]:
             self._finish_reason = event["finish_reason"]
 
-    def _emit(self, item_id: str, open_item: _OpenItem, event: UniEvent) -> Iterator[UniEvent]:
-        if self._order[0] == item_id:
-            yield event
-        else:
-            open_item.pending.append(event)
+    def end(self) -> Iterator[UniEvent]:
+        """The client's stream ended: the item still streaming is done."""
+        yield from self._emit(self._items.end())
 
-    def _flush(self) -> Iterator[UniEvent]:
-        while self._order:
-            item_id = self._order[0]
-            open_item = self._items[item_id]
-            if open_item.done is None:
-                break
+    def _emit(self, items: list[EventContentItem]) -> Iterator[UniEvent]:
+        for item in items:
+            if item["type"].endswith(".done"):
+                self.done_items.append(item)
 
-            self._order.pop(0)
-            del self._items[item_id]
-            yield from open_item.pending
-            self.done_items.append(open_item.done)
-            yield _delta_event(open_item.done)
-
-        if self._order:
-            # the item that just reached the front streams from here on
-            front = self._items[self._order[0]]
-            yield from front.pending
-            front.pending = []
+            yield _delta_event(item)
 
     def stop(self) -> UniEvent:
         """Build the stop event once the client's stream ended, rejecting a response that cannot be one."""
-        if self._order:
-            raise self._protocol_error(f"the stream ended with item {self._order[0]} still open")
-
         if self._usage_metadata is None:
             raise ValueError("Streaming response ended without usage_metadata")
 
@@ -249,20 +155,20 @@ class LLMClient(ABC):
         pass
 
     @abstractmethod
-    def transform_model_output_to_uni_event(self, model_output: Any, items: StreamItems) -> UniEvent:
+    def transform_model_output_to_uni_event(self, model_output: Any) -> UniEvent:
         """
         Transform one event of the provider's stream into a universal event, which the base class
-        narrows into the public stream.
+        turns into the public stream.
 
-        content_items holds what `items` returns, in wire order: `items.delta(id, fragment)` for
-        every fragment the wire event carries, `items.done(id)` where it says an item ended. Its
-        event_type is "stop" on the wire events that report usage_metadata and/or finish_reason, in
-        pieces the base class merges field by field, and "delta" otherwise; a "delta" event carries
-        neither.
+        content_items holds the deltas the wire event carries, in wire order, and never a done item:
+        the base class closes an item when the next one begins or the stream ends. The deltas of one
+        item are contiguous and carry the same `fidelity.item_id`, the provider's id for the item
+        where it has one, which never reaches the public stream. Its event_type is "stop" on the
+        wire events that report usage_metadata and/or finish_reason, in pieces the base class merges
+        field by field, and "delta" otherwise; a "delta" event carries neither.
 
         Args:
             model_output: Model-specific output object (streaming chunk)
-            items: The items of the stream this event belongs to
 
         Returns:
             Universal event dictionary, an empty delta event when the wire event carries nothing
@@ -309,9 +215,8 @@ class LLMClient(ABC):
         """
         Internal method to handle streaming response.
 
-        Each model client implements it to send the request, create the `StreamItems` of the
-        stream, yield one universal event per event of the provider's stream, and yield one last
-        delta event carrying `items.end()`; streaming_response narrows them into the public stream.
+        Each model client implements it to send the request and yield one universal event per event
+        of the provider's stream; streaming_response turns them into the public stream.
 
         Args:
             messages: List of universal message dictionaries
@@ -406,6 +311,9 @@ class LLMClient(ABC):
                 with suppress(asyncio.CancelledError):
                     await abort_task
             await stream.aclose()
+
+        for public_event in output.end():
+            yield public_event
 
         stop_event = output.stop()
 

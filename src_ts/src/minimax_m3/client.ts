@@ -19,7 +19,6 @@ import type {
 } from "openai/resources/responses/responses";
 import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
-import { StreamItems } from "../streamItems";
 import {
   EventContentItem,
   EventType,
@@ -250,15 +249,9 @@ export class MiniMaxM3Client extends LLMClient {
   }
 
   /**
-   * Transform one MiniMax stream event into a universal event. An output item is an item, under
-   * its id: output_item.added and the deltas are fragments, output_item.done completes it. A
-   * function call is the exception: its one fragment is its completed item, and
-   * _streamingResponseInternal completes it in the event after.
+   * Transform one MiniMax stream event into a universal event, identifying items by output item id.
    */
-  transformModelOutputToUniEvent(
-    modelOutput: ResponseStreamEvent,
-    items: StreamItems,
-  ): UniEvent {
+  transformModelOutputToUniEvent(modelOutput: ResponseStreamEvent): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
@@ -266,51 +259,49 @@ export class MiniMaxM3Client extends LLMClient {
 
     const minimaxEventType = modelOutput.type;
     if (minimaxEventType === "response.output_text.delta") {
-      contentItems.push(
-        ...items.delta(modelOutput.item_id, {
-          type: "text.delta",
-          text: modelOutput.delta,
-        }),
-      );
+      contentItems.push({
+        type: "text.delta",
+        text: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (minimaxEventType === "response.reasoning_text.delta") {
-      contentItems.push(
-        ...items.delta(modelOutput.item_id, {
-          type: "thinking.delta",
-          thinking: modelOutput.delta,
-        }),
-      );
+      contentItems.push({
+        type: "thinking.delta",
+        thinking: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (minimaxEventType === "response.output_item.added") {
-      // a message or reasoning item is announced with an empty fragment, so a fragment a server
+      // a message or reasoning item is announced with an empty delta, so a fragment a server
       // sends without its item id belongs to the item announced last
-      const item = modelOutput.item;
-      if (item.type === "message") {
-        contentItems.push(
-          ...items.delta(item.id, { type: "text.delta", text: "" }),
-        );
-      } else if (item.type === "reasoning") {
-        contentItems.push(
-          ...items.delta(item.id, { type: "thinking.delta", thinking: "" }),
-        );
+      if (modelOutput.item.type === "message") {
+        contentItems.push({
+          type: "text.delta",
+          text: "",
+          fidelity: { item_id: modelOutput.item.id },
+        });
+      } else if (modelOutput.item.type === "reasoning") {
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: modelOutput.item.id },
+        });
       }
     } else if (minimaxEventType === "response.output_item.done") {
       // MiniMax's tool calls are read from the completed item alone: the argument deltas are
-      // left unread rather than reconciled against this item, and the call is announced with
-      // one fragment carrying the whole arguments, so what a consumer streams and the call it
-      // is handed are one and the same.
+      // left unread rather than reconciled against this item, and the call streams as one
+      // delta carrying the whole arguments, so what a consumer streams and the call it is
+      // handed are one and the same.
       const item = modelOutput.item;
       if (item.type === "function_call") {
-        // a server that sends no item id still sends the call id
-        contentItems.push(
-          ...items.delta(item.id || item.call_id, {
-            type: "tool_call.delta",
-            name: item.name,
-            // a server may complete a call without its arguments field
-            arguments: item.arguments || "",
-            tool_call_id: item.call_id,
-          }),
-        );
-      } else if (item.type === "message" || item.type === "reasoning") {
-        contentItems.push(...items.done(item.id));
+        contentItems.push({
+          type: "tool_call.delta",
+          name: item.name,
+          // a server may complete a call without its arguments field
+          arguments: item.arguments || "",
+          tool_call_id: item.call_id,
+          // a server that sends no item id still sends the call id
+          fidelity: { item_id: item.id || item.call_id },
+        });
       }
     } else if (
       minimaxEventType === "response.completed" ||
@@ -386,32 +377,9 @@ export class MiniMaxM3Client extends LLMClient {
     const stream = await this._client.responses.create(params, {
       signal: options.signal,
     });
-    const items = new StreamItems(this.constructor.name);
     for await (const event of stream) {
-      yield this.transformModelOutputToUniEvent(event, items);
-      if (
-        event.type === "response.output_item.done" &&
-        event.item.type === "function_call"
-      ) {
-        // the call went out whole in the event above, and is completed in an event of its own:
-        // that fragment has reached the caller when its arguments turn out not to parse
-        yield {
-          role: "assistant",
-          event_type: "delta",
-          content_items: items.done(event.item.id || event.item.call_id),
-          usage_metadata: null,
-          finish_reason: null,
-        };
-      }
+      yield this.transformModelOutputToUniEvent(event);
     }
-    // the provider's stream ended: whatever is still open is done
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: items.end(),
-      usage_metadata: null,
-      finish_reason: null,
-    };
   }
 
   /**

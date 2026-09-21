@@ -21,7 +21,6 @@ from openai.types.chat import ChatCompletionChunk, ChatCompletionMessageParam
 
 from ..base_client import LLMClient
 from ..errors import UnsupportedParameterError
-from ..stream_items import StreamItems
 from ..types import (
     EventContentItem,
     EventType,
@@ -251,17 +250,15 @@ class GLM5_3Client(LLMClient):
 
         return openai_messages
 
-    def transform_model_output_to_uni_event(self, model_output: ChatCompletionChunk, items: StreamItems) -> UniEvent:
+    def transform_model_output_to_uni_event(self, model_output: ChatCompletionChunk) -> UniEvent:
         """
         Transform one GLM streaming chunk into a universal event.
 
-        Chat Completions gives an item no identity and never says where one ends: an item goes under
-        the wire field that carries it and runs until a fragment arrives from another field, and a
-        tool call fragment carrying a name is the next call.
+        Chat Completions gives an item no identity, so each delta's item_id is the wire field that
+        carried it: an item runs until a delta arrives from another field, or names the next tool call.
 
         Args:
             model_output: OpenAI streaming chunk
-            items: The items of the stream this event belongs to
 
         Returns:
             Universal event dictionary
@@ -285,52 +282,43 @@ class GLM5_3Client(LLMClient):
             reasoning = getattr(delta, "reasoning", None)
             if reasoning_content and reasoning:
                 # ambiguous origin: record no reasoning_field so a replay sends both fields back
-                content_items.extend(
-                    items.delta("reasoning_content", {"type": "thinking.delta", "thinking": reasoning_content})
+                content_items.append(
+                    {
+                        "type": "thinking.delta",
+                        "thinking": reasoning_content,
+                        "fidelity": {"item_id": "reasoning_content"},
+                    }
                 )
             elif reasoning_content:
-                content_items.extend(
-                    items.delta(
-                        "reasoning_content",
-                        {
-                            "type": "thinking.delta",
-                            "thinking": reasoning_content,
-                            "fidelity": {"reasoning_field": "reasoning_content"},
-                        },
-                    )
+                content_items.append(
+                    {
+                        "type": "thinking.delta",
+                        "thinking": reasoning_content,
+                        "fidelity": {"item_id": "reasoning_content", "reasoning_field": "reasoning_content"},
+                    }
                 )
             elif reasoning:
-                content_items.extend(
-                    items.delta(
-                        "reasoning",
-                        {
-                            "type": "thinking.delta",
-                            "thinking": reasoning,
-                            "fidelity": {"reasoning_field": "reasoning"},
-                        },
-                    )
+                content_items.append(
+                    {
+                        "type": "thinking.delta",
+                        "thinking": reasoning,
+                        "fidelity": {"item_id": "reasoning", "reasoning_field": "reasoning"},
+                    }
                 )
 
             if delta.content:
-                content_items.extend(items.delta("content", {"type": "text.delta", "text": delta.content}))
+                content_items.append({"type": "text.delta", "text": delta.content, "fidelity": {"item_id": "content"}})
 
             if delta.tool_calls:
                 for tool_call in delta.tool_calls:
-                    name = tool_call.function.name or ""
-                    if name:
-                        # a fragment carrying a name is the next call
-                        content_items.extend(items.done("tool_calls"))
-
-                    content_items.extend(
-                        items.delta(
-                            "tool_calls",
-                            {
-                                "type": "tool_call.delta",
-                                "name": name,
-                                "arguments": tool_call.function.arguments or "",
-                                "tool_call_id": tool_call.id or "",
-                            },
-                        )
+                    content_items.append(
+                        {
+                            "type": "tool_call.delta",
+                            "name": tool_call.function.name or "",
+                            "arguments": tool_call.function.arguments or "",
+                            "tool_call_id": tool_call.id or "",
+                            "fidelity": {"item_id": "tool_calls"},
+                        }
                     )
 
             if choice.finish_reason:
@@ -401,18 +389,8 @@ class GLM5_3Client(LLMClient):
         # Stream generate
         stream = await self._client.chat.completions.create(**glm_config, messages=glm_messages)
 
-        items = StreamItems(self.__class__.__name__, sequential=True)
         async for chunk in stream:
-            yield self.transform_model_output_to_uni_event(chunk, items)
-
-        # the provider's stream ended: whatever is still open is done
-        yield {
-            "role": "assistant",
-            "event_type": "delta",
-            "content_items": items.end(),
-            "usage_metadata": None,
-            "finish_reason": None,
-        }
+            yield self.transform_model_output_to_uni_event(chunk)
 
     async def list_models(self) -> list[str]:
         """

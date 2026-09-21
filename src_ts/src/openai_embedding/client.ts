@@ -19,7 +19,6 @@ import type {
 } from "openai/resources/embeddings";
 import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
-import { StreamItems } from "../streamItems";
 import { UniConfig, UniEvent, UniMessage } from "../types";
 
 /**
@@ -93,23 +92,18 @@ export class OpenaiEmbeddingClient extends LLMClient {
   }
 
   /**
-   * Transform an OpenAI Embeddings response into a universal event. A vector is an item of its
-   * own, complete in its one fragment.
+   * Transform an OpenAI Embeddings response into a universal event, one complete item per vector.
    */
   transformModelOutputToUniEvent(
     modelOutput: CreateEmbeddingResponse,
-    items: StreamItems,
   ): UniEvent {
     return {
       role: "assistant",
       event_type: "stop",
-      content_items: modelOutput.data.flatMap((item) => [
-        ...items.delta(undefined, {
-          type: "embedding.delta",
-          embedding: item.embedding,
-        }),
-        ...items.done(),
-      ]),
+      content_items: modelOutput.data.map((item) => ({
+        type: "embedding.delta" as const,
+        embedding: item.embedding,
+      })),
       usage_metadata: {
         cached_tokens: null,
         prompt_tokens: modelOutput.usage?.prompt_tokens ?? null,
@@ -135,10 +129,7 @@ export class OpenaiEmbeddingClient extends LLMClient {
     const result = await this._client.embeddings.create(params, {
       signal: options.signal,
     });
-    yield this.transformModelOutputToUniEvent(
-      result,
-      new StreamItems(this.constructor.name),
-    );
+    yield this.transformModelOutputToUniEvent(result);
   }
 
   /**

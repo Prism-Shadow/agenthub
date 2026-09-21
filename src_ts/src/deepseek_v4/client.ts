@@ -20,7 +20,6 @@ import type {
 } from "openai/resources/responses/responses";
 import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
-import { StreamItems } from "../streamItems";
 import {
   EventContentItem,
   EventType,
@@ -316,13 +315,10 @@ export class DeepSeekV4Client extends LLMClient {
   }
 
   /**
-   * Transform one DeepSeek stream event into a universal event. An output item is an item, under
-   * its id: output_item.added and the deltas are fragments, output_item.done completes it.
+   * Transform one DeepSeek stream event into a universal event, identifying items by output
+   * item id. An item needs no done: it is done when the next one begins or the stream ends.
    */
-  transformModelOutputToUniEvent(
-    modelOutput: ResponseStreamEvent,
-    items: StreamItems,
-  ): UniEvent {
+  transformModelOutputToUniEvent(modelOutput: ResponseStreamEvent): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
     let usageMetadata: UsageMetadata | null = null;
@@ -330,62 +326,51 @@ export class DeepSeekV4Client extends LLMClient {
 
     const deepseekEventType = modelOutput.type;
     if (deepseekEventType === "response.output_text.delta") {
-      contentItems.push(
-        ...items.delta(modelOutput.item_id, {
-          type: "text.delta",
-          text: modelOutput.delta,
-        }),
-      );
+      contentItems.push({
+        type: "text.delta",
+        text: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (deepseekEventType === "response.reasoning_text.delta") {
-      contentItems.push(
-        ...items.delta(modelOutput.item_id, {
-          type: "thinking.delta",
-          thinking: modelOutput.delta,
-        }),
-      );
+      contentItems.push({
+        type: "thinking.delta",
+        thinking: modelOutput.delta,
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (deepseekEventType === "response.output_item.added") {
-      // every item is announced with a fragment, empty unless it carries the call, so a
-      // fragment a server sends without its item id belongs to the item announced last
+      // every item is announced with a delta, empty unless it carries the call, so a fragment
+      // a server sends without its item id belongs to the item announced last
       const item = modelOutput.item;
       if (item.type === "function_call") {
-        // a server that sends no item id still sends the call id
-        contentItems.push(
-          ...items.delta(item.id || item.call_id, {
-            type: "tool_call.delta",
-            name: item.name,
-            arguments: "",
-            tool_call_id: item.call_id,
-          }),
-        );
+        contentItems.push({
+          type: "tool_call.delta",
+          name: item.name,
+          arguments: "",
+          tool_call_id: item.call_id,
+          // a server that sends no item id still sends the call id
+          fidelity: { item_id: item.id || item.call_id },
+        });
       } else if (item.type === "message") {
-        contentItems.push(
-          ...items.delta(item.id, { type: "text.delta", text: "" }),
-        );
+        contentItems.push({
+          type: "text.delta",
+          text: "",
+          fidelity: { item_id: item.id },
+        });
       } else if (item.type === "reasoning") {
-        contentItems.push(
-          ...items.delta(item.id, { type: "thinking.delta", thinking: "" }),
-        );
-      }
-    } else if (deepseekEventType === "response.output_item.done") {
-      const item = modelOutput.item;
-      if (item.type === "function_call") {
-        contentItems.push(...items.done(item.id || item.call_id));
-      } else if (item.type === "message" || item.type === "reasoning") {
-        contentItems.push(...items.done(item.id));
+        contentItems.push({
+          type: "thinking.delta",
+          thinking: "",
+          fidelity: { item_id: item.id },
+        });
       }
     } else if (deepseekEventType === "response.function_call_arguments.delta") {
-      contentItems.push(
-        ...items.delta(modelOutput.item_id, {
-          type: "tool_call.delta",
-          name: "",
-          arguments: modelOutput.delta,
-          tool_call_id: "",
-        }),
-      );
-    } else if (deepseekEventType === "response.function_call_arguments.done") {
-      // the call's output_item.done completes it instead: its item still names the call where
-      // a server leaves the item id off this event, and a call whose output_item.done never
-      // arrives is completed when the stream ends
+      contentItems.push({
+        type: "tool_call.delta",
+        name: "",
+        arguments: modelOutput.delta,
+        tool_call_id: "",
+        fidelity: { item_id: modelOutput.item_id },
+      });
     } else if (
       deepseekEventType === "response.completed" ||
       deepseekEventType === "response.incomplete"
@@ -416,8 +401,10 @@ export class DeepSeekV4Client extends LLMClient {
       [
         "response.created",
         "response.in_progress",
+        "response.output_item.done",
         "response.output_text.done",
         "response.reasoning_text.done",
+        "response.function_call_arguments.done",
         "response.content_part.added",
         "response.content_part.done",
         // gateway heartbeat on long generations; carries no content
@@ -464,18 +451,9 @@ export class DeepSeekV4Client extends LLMClient {
     const stream = await this._client.responses.create(params, {
       signal: options.signal,
     });
-    const items = new StreamItems(this.constructor.name);
     for await (const event of stream) {
-      yield this.transformModelOutputToUniEvent(event, items);
+      yield this.transformModelOutputToUniEvent(event);
     }
-    // the provider's stream ended: whatever is still open is done
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: items.end(),
-      usage_metadata: null,
-      finish_reason: null,
-    };
   }
 
   /**

@@ -12,27 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { isDeepStrictEqual } from "util";
 import { EmptyResponseError, StreamProtocolError } from "./errors";
 import { normalizeLegacyMessages } from "./legacy";
 import { StreamItems } from "./streamItems";
 import {
   ContentItem,
+  DeltaContentItem,
   EventContentItem,
-  Fidelity,
   FinishReason,
   UniConfig,
   UniEvent,
   UniMessage,
   UsageMetadata,
 } from "./types";
-
-/**
- * Whether a content item carries a non-empty fidelity payload.
- */
-function hasFidelity(fidelity?: Fidelity): fidelity is Fidelity {
-  return fidelity != null && Object.keys(fidelity).length > 0;
-}
 
 function deltaEvent(item: EventContentItem): UniEvent {
   return {
@@ -45,118 +37,36 @@ function deltaEvent(item: EventContentItem): UniEvent {
   };
 }
 
-interface OpenItem {
-  kind: string;
-  // the fidelity one of its deltas carried
-  fidelity?: Fidelity;
-  // events held back while an earlier item is still streaming
-  pending: UniEvent[];
-  // set once the item's done item arrived
-  done?: ContentItem;
-}
-
 /**
- * Narrows the events a client yields into the public stream. Items go out one at a time in the
- * order they started, so a caller attributes each delta to the item streaming at that moment: an
- * item that starts while an earlier one is open is held back until the earlier one is done. Every
- * item is checked against the protocol, its `fidelity.item_id` stripped, and the usage and finish
- * reason of the client's stop events merged into the one final stop.
+ * Turns the events a client yields into the public stream. A client yields deltas only; every
+ * one goes out as it arrives, in an event of its own, and `StreamItems` closes each item with its
+ * done item when the next item begins or the stream ends. The usage and finish reason of the
+ * client's stop events are merged into the one final stop.
  */
 class PublicStream {
-  // open item ids, in the order they started
-  private readonly order: string[] = [];
-  private readonly items = new Map<string, OpenItem>();
+  private readonly items: StreamItems;
   private usageMetadata: UsageMetadata | null = null;
   private finishReason: FinishReason | null = null;
   readonly doneItems: ContentItem[] = [];
 
-  constructor(private readonly client: string) {}
-
-  private protocolError(message: string): StreamProtocolError {
-    return new StreamProtocolError({ client: this.client, message });
+  constructor(private readonly client: string) {
+    this.items = new StreamItems(client);
   }
 
-  // a generator, so the events of an item reach the caller even when a later item of the same
-  // client event fails
+  // a generator, so the deltas of an event reach the caller even when a later one fails
   *push(event: UniEvent): Generator<UniEvent> {
     if (
       event.event_type === "delta" &&
       (event.usage_metadata != null || event.finish_reason != null)
     ) {
-      throw this.protocolError(
-        "a delta event carries usage_metadata or finish_reason",
-      );
+      throw new StreamProtocolError({
+        client: this.client,
+        message: "a delta event carries usage_metadata or finish_reason",
+      });
     }
 
-    for (const item of event.content_items) {
-      // item_id is stripped before any other rule runs, so it never reaches the public stream
-      const { item_id: itemId, ...fidelity }: Fidelity =
-        ("fidelity" in item ? item.fidelity : undefined) ?? {};
-      if (typeof itemId !== "string" || itemId === "") {
-        throw this.protocolError(`${item.type} carries no fidelity.item_id`);
-      }
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const { fidelity: withItemId, ...content } = item as {
-        fidelity?: Fidelity;
-      };
-      const stripped = (
-        hasFidelity(fidelity) ? { ...item, fidelity } : content
-      ) as EventContentItem;
-      const [kind, phase] = item.type.split(".");
-      const open = this.items.get(itemId);
-
-      if (phase === "delta") {
-        if (open?.done) {
-          throw this.protocolError(
-            `${item.type} arrived after item ${itemId} was done`,
-          );
-        }
-        if (open && open.kind !== kind) {
-          throw this.protocolError(
-            `${item.type} arrived for item ${itemId}, which streams ${open.kind}`,
-          );
-        }
-        if (
-          !open &&
-          item.type === "tool_call.delta" &&
-          (!item.name || !item.tool_call_id)
-        ) {
-          throw this.protocolError(
-            `the first tool_call.delta of item ${itemId} must carry the name and the tool_call_id`,
-          );
-        }
-        const group = open ?? { kind, pending: [] };
-        if (!open) {
-          this.items.set(itemId, group);
-          this.order.push(itemId);
-        }
-        if (hasFidelity(fidelity)) {
-          if (group.fidelity !== undefined) {
-            throw this.protocolError(`item ${itemId} carried fidelity twice`);
-          }
-          group.fidelity = fidelity;
-        }
-        yield* this.emit(itemId, group, deltaEvent(stripped));
-        continue;
-      }
-
-      if (!open || open.done) {
-        throw this.protocolError(
-          `${item.type} arrived for item ${itemId}, which is not streaming`,
-        );
-      }
-      if (open.kind !== kind) {
-        throw this.protocolError(
-          `${item.type} arrived for item ${itemId}, which streams ${open.kind}`,
-        );
-      }
-      if (!isDeepStrictEqual(open.fidelity ?? {}, fidelity)) {
-        throw this.protocolError(
-          `the fidelity of ${item.type} differs from what item ${itemId} streamed`,
-        );
-      }
-      open.done = stripped as ContentItem;
-      yield* this.flush();
+    for (const delta of event.content_items) {
+      yield* this.emit(this.items.delta(delta as DeltaContentItem));
     }
 
     if (event.usage_metadata) {
@@ -183,38 +93,19 @@ class PublicStream {
     }
   }
 
-  private *emit(
-    itemId: string,
-    group: OpenItem,
-    event: UniEvent,
-  ): Generator<UniEvent> {
-    if (this.order[0] === itemId) {
-      yield event;
-    } else {
-      group.pending.push(event);
-    }
+  /**
+   * The client's stream ended: the item still streaming is done.
+   */
+  *end(): Generator<UniEvent> {
+    yield* this.emit(this.items.end());
   }
 
-  private *flush(): Generator<UniEvent> {
-    while (this.order.length > 0) {
-      const itemId = this.order[0];
-      const group = this.items.get(itemId) as OpenItem;
-      if (group.done === undefined) {
-        break;
+  private *emit(items: EventContentItem[]): Generator<UniEvent> {
+    for (const item of items) {
+      if (item.type.endsWith(".done")) {
+        this.doneItems.push(item as ContentItem);
       }
-
-      this.order.shift();
-      this.items.delete(itemId);
-      yield* group.pending;
-      this.doneItems.push(group.done);
-      yield deltaEvent(group.done);
-    }
-
-    if (this.order.length > 0) {
-      // the item that just reached the front streams from here on
-      const front = this.items.get(this.order[0]) as OpenItem;
-      yield* front.pending;
-      front.pending = [];
+      yield deltaEvent(item);
     }
   }
 
@@ -222,11 +113,6 @@ class PublicStream {
    * Build the stop event once the client's stream ended, rejecting a response that cannot be one.
    */
   stop(): UniEvent {
-    if (this.order.length > 0) {
-      throw this.protocolError(
-        `the stream ended with item ${this.order[0]} still open`,
-      );
-    }
     if (this.usageMetadata === null) {
       throw new Error("Streaming response ended without usage_metadata");
     }
@@ -294,24 +180,21 @@ export abstract class LLMClient {
 
   /**
    * Transform one event of the provider's stream into a universal event, which the base class
-   * narrows into the public stream.
+   * turns into the public stream.
    *
-   * content_items holds what `items` returns, in wire order: `items.delta(id, fragment)` for
-   * every fragment the wire event carries, `items.done(id)` where it says an item ended. Its
-   * event_type is "stop" on the wire events that report usage_metadata and/or finish_reason, in
-   * pieces the base class merges field by field, and "delta" otherwise; a "delta" event carries
-   * neither.
+   * content_items holds the deltas the wire event carries, in wire order, and never a done item:
+   * the base class closes an item when the next one begins or the stream ends. The deltas of one
+   * item are contiguous and carry the same `fidelity.item_id`, the provider's id for the item
+   * where it has one, which never reaches the public stream. Its event_type is "stop" on the wire
+   * events that report usage_metadata and/or finish_reason, in pieces the base class merges field
+   * by field, and "delta" otherwise; a "delta" event carries neither.
    *
    * @param modelOutput - Model-specific output object (streaming chunk)
-   * @param items - The items of the stream this event belongs to
    * @returns Universal event object, an empty delta event when the wire event carries nothing
    *   universal
    */
-  abstract transformModelOutputToUniEvent(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    modelOutput: any,
-    items: StreamItems,
-  ): UniEvent;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  abstract transformModelOutputToUniEvent(modelOutput: any): UniEvent;
 
   /**
    * Concatenate a stream of universal events into a single universal message.
@@ -347,9 +230,8 @@ export abstract class LLMClient {
   /**
    * Internal method to handle streaming response.
    *
-   * Each model client implements it to send the request, create the `StreamItems` of the stream,
-   * yield one universal event per event of the provider's stream, and yield one last delta event
-   * carrying `items.end()`; streamingResponse narrows them into the public stream.
+   * Each model client implements it to send the request and yield one universal event per event
+   * of the provider's stream; streamingResponse turns them into the public stream.
    *
    * @param options - Object containing messages and config
    * @yields Universal events of the streaming response
@@ -397,6 +279,7 @@ export abstract class LLMClient {
     })) {
       yield* output.push(event);
     }
+    yield* output.end();
     const stopEvent = output.stop();
 
     // saved before the stop is yielded: a caller may stop iterating as soon as it sees it

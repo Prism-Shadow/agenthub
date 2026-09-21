@@ -39,9 +39,7 @@ import {
 import * as path from "path";
 import { LLMClient } from "../baseClient";
 import { UnsupportedParameterError } from "../errors";
-import { StreamItems } from "../streamItems";
 import {
-  DeltaContentItem,
   EventContentItem,
   EventType,
   FinishReason,
@@ -630,14 +628,13 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
   /**
    * Transform one generateContent stream chunk into a universal event.
    *
-   * generateContent gives a part no identity and never says where an item ends: an item goes
-   * under the kind of wire part that carries it and runs until a part of another kind arrives.
-   * Every function call and every image is an item of its own, while audio chunks and
-   * consecutive text parts share one.
+   * generateContent gives a part no identity, so each delta's item_id is the kind of wire part
+   * that carried it: an item runs until a part of another kind arrives, except that every
+   * function call and every image is an item of its own, while audio chunks and consecutive text
+   * parts share one.
    */
   transformModelOutputToUniEvent(
     modelOutput: GenerateContentResponse,
-    items: StreamItems,
   ): UniEvent {
     let eventType: EventType = "delta";
     const contentItems: EventContentItem[] = [];
@@ -650,71 +647,46 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
         const fidelity = part.thoughtSignature
           ? { signature: part.thoughtSignature }
           : {};
-        // a part is a fragment of the item under itemId. It completes that item when it arrives
-        // whole, or carries the thoughtSignature: the last thing the API says about a part
-        const push = (
-          itemId: string,
-          fragment: DeltaContentItem,
-          whole: boolean = false,
-        ) => {
-          contentItems.push(...items.delta(itemId, fragment));
-          if (whole || part.thoughtSignature) {
-            contentItems.push(...items.done(itemId));
-          }
-        };
-
         if (part.functionCall) {
-          // generateContent sends a call whole
-          push(
-            "function_call",
-            {
-              type: "tool_call.delta",
-              name: part.functionCall.name ?? "",
-              arguments: JSON.stringify(part.functionCall.args ?? {}),
-              tool_call_id:
-                part.functionCall.id || part.functionCall.name || "",
-              fidelity,
-            },
-            true,
-          );
+          // generateContent sends a call whole, so it streams as one complete delta
+          contentItems.push({
+            type: "tool_call.delta",
+            name: part.functionCall.name ?? "",
+            arguments: JSON.stringify(part.functionCall.args ?? {}),
+            tool_call_id: part.functionCall.id || part.functionCall.name || "",
+            fidelity: { item_id: "function_call", ...fidelity },
+          });
         } else if (part.thought && part.text != null) {
           if (part.text || part.thoughtSignature) {
-            push("thought", {
+            contentItems.push({
               type: "thinking.delta",
               thinking: part.text,
-              fidelity,
+              fidelity: { item_id: "thought", ...fidelity },
             });
           }
         } else if (part.thought && part.inlineData) {
-          push(
-            "inline_thinking",
-            {
-              type: "inline_thinking.delta",
-              data: Buffer.from(part.inlineData.data || "", "base64"),
-              mime_type: part.inlineData.mimeType || "application/octet-stream",
-              fidelity,
-            },
-            true,
-          );
+          contentItems.push({
+            type: "inline_thinking.delta",
+            data: Buffer.from(part.inlineData.data || "", "base64"),
+            mime_type: part.inlineData.mimeType || "application/octet-stream",
+            fidelity: { item_id: "inline_thinking", ...fidelity },
+          });
         } else if (part.inlineData) {
-          const mimeType =
-            part.inlineData.mimeType || "application/octet-stream";
-          const isImage = mimeType.startsWith("image/");
-          push(
-            isImage ? "image" : "inline_data",
-            {
-              type: "inline_data.delta",
-              data: Buffer.from(part.inlineData.data || "", "base64"),
-              mime_type: mimeType,
-              fidelity,
-            },
-            isImage,
-          );
+          contentItems.push({
+            type: "inline_data.delta",
+            data: Buffer.from(part.inlineData.data || "", "base64"),
+            mime_type: part.inlineData.mimeType || "application/octet-stream",
+            fidelity: { item_id: "inline_data", ...fidelity },
+          });
         } else if (part.text != null) {
           // a response ends on an empty text part, which carries something only when it brings
           // the signature
           if (part.text || part.thoughtSignature) {
-            push("text", { type: "text.delta", text: part.text, fidelity });
+            contentItems.push({
+              type: "text.delta",
+              text: part.text,
+              fidelity: { item_id: "text", ...fidelity },
+            });
           }
         } else if (isDebugEnabled()) {
           throw new Error(`Unknown output: ${JSON.stringify(part)}`);
@@ -771,7 +743,6 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
     // Vertex AI embeds one content per call: a second content is a 400 there, and both SDKs refuse
     // to send one. It reports no billable characters either, only a token count per embedding.
     let promptTokens: number | null = null;
-    const items = new StreamItems(this.constructor.name);
     for (const msg of options.messages) {
       const parts: Part[] = [];
       for (const item of msg.content_items) {
@@ -807,17 +778,12 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
       });
 
       const embedding = result.embeddings?.[0];
-      // a vector streams once its call returns, an item of its own complete in its one fragment;
-      // the usage, summed over the calls, follows the last one
+      // a vector streams once its call returns; the usage, summed over the calls, follows the last one
       yield {
         role: "assistant",
         event_type: "delta",
         content_items: [
-          ...items.delta(undefined, {
-            type: "embedding.delta",
-            embedding: embedding?.values ?? [],
-          }),
-          ...items.done(),
+          { type: "embedding.delta", embedding: embedding?.values ?? [] },
         ],
         usage_metadata: null,
         finish_reason: null,
@@ -889,10 +855,9 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
       config: geminiConfig,
     });
 
-    const items = new StreamItems(this.constructor.name, { sequential: true });
     let sawFunctionCall = false;
     for await (const chunk of responseStream) {
-      const event = this.transformModelOutputToUniEvent(chunk, items);
+      const event = this.transformModelOutputToUniEvent(chunk);
       if (event.content_items.some((item) => item.type === "tool_call.delta")) {
         sawFunctionCall = true;
       }
@@ -903,14 +868,6 @@ export class Gemini3_8GenerateContentClient extends LLMClient {
           : event.finish_reason;
       yield { ...event, finish_reason: finishReason };
     }
-    // the provider's stream ended: whatever is still open is done
-    yield {
-      role: "assistant",
-      event_type: "delta",
-      content_items: items.end(),
-      usage_metadata: null,
-      finish_reason: null,
-    };
   }
 
   /**

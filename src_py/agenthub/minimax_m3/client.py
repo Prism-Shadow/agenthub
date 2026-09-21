@@ -21,7 +21,6 @@ from openai.types.responses import ResponseStreamEvent
 
 from ..base_client import LLMClient
 from ..errors import UnsupportedParameterError
-from ..stream_items import StreamItems
 from ..types import (
     EventContentItem,
     EventType,
@@ -199,13 +198,8 @@ class MiniMaxM3Client(LLMClient):
 
         return input_list
 
-    def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent, items: StreamItems) -> UniEvent:
-        """
-        Transform one MiniMax streaming event into a universal event. An output item is an item, under its id:
-        output_item.added and the deltas are fragments, output_item.done completes it. A function call is the
-        exception: its one fragment is its completed item, and _streaming_response_internal completes it in
-        the event after.
-        """
+    def transform_model_output_to_uni_event(self, model_output: ResponseStreamEvent) -> UniEvent:
+        """Transform one MiniMax streaming event into a universal event, identifying items by output item id."""
         event_type: EventType = "delta"
         content_items: list[EventContentItem] = []
         usage_metadata: UsageMetadata | None = None
@@ -213,45 +207,57 @@ class MiniMaxM3Client(LLMClient):
 
         minimax_event_type = model_output.type
         if minimax_event_type == "response.output_text.delta":
-            item_id = getattr(model_output, "item_id", None)
-            content_items.extend(items.delta(item_id, {"type": "text.delta", "text": model_output.delta}))
+            content_items.append(
+                {
+                    "type": "text.delta",
+                    "text": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
+            )
 
         elif minimax_event_type == "response.reasoning_text.delta":
-            item_id = getattr(model_output, "item_id", None)
-            content_items.extend(items.delta(item_id, {"type": "thinking.delta", "thinking": model_output.delta}))
+            content_items.append(
+                {
+                    "type": "thinking.delta",
+                    "thinking": model_output.delta,
+                    "fidelity": {"item_id": getattr(model_output, "item_id", None)},
+                }
+            )
 
         elif minimax_event_type == "response.output_item.added":
-            # a message or reasoning item is announced with an empty fragment, so a fragment a server
+            # a message or reasoning item is announced with an empty delta, so a fragment a server
             # sends without its item id belongs to the item announced last
-            item = model_output.item
-            if item.type == "message":
-                content_items.extend(items.delta(getattr(item, "id", None), {"type": "text.delta", "text": ""}))
-            elif item.type == "reasoning":
-                item_id = getattr(item, "id", None)
-                content_items.extend(items.delta(item_id, {"type": "thinking.delta", "thinking": ""}))
+            if model_output.item.type == "message":
+                content_items.append(
+                    {"type": "text.delta", "text": "", "fidelity": {"item_id": getattr(model_output.item, "id", None)}}
+                )
+            elif model_output.item.type == "reasoning":
+                content_items.append(
+                    {
+                        "type": "thinking.delta",
+                        "thinking": "",
+                        "fidelity": {"item_id": getattr(model_output.item, "id", None)},
+                    }
+                )
 
         elif minimax_event_type == "response.output_item.done":
             # MiniMax's tool calls are read from the completed item alone: the argument deltas are
-            # left unread rather than reconciled against this item, and the call is announced with
-            # one fragment carrying the whole arguments, so what a consumer streams and the call it
-            # is handed are one and the same.
+            # left unread rather than reconciled against this item, and the call streams as one
+            # delta carrying the whole arguments, so what a consumer streams and the call it is
+            # handed are one and the same.
             item = model_output.item
             if item.type == "function_call":
-                # a server that sends no item id still sends the call id
-                content_items.extend(
-                    items.delta(
-                        item.id or item.call_id,
-                        {
-                            "type": "tool_call.delta",
-                            "name": item.name,
-                            # a server may complete a call without its arguments field
-                            "arguments": item.arguments or "",
-                            "tool_call_id": item.call_id,
-                        },
-                    )
+                content_items.append(
+                    {
+                        "type": "tool_call.delta",
+                        "name": item.name,
+                        # a server may complete a call without its arguments field
+                        "arguments": item.arguments or "",
+                        "tool_call_id": item.call_id,
+                        # a server that sends no item id still sends the call id
+                        "fidelity": {"item_id": item.id or item.call_id},
+                    }
                 )
-            elif item.type in ("message", "reasoning"):
-                content_items.extend(items.done(getattr(item, "id", None)))
 
         elif minimax_event_type in ("response.completed", "response.incomplete"):
             event_type = "stop"
@@ -305,28 +311,8 @@ class MiniMaxM3Client(LLMClient):
         input_list = self.transform_uni_message_to_model_input(messages)
 
         stream = await self._client.responses.create(**minimax_config, input=input_list, stream=True)
-        items = StreamItems(self.__class__.__name__)
         async for model_event in stream:
-            yield self.transform_model_output_to_uni_event(model_event, items)
-            if model_event.type == "response.output_item.done" and model_event.item.type == "function_call":
-                # the call went out whole in the event above, and is completed in an event of its own:
-                # that fragment has reached the caller when its arguments turn out not to parse
-                yield {
-                    "role": "assistant",
-                    "event_type": "delta",
-                    "content_items": items.done(model_event.item.id or model_event.item.call_id),
-                    "usage_metadata": None,
-                    "finish_reason": None,
-                }
-
-        # the provider's stream ended: whatever is still open is done
-        yield {
-            "role": "assistant",
-            "event_type": "delta",
-            "content_items": items.end(),
-            "usage_metadata": None,
-            "finish_reason": None,
-        }
+            yield self.transform_model_output_to_uni_event(model_event)
 
     async def list_models(self) -> list[str]:
         """
