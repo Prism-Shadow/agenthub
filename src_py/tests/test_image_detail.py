@@ -198,6 +198,9 @@ IMAGE_DETAIL_CASES = [
     ),
     ImageDetailCase("DeepSeekV4Client", "deepseek-v4-flash-vision-exp", None, "responses", False),
     ImageDetailCase("DeepSeekV4Client", "deepseek-v4.1-flash", None, "responses", False),
+    # A version-free DeepSeek id routes on the family prefix, bare or behind a gateway prefix.
+    ImageDetailCase("DeepSeekV4Client", "deepseek-flash", None, "responses", False),
+    ImageDetailCase("DeepSeekV4Client", "deepseek/deepseek-flash", None, "responses", False),
 ]
 
 OVERSIZED = _data_url(_png(6400, 8608))

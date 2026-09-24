@@ -127,7 +127,12 @@ export class AutoLLMClient extends LLMClient {
       return KimiK3Client;
     } else if (clientType === "minimax-m3") {
       return MiniMaxM3Client;
-    } else if (clientType.includes("deepseek-v4")) {
+    } else if (clientType.replace(/^.*\//, "").startsWith("deepseek-")) {
+      // DeepSeek names every model it serves deepseek-<name>, with a version
+      // (deepseek-v4-pro) or without one (deepseek-flash), so the family routes on that
+      // prefix rather than on a literal per release. Matched against the bare id — the part
+      // after the last "/" — so a gateway prefix (deepseek/, deepseek-ai/) does not change
+      // the verdict, the same rule the DeepSeek client applies to its own text-only ids.
       return DeepSeekV4Client;
     } else if (clientType === "openai-chat-vllm-adapter") {
       // exact match: "openai-chat-vllm-adapter" contains "openai", so the substring
