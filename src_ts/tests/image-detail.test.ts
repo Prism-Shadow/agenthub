@@ -344,6 +344,19 @@ const IMAGE_DETAIL_CASES: ImageDetailCase[] = [
     protocol: "responses",
     shrinks: false,
   },
+  // A version-free DeepSeek id routes on the family prefix, bare or behind a gateway prefix.
+  {
+    expectedClient: "DeepSeekV4Client",
+    model: "deepseek-flash",
+    protocol: "responses",
+    shrinks: false,
+  },
+  {
+    expectedClient: "DeepSeekV4Client",
+    model: "deepseek/deepseek-flash",
+    protocol: "responses",
+    shrinks: false,
+  },
 ];
 
 const OVERSIZED = dataUrl(png(6400, 8608));

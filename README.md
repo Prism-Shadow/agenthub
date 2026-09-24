@@ -695,7 +695,7 @@ Every client speaks one vendor protocol on the wire, whichever `client_type` rea
 | `claude-5`, `claude-4-8`, `claude-4-7`, `claude-4-6`       | `ant-messages`     |
 | `ant-messages`                                             | `ant-messages`     |
 | `gpt-6`, `gpt-5.6`, `gpt-5.5`, `gpt-5.4`                   | `openai-responses` |
-| `deepseek-v4`                                              | `openai-responses` |
+| any `deepseek-*` id (`deepseek-v4`, `deepseek-flash`)      | `openai-responses` |
 | `minimax-m3`                                               | `openai-responses` |
 | `openai-responses`                                         | `openai-responses` |
 | `glm-5.3`, `glm-5.2`, `glm-5.1`                            | `openai-chat`      |

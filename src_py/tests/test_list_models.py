@@ -36,6 +36,7 @@ SERVED_IDS = [
     "claude-sonnet-5",
     "claude-opus-4-6",
     "deepseek-v4",
+    "deepseek-flash",
     "glm-5.3",
     "kimi-k3",
     "gemini-3.7-flash",
@@ -53,7 +54,12 @@ SDK_LIST_CASES = [
         expected=["claude-sonnet-5", "claude-opus-4-6"],
     ),
     ListCase(
-        expected_client="DeepSeekV4Client", model="deepseek-v4", client_type="deepseek-v4", expected=["deepseek-v4"]
+        expected_client="DeepSeekV4Client",
+        model="deepseek-v4",
+        client_type="deepseek-v4",
+        # the whole deepseek- family deduces back to this client, versioned ids and the
+        # version-free ones alike
+        expected=["deepseek-v4", "deepseek-flash"],
     ),
     ListCase(expected_client="GLM5_3Client", model="glm-5.3", client_type="glm-5.3", expected=["glm-5.3"]),
     ListCase(expected_client="KimiK3Client", model="kimi-k3", client_type="kimi-k3", expected=["kimi-k3"]),

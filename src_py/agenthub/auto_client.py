@@ -103,7 +103,12 @@ class AutoLLMClient(LLMClient):
             from .minimax_m3 import MiniMaxM3Client
 
             return MiniMaxM3Client
-        elif "deepseek-v4" in client_type:
+        elif client_type.rsplit("/", 1)[-1].startswith("deepseek-"):
+            # DeepSeek names every model it serves deepseek-<name>, with a version (deepseek-v4-pro)
+            # or without one (deepseek-flash), so the family routes on that prefix rather than on a
+            # literal per release. Matched against the bare id — the part after the last "/" — so a
+            # gateway prefix (deepseek/, deepseek-ai/) does not change the verdict, the same rule the
+            # DeepSeek client applies to its own text-only ids.
             from .deepseek_v4 import DeepSeekV4Client
 
             return DeepSeekV4Client

@@ -30,6 +30,7 @@ const servedIds = [
   "claude-sonnet-5",
   "claude-opus-4-6",
   "deepseek-v4",
+  "deepseek-flash",
   "glm-5.3",
   "kimi-k3",
   "gemini-3.7-flash",
@@ -55,7 +56,9 @@ const SDK_LIST_CASES: ListCase[] = [
     expectedClient: "DeepSeekV4Client",
     model: "deepseek-v4",
     clientType: "deepseek-v4",
-    expected: ["deepseek-v4"],
+    // the whole deepseek- family deduces back to this client, versioned ids and the
+    // version-free ones alike
+    expected: ["deepseek-v4", "deepseek-flash"],
   },
   {
     expectedClient: "GLM5_3Client",
